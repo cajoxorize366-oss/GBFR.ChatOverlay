@@ -166,6 +166,147 @@ public sealed class PartyChatControlCanaryTests
     }
 
     [Fact]
+    public void NetworkLeaveBoundary_QueuesMutedDestroyBeforeGameLeave_AndDoesNotDuplicateIt()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(api, logs.Add, action => action());
+
+        AdvanceToJoined(canary);
+        api.Calls.Clear();
+
+        canary.PrepareForNetworkLeave(Network);
+        canary.PrepareForNetworkLeave(Network);
+
+        Assert.Equal(
+            new[]
+            {
+                "SetAudioInputMuted:True",
+                "DestroyChatControl",
+            },
+            api.Calls);
+        Assert.Equal(PartyChatControlCanaryPhase.Destroying, canary.Phase);
+        Assert.Contains(
+            logs,
+            line => line.Contains(
+                "pre-leave DestroyChatControl queued before Relink PartyNetworkLeaveNetwork",
+                StringComparison.Ordinal));
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlLeftNetwork)
+        {
+            Network = Network,
+            ChatControl = LocalChatControl,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.DestroyChatControlCompleted)
+        {
+            Result = 0,
+            LocalDevice = LocalDevice,
+            ChatControl = LocalChatControl,
+            AsyncIdentifier = canary.DestroyAsyncIdentifier,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlDestroyed)
+        {
+            ChatControl = LocalChatControl,
+        });
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(PartyChatControlCanaryPhase.Completed, canary.Phase);
+        Assert.Contains(logs, line => line.Contains("Stage 2 cleanup complete", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NetworkLeaveBoundary_IgnoresAnUntrackedNetwork()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(api, _ => { }, action => action());
+
+        AdvanceToJoined(canary);
+        api.Calls.Clear();
+
+        canary.PrepareForNetworkLeave((nint)0x7777);
+
+        Assert.Empty(api.Calls);
+        Assert.Equal(PartyChatControlCanaryPhase.JoinedMuted, canary.Phase);
+    }
+
+    [Fact]
+    public void NetworkLeaveBoundary_DestroyErrorFailsClosedWithoutRetrying()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(api, logs.Add, action => action());
+
+        AdvanceToJoined(canary);
+        api.Calls.Clear();
+        api.DestroyChatControlResult = 0x1234;
+
+        canary.PrepareForNetworkLeave(Network);
+        canary.PrepareForNetworkLeave(Network);
+
+        Assert.Equal(
+            new[]
+            {
+                "SetAudioInputMuted:True",
+                "DestroyChatControl",
+            },
+            api.Calls);
+        Assert.Equal(PartyChatControlCanaryPhase.Disabled, canary.Phase);
+        Assert.Contains(
+            logs,
+            line => line.Contains(
+                "pre-leave PartyDeviceDestroyChatControl returned 0x00001234",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NetworkLeaveBoundary_NativeExceptionFailsClosedAndReturnsNormally()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(api, logs.Add, action => action());
+
+        AdvanceToJoined(canary);
+        api.Calls.Clear();
+        api.ThrowOnDestroyChatControl = true;
+
+        var exception = Record.Exception(() => canary.PrepareForNetworkLeave(Network));
+
+        Assert.Null(exception);
+        Assert.Equal(PartyChatControlCanaryPhase.Disabled, canary.Phase);
+        Assert.Contains(
+            logs,
+            line => line.Contains(
+                "pre-leave native teardown threw InvalidOperationException",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void NetworkLeaveBoundary_AsyncDestroyFailureFailsClosed()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(api, logs.Add, action => action());
+
+        AdvanceToJoined(canary);
+        canary.PrepareForNetworkLeave(Network);
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.DestroyChatControlCompleted)
+        {
+            Result = 1,
+            ErrorDetail = 0x4321,
+            LocalDevice = LocalDevice,
+            ChatControl = LocalChatControl,
+            AsyncIdentifier = canary.DestroyAsyncIdentifier,
+        });
+
+        Assert.Equal(PartyChatControlCanaryPhase.Disabled, canary.Phase);
+        Assert.Contains(
+            logs,
+            line => line.Contains(
+                "DestroyChatControlCompleted did not confirm the owned canary operation",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void UnknownStateType_DisablesCanaryWithoutNativeCalls()
     {
         var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
@@ -228,6 +369,49 @@ public sealed class PartyChatControlCanaryTests
         });
     }
 
+    private static void AdvanceToJoined(PartyChatControlCanary canary)
+    {
+        canary.CaptureManager(Manager, "test");
+        ObserveReadySession(canary);
+        canary.OnBatchFinished(Manager);
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.CreateChatControlCompleted)
+        {
+            Result = 0,
+            LocalDevice = LocalDevice,
+            LocalUser = LocalUser,
+            ChatControl = LocalChatControl,
+            AsyncIdentifier = canary.CreateAsyncIdentifier,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlCreated)
+        {
+            ChatControl = LocalChatControl,
+        });
+        canary.Observe(Manager, AudioCompleted(
+            PartyStateChangeType.SetChatAudioInputCompleted,
+            canary.AudioInputAsyncIdentifier));
+        canary.Observe(Manager, AudioCompleted(
+            PartyStateChangeType.SetChatAudioOutputCompleted,
+            canary.AudioOutputAsyncIdentifier));
+        canary.OnBatchFinished(Manager);
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ConnectChatControlCompleted)
+        {
+            Result = 0,
+            Network = Network,
+            ChatControl = LocalChatControl,
+            AsyncIdentifier = canary.ConnectAsyncIdentifier,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlJoinedNetwork)
+        {
+            Network = Network,
+            ChatControl = LocalChatControl,
+        });
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(PartyChatControlCanaryPhase.JoinedMuted, canary.Phase);
+    }
+
     private static PartyStateChangeSnapshot AudioCompleted(
         PartyStateChangeType type,
         nint asyncIdentifier) =>
@@ -255,6 +439,10 @@ public sealed class PartyChatControlCanaryTests
         public uint ExistingLocalChatControlCount { get; init; }
 
         public bool ReportMuted { get; init; } = true;
+
+        public uint DestroyChatControlResult { get; set; }
+
+        public bool ThrowOnDestroyChatControl { get; set; }
 
         public uint GetLocalDevice(nint manager, out nint localDevice)
         {
@@ -284,7 +472,9 @@ public sealed class PartyChatControlCanaryTests
         public uint DestroyChatControl(nint localDevice, nint localChatControl, nint asyncIdentifier)
         {
             Calls.Add("DestroyChatControl");
-            return 0;
+            if (ThrowOnDestroyChatControl)
+                throw new InvalidOperationException("Synthetic destroy failure.");
+            return DestroyChatControlResult;
         }
 
         public uint SetAudioInputMuted(nint localChatControl, bool muted)

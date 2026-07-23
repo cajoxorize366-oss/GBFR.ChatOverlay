@@ -110,13 +110,14 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 2: muted ChatControl canary
 
-- Implemented in `Native/PartyChatControlCanary.cs`, enabled by default for the current external validation build; two-client runtime validation remains outstanding.
+- Implemented in `Native/PartyChatControlCanary.cs` and enabled by default for the current external validation build. Two-client creation, connection and remote ChatControl discovery have been confirmed; explicit local teardown-event validation remains outstanding for the pre-leave cleanup build.
 - Create one local ChatControl for the existing authenticated local user.
 - Keep input muted before selecting system-default input/output.
 - Connect it only to the already joined PartyNetwork.
 - Observe local completion plus remote `ChatControlCreated`/`ChatControlJoinedNetwork` events.
 - Do not grant audio permissions yet; verify join/leave and cleanup on both clients.
-- Native work is deferred until after the game's original `PartyFinishProcessingStateChanges` returns. The canary binds no permission or endpoint-send export and rejects manager/session ambiguity, malformed batches, unknown state types, pre-existing local ChatControls and failed mute verification.
+- Native work discovered from state changes is deferred until after the game's original `PartyFinishProcessingStateChanges` returns. The canary additionally detours Relink's existing `PartyNetworkLeaveNetwork` call: before entering the original function, it queues destruction of the still-muted local ChatControl so Party can return `ChatControlLeftNetwork`, destroy completion and destroyed events through Relink's normal state-change pump. It never starts or consumes a state-change batch itself.
+- The canary binds no permission or endpoint-send export and rejects manager/session ambiguity, malformed batches, unknown state types, pre-existing local ChatControls and failed mute verification.
 
 ### Stage 3: push to talk
 

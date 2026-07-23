@@ -92,6 +92,14 @@ Stage 2 ChatControlCreated (remote/other): chatControl=0x....
 Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x....
 ```
 
-Leave the session normally on both clients. Preserve lines for `ChatControlLeftNetwork`, `DestroyChatControlCompleted`, `ChatControlDestroyed`, `Stage 2 cleanup complete`, and `PartyCleanup completed`. Event interleaving can differ, but the handles in the local completion lines must match the locally owned canary.
+Leave the session normally on both clients. For each successfully joined local canary, the leave path should first include a line equivalent to:
+
+```text
+Stage 2 pre-leave DestroyChatControl queued before Relink PartyNetworkLeaveNetwork: network=0x..., chatControl=0x...; awaiting local left/completed/destroyed events from the game's state-change pump.
+```
+
+Then preserve `ChatControlLeftNetwork (local canary)`, `DestroyChatControlCompleted: result=0`, `ChatControlDestroyed (local canary)`, `Stage 2 cleanup complete`, and `PartyCleanup completed`. Event interleaving can differ, but the handles in the local completion lines must match the locally owned canary. The peer should independently observe the departing control as `remote/other`.
+
+If `Stage 2 manager cleanup reached before local ChatControl teardown completed` appears, preserve the full diagnostic fields. `PartyCleanup completed` still proves the manager's safety fallback ran, but the strict Stage 2 teardown-event check has not passed.
 
 The test fails if either client logs `Stage 2 canary disabled (fail-closed)`, a nonzero Stage 2 result/error, a manager ownership conflict, missing mute verification, or a second local ChatControl. It also fails if matchmaking, native text chat or rendering changes. There must be no permission grant, audio unmute, second `PartyInitialize`, new gameplay endpoint, or `PartyEndpointSendMessage` action from this Mod. Disable `Enable Muted Party ChatControl Canary`, restart, and preserve both full logs after any failure.

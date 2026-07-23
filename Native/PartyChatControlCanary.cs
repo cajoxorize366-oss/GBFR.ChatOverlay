@@ -70,6 +70,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private bool _destroyCompleted;
     private bool _destroyedObserved;
     private bool _teardownRequested;
+    private bool _preLeaveObserved;
     private int _workScheduled;
     private long _generation;
     private int _disposed;
@@ -249,6 +250,127 @@ internal sealed class PartyChatControlCanary : IDisposable
     }
 
     /// <summary>
+    /// Called by the PartyNetworkLeaveNetwork detour before the game's original function runs.
+    /// DestroyChatControl is safe while connected: Party first disconnects it from every network,
+    /// then reports the left/completed/destroyed events through the game's normal state-change pump.
+    /// </summary>
+    public void PrepareForNetworkLeave(nint network)
+    {
+        lock (_apiCallSync)
+        {
+            nint localDevice;
+            nint localChatControl;
+
+            lock (_stateSync)
+            {
+                if (_disposed != 0 || _suspended || !_nativeCallsAllowed)
+                    return;
+                if (_network == nint.Zero || network == nint.Zero || network != _network)
+                    return;
+
+                _preLeaveObserved = true;
+                _networkLeaving = true;
+                _endpointReady = false;
+                _authenticated = false;
+                _teardownRequested = _localChatControl != nint.Zero;
+
+                if (_localChatControl == nint.Zero)
+                {
+                    EnqueueLogLocked(
+                        $"Stage 2 observed Relink PartyNetworkLeaveNetwork for tracked network={Hex(network)} " +
+                        "before a local ChatControl existed; no canary teardown call was needed.");
+                    return;
+                }
+
+                if (_destroyCallBegan || _destroyedObserved)
+                {
+                    EnqueueLogLocked(
+                        $"Stage 2 observed Relink PartyNetworkLeaveNetwork for tracked network={Hex(network)}; " +
+                        "local ChatControl teardown was already in progress.");
+                    return;
+                }
+
+                if (_localDevice == nint.Zero)
+                {
+                    FailClosedLocked(
+                        "Relink began leaving the tracked network while the owned ChatControl had no local device");
+                    return;
+                }
+
+                // Invalidate deferred create/connect/disconnect work before queueing the terminal destroy.
+                // _apiCallSync ensures no canary native call overlaps this pre-leave operation.
+                _generation++;
+                _destroyQueued = true;
+                _phase = PartyChatControlCanaryPhase.Destroying;
+                localDevice = _localDevice;
+                localChatControl = _localChatControl;
+            }
+
+            uint muteResult;
+            uint destroyResult;
+            try
+            {
+                muteResult = _api.SetAudioInputMuted(localChatControl, muted: true);
+                destroyResult = _api.DestroyChatControl(localDevice, localChatControl, _destroyToken);
+            }
+            catch (Exception exception)
+            {
+                lock (_stateSync)
+                {
+                    if (_localChatControl == localChatControl && _localDevice == localDevice)
+                    {
+                        _destroyQueued = false;
+                        _teardownRequested = false;
+                        _sessionFaulted = true;
+                        _nativeCallsAllowed = false;
+                        _phase = PartyChatControlCanaryPhase.Disabled;
+                        _generation++;
+                        EnqueueLogLocked(
+                            $"Stage 2 pre-leave native teardown threw {exception.GetType().Name}: " +
+                            $"{exception.Message}; Relink's original PartyNetworkLeaveNetwork will continue " +
+                            "and Party owns final teardown.");
+                    }
+                }
+                return;
+            }
+
+            lock (_stateSync)
+            {
+                if (_localChatControl != localChatControl || _localDevice != localDevice)
+                    return;
+
+                if (muteResult != Success)
+                {
+                    _sessionFaulted = true;
+                    EnqueueLogLocked(
+                        $"Stage 2 pre-leave PartyChatControlSetAudioInputMuted(true) returned " +
+                        $"0x{muteResult:X8}; destruction was still requested.");
+                }
+
+                if (destroyResult != Success)
+                {
+                    _destroyQueued = false;
+                    _teardownRequested = false;
+                    _sessionFaulted = true;
+                    _nativeCallsAllowed = false;
+                    _phase = PartyChatControlCanaryPhase.Disabled;
+                    _generation++;
+                    EnqueueLogLocked(
+                        $"Stage 2 pre-leave PartyDeviceDestroyChatControl returned 0x{destroyResult:X8}; " +
+                        "Relink's original PartyNetworkLeaveNetwork will continue and Party owns final teardown.");
+                    return;
+                }
+
+                _destroyCallBegan = true;
+                EnqueueLogLocked(
+                    $"Stage 2 pre-leave DestroyChatControl queued before Relink PartyNetworkLeaveNetwork: " +
+                    $"network={Hex(network)}, chatControl={Hex(localChatControl)}; " +
+                    "awaiting local left/completed/destroyed events from the game's state-change pump.");
+            }
+        }
+    }
+
+    /// <summary>
     /// Blocks PartyCleanup only long enough to prevent it racing a canary native call.
     /// No Party API is called from this method.
     /// </summary>
@@ -260,6 +382,16 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 if (_manager != nint.Zero && manager == _manager)
                 {
+                    if (_localChatControl != nint.Zero && !_destroyedObserved)
+                    {
+                        EnqueueLogLocked(
+                            "Stage 2 manager cleanup reached before local ChatControl teardown completed: " +
+                            $"preLeaveObserved={_preLeaveObserved}, leftObserved={_leftObserved}, " +
+                            $"destroyQueued={_destroyQueued}, destroyCallBegan={_destroyCallBegan}, " +
+                            $"destroyCompleted={_destroyCompleted}, destroyedObserved={_destroyedObserved}. " +
+                            "Party owns final teardown.");
+                    }
+
                     _nativeCallsAllowed = false;
                     _teardownRequested = false;
                     _generation++;
@@ -1035,6 +1167,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _destroyCompleted = false;
         _destroyedObserved = false;
         _teardownRequested = false;
+        _preLeaveObserved = false;
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
@@ -1064,6 +1197,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _destroyCompleted = false;
         _destroyedObserved = false;
         _teardownRequested = false;
+        _preLeaveObserved = false;
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }

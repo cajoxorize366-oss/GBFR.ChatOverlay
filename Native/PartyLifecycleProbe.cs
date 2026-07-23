@@ -25,6 +25,7 @@ public sealed class PartyLifecycleProbe
 
     private IHook<PartyInitializeDelegate>? _initializeHook;
     private IHook<PartyCleanupDelegate>? _cleanupHook;
+    private IHook<PartyNetworkLeaveNetworkDelegate>? _leaveNetworkHook;
     private IHook<PartyStartProcessingStateChangesDelegate>? _startProcessingHook;
     private IHook<PartyFinishProcessingStateChangesDelegate>? _finishProcessingHook;
     private PartyChatControlCanary? _chatControlCanary;
@@ -119,6 +120,14 @@ public sealed class PartyLifecycleProbe
                     NativeLibrary.GetExport(module, "PartyCleanup"));
                 _cleanupHook.Activate();
 
+                if (_chatControlCanary is not null)
+                {
+                    _leaveNetworkHook = _hooks.CreateHook<PartyNetworkLeaveNetworkDelegate>(
+                        PartyNetworkLeaveNetwork,
+                        NativeLibrary.GetExport(module, "PartyNetworkLeaveNetwork"));
+                    _leaveNetworkHook.Activate();
+                }
+
                 _startProcessingHook = _hooks.CreateHook<PartyStartProcessingStateChangesDelegate>(
                     PartyStartProcessingStateChanges,
                     NativeLibrary.GetExport(module, "PartyStartProcessingStateChanges"));
@@ -165,6 +174,7 @@ public sealed class PartyLifecycleProbe
             {
                 _initializeHook?.Enable();
                 _cleanupHook?.Enable();
+                _leaveNetworkHook?.Enable();
                 _startProcessingHook?.Enable();
                 _finishProcessingHook?.Enable();
                 _chatControlCanary?.ResumeFailClosed();
@@ -235,6 +245,25 @@ public sealed class PartyLifecycleProbe
         }
 
         return result;
+    }
+
+    private uint PartyNetworkLeaveNetwork(nint network, nint asyncIdentifier)
+    {
+        if (!Volatile.Read(ref _suspended))
+        {
+            try
+            {
+                // This detour runs before Party's original LeaveNetwork body. Queueing destruction here
+                // gives the game's normal state-change pump time to return the local left/destroy events.
+                _chatControlCanary?.PrepareForNetworkLeave(network);
+            }
+            catch (Exception exception)
+            {
+                LogInspectionFailureOnce(exception);
+            }
+        }
+
+        return _leaveNetworkHook!.OriginalFunction(network, asyncIdentifier);
     }
 
     private uint PartyStartProcessingStateChanges(
@@ -436,6 +465,7 @@ public sealed class PartyLifecycleProbe
     {
         _finishProcessingHook?.Disable();
         _startProcessingHook?.Disable();
+        _leaveNetworkHook?.Disable();
         _cleanupHook?.Disable();
         _initializeHook?.Disable();
     }
@@ -444,6 +474,7 @@ public sealed class PartyLifecycleProbe
     {
         _finishProcessingHook = null;
         _startProcessingHook = null;
+        _leaveNetworkHook = null;
         _cleanupHook = null;
         _initializeHook = null;
     }
@@ -470,6 +501,9 @@ public sealed class PartyLifecycleProbe
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyCleanupDelegate(nint handle);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyNetworkLeaveNetworkDelegate(nint network, nint asyncIdentifier);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyStartProcessingStateChangesDelegate(

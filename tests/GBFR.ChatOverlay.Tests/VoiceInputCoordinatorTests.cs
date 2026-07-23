@@ -90,6 +90,40 @@ public sealed class VoiceInputCoordinatorTests
         Assert.Contains("runtime missing", coordinator.StatusText);
     }
 
+    [Fact]
+    public void GlobalWorkerFailureWhileIdle_DoesNotOpenOrReplaceComposer()
+    {
+        var composer = new ChatComposer();
+        composer.SetDraft("keep me");
+        using var worker = new FakeWorker();
+        using var coordinator = new VoiceInputCoordinator(composer, worker);
+        worker.Enqueue(new SttEvent(SttMessageTypes.Error, Error: "worker exited"));
+
+        coordinator.Drain();
+
+        Assert.Equal(VoiceRecognitionState.Unavailable, coordinator.State);
+        Assert.Equal(ChatInputMode.Closed, composer.Mode);
+        Assert.Equal("keep me", composer.Draft);
+    }
+
+    [Fact]
+    public void GlobalWorkerFailureAfterResult_PreservesReviewAndTranscript()
+    {
+        var composer = new ChatComposer();
+        using var worker = new FakeWorker();
+        using var coordinator = new VoiceInputCoordinator(composer, worker);
+        coordinator.TryBeginCapture();
+        var requestId = coordinator.ActiveRequestId;
+        worker.Enqueue(new SttEvent(SttMessageTypes.Result, requestId, Text: "ready draft"));
+        worker.Enqueue(new SttEvent(SttMessageTypes.Error, Error: "worker exited"));
+
+        coordinator.Drain();
+
+        Assert.Equal(VoiceRecognitionState.Review, coordinator.State);
+        Assert.Equal(ChatInputMode.VoiceReview, composer.Mode);
+        Assert.Equal("ready draft", composer.Draft);
+    }
+
     private sealed class FakeWorker : ISttWorkerClient
     {
         private readonly ConcurrentQueue<SttEvent> _events = new();

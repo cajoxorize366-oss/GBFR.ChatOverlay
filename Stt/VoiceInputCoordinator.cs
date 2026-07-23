@@ -132,7 +132,19 @@ public sealed class VoiceInputCoordinator : IDisposable
                     break;
 
                 case SttMessageTypes.Error:
-                    FailActiveRequest(message.Error ?? "The STT worker reported an unknown error.");
+                    var workerError = message.Error ?? "The STT worker reported an unknown error.";
+                    if (message.RequestId == 0 && _activeRequestId <= 0)
+                    {
+                        if (State is VoiceRecognitionState.Idle)
+                        {
+                            State = VoiceRecognitionState.Unavailable;
+                            LastError = workerError;
+                            stateChanged = true;
+                        }
+                        break;
+                    }
+
+                    FailActiveRequest(workerError);
                     draftChanged = true;
                     stateChanged = true;
                     break;

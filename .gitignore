@@ -5,6 +5,7 @@ obj/
 .vs/
 .idea/
 artifacts/
+SttRuntime/
 *.user
 *.suo
 *.nupkg

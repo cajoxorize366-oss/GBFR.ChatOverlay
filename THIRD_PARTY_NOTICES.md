@@ -6,10 +6,5 @@ This project consumes the following packages without vendoring or modifying thei
 - [DearImguiSharp](https://github.com/Sewer56/DearImguiSharp), which wraps cimgui and Dear ImGui.
 - [Dear ImGui](https://github.com/ocornut/imgui), distributed under the MIT license.
 - Reloaded-II interfaces and hooks from the [Reloaded Project](https://github.com/Reloaded-Project).
-- [NAudio 2.2.1](https://github.com/naudio/NAudio), distributed under the MIT license and used only by the isolated Windows microphone worker. See `licenses/NAudio-LICENSE.txt`.
-- [OpenAI Whisper](https://github.com/openai/whisper) `base` multilingual model, distributed under the MIT license. See `licenses/OpenAI-Whisper-LICENSE.txt`.
-- [whisper.cpp 1.9.1](https://github.com/ggml-org/whisper.cpp) Windows x64 runtime, distributed under the MIT license. See `licenses/whisper.cpp-LICENSE.txt`.
 
 The Nenkai [Relink Modding Tools / Overlay](https://github.com/Nenkai/gbfr.utility.modtools) was consulted to validate the Relink-specific DirectX 11 and DirectInput integration approach. No source file from that project is vendored here.
-
-The runtime preparation script pins SHA-256 for both the whisper.cpp archive and `ggml-base.bin`. The model is not committed to Git; it is downloaded into `SttRuntime/` and verified before use.

@@ -6,7 +6,6 @@ using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
-using GBFR.ChatOverlay.Stt;
 
 namespace GBFR.ChatOverlay;
 
@@ -50,7 +49,6 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly ChatOverlayHost? _overlay;
     private readonly DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
-    private readonly VoiceInputCoordinator? _voiceInput;
 
     public Mod(ModContext context)
     {
@@ -60,7 +58,6 @@ public class Mod : ModBase // <= Do not Remove.
         _owner = context.Owner;
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
-        MigrateVoiceLanguageDefault();
 
         var historyCapacity = Math.Clamp(_configuration.HistoryCapacity, 10, 5_000);
         var history = new ChatHistory(historyCapacity);
@@ -118,57 +115,15 @@ public class Mod : ModBase // <= Do not Remove.
             return;
         }
 
-        if (_configuration.EnableVoiceInput)
-        {
-            var assemblyDirectory = Path.GetDirectoryName(typeof(Mod).Assembly.Location)
-                                    ?? AppContext.BaseDirectory;
-            var diagnosticsDirectory = GetVoiceDiagnosticsDirectory(assemblyDirectory);
-            var worker = SttWorkerProcessClient.Create(
-                assemblyDirectory,
-                _configuration.VoiceLanguageCode,
-                _configuration.VoiceMicrophone,
-                _configuration.EnableVoiceDiagnostics,
-                diagnosticsDirectory,
-                _configuration.VoiceCpuThreads,
-                _configuration.VoiceMaximumSeconds,
-                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
-            _voiceInput = new VoiceInputCoordinator(_chatSession.Composer, worker);
-            if (_voiceInput.State is VoiceRecognitionState.Unavailable)
-            {
-                history.Add(
-                    "System",
-                    $"Voice input unavailable: {_voiceInput.StatusText}",
-                    ChatMessageKind.System);
-            }
-            else
-            {
-                history.Add(
-                    "System",
-                    "Local Whisper base voice input ready. Hold U or LB + R3, then review and press Enter.",
-                    ChatMessageKind.System);
-                if (_configuration.EnableVoiceDiagnostics)
-                {
-                    history.Add(
-                        "System",
-                        $"Voice diagnostics are enabled. Evidence directory: {diagnosticsDirectory}",
-                        ChatMessageKind.System);
-                }
-            }
-        }
-
         _overlay = new ChatOverlayHost(
             _chatSession,
             () => _configuration,
-            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
-            _voiceInput);
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
         _directInputKeyboard = new DirectInputKeyboardHook(
             _hooks,
             _overlay.TryRequestOpen,
             _overlay.ShouldCaptureKeyboard,
-            _overlay.TryRequestVoiceCapture,
-            _overlay.RequestVoiceCaptureEnd,
-            _overlay.IsVoiceInputEnabled,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
@@ -186,9 +141,7 @@ public class Mod : ModBase // <= Do not Remove.
     public override void ConfigurationUpdated(Config configuration)
     {
         _configuration = configuration;
-        MigrateVoiceLanguageDefault();
-        _logger.WriteLine(
-            $"[{_modConfig.ModId}] Config updated. Voice worker settings apply after restarting the mod.");
+        _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
     }
 
     public override bool CanSuspend() => _overlay is not null;
@@ -206,14 +159,6 @@ public class Mod : ModBase // <= Do not Remove.
         _directInputKeyboard?.Resume();
         _nativeChatBridge?.Resume();
     }
-
-    public override void Disposing()
-    {
-        _nativeChatBridge?.Suspend();
-        _directInputKeyboard?.Suspend();
-        _overlay?.Shutdown();
-        _voiceInput?.Dispose();
-    }
     #endregion
 
     private async Task InitializeOverlayAsync()
@@ -226,33 +171,6 @@ public class Mod : ModBase // <= Do not Remove.
         {
             _logger.WriteLine($"[{_modConfig.ModId}] Failed to initialize overlay: {exception}");
         }
-    }
-
-    private void MigrateVoiceLanguageDefault()
-    {
-        var previousLanguage = _configuration.VoiceLanguageCode;
-        if (!_configuration.ApplyVoiceLanguageDefaultMigration())
-            return;
-
-        try
-        {
-            _configuration.Save?.Invoke();
-            if (string.Equals(previousLanguage?.Trim(), "auto", StringComparison.OrdinalIgnoreCase))
-            {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Migrated the previous automatic voice-language default to Chinese (zh).");
-            }
-        }
-        catch (Exception exception)
-        {
-            _logger.WriteLine($"[{_modConfig.ModId}] Failed to persist voice-language migration: {exception.Message}");
-        }
-    }
-
-    private string GetVoiceDiagnosticsDirectory(string assemblyDirectory)
-    {
-        var configDirectory = Path.GetDirectoryName(_configuration.FilePath);
-        return Path.GetFullPath(Path.Combine(configDirectory ?? assemblyDirectory, "STT-Debug"));
     }
 
     #region For Exports, Serialization etc.

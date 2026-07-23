@@ -33,15 +33,11 @@
     <None Remove="Reloaded.Trimming.targets" />
     <None Remove="Reloaded.Checks.targets" />
     <Compile Remove="tests/**/*.cs" />
-    <Compile Remove="SttWorker/**/*.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="ModConfig.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Content>
-    <Content Include="SttRuntime/**/*" Condition="Exists('SttRuntime')">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <None Update="Preview.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

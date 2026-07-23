@@ -1,56 +1,11 @@
 ﻿using System.ComponentModel;
-using System.ComponentModel.DataAnnotations;
-using System.Text.Json.Serialization;
 using GBFR.ChatOverlay.Template.Configuration;
 using Reloaded.Mod.Interfaces.Structs;
 
 namespace GBFR.ChatOverlay.Configuration;
 
-public enum VoiceLanguageOption
-{
-    [Display(Name = "中文 (zh)")]
-    Chinese,
-
-    [Display(Name = "日语 (ja)")]
-    Japanese,
-
-    [Display(Name = "英语 (en)")]
-    English,
-
-    [Display(Name = "韩语 (ko)")]
-    Korean,
-
-    [Display(Name = "自动检测 (auto)")]
-    Automatic,
-}
-
-public static class VoiceLanguageOptionExtensions
-{
-    public static string ToWhisperCode(this VoiceLanguageOption language) => language switch
-    {
-        VoiceLanguageOption.Chinese => "zh",
-        VoiceLanguageOption.Japanese => "ja",
-        VoiceLanguageOption.English => "en",
-        VoiceLanguageOption.Korean => "ko",
-        VoiceLanguageOption.Automatic => "auto",
-        _ => "zh",
-    };
-
-    public static VoiceLanguageOption FromWhisperCode(string? language) =>
-        language?.Trim().ToLowerInvariant() switch
-        {
-            "ja" => VoiceLanguageOption.Japanese,
-            "en" => VoiceLanguageOption.English,
-            "ko" => VoiceLanguageOption.Korean,
-            "auto" => VoiceLanguageOption.Automatic,
-            _ => VoiceLanguageOption.Chinese,
-        };
-}
-
 public class Config : Configurable<Config>
 {
-    private const int CurrentVoiceLanguageDefaultVersion = 1;
-
     [DisplayName("Enable Overlay")]
     [Description("Show the chat overlay when the rendering bridge is available.")]
     [DefaultValue(true)]
@@ -95,60 +50,9 @@ public class Config : Configurable<Config>
     public double BackgroundOpacity { get; set; } = 0.55;
 
     [DisplayName("Voice Input")]
-    [Description("Enable local hold-to-talk using U or the controller LB + R3 chord. Restart the mod after changing this setting.")]
-    [DefaultValue(true)]
-    public bool EnableVoiceInput { get; set; } = true;
-
-    [DisplayName("Voice Language")]
-    [Description("Recognition language. Chinese is the default; restart the mod after changing this setting.")]
-    [DefaultValue(VoiceLanguageOption.Chinese)]
-    [JsonIgnore]
-    public VoiceLanguageOption VoiceLanguage
-    {
-        get => VoiceLanguageOptionExtensions.FromWhisperCode(VoiceLanguageCode);
-        set => VoiceLanguageCode = value.ToWhisperCode();
-    }
-
-    [Browsable(false)]
-    [JsonPropertyName("VoiceLanguage")]
-    public string VoiceLanguageCode { get; set; } = "zh";
-
-    [Browsable(false)]
-    public int VoiceLanguageDefaultVersion { get; set; }
-
-    [DisplayName("Voice Microphone")]
-    [Description("Windows microphone endpoint: default, or copy an endpoint ID / exact name from STT-Debug\\microphones.json. Restart after changing it.")]
-    [DefaultValue("default")]
-    public string VoiceMicrophone { get; set; } = "default";
-
-    [DisplayName("Voice Diagnostics")]
-    [Description("Retain microphone recordings and Whisper logs for debugging. Audio is stored on disk; restart after changing it.")]
-    [DefaultValue(true)]
-    public bool EnableVoiceDiagnostics { get; set; } = true;
-
-    [DisplayName("Voice CPU Threads")]
-    [Description("CPU threads used by the isolated Whisper worker. Restart the mod after changing this setting.")]
-    [DefaultValue(4)]
-    [SliderControlParams(minimum: 1.0, maximum: 16.0)]
-    public int VoiceCpuThreads { get; set; } = 4;
-
-    [DisplayName("Maximum Voice Seconds")]
-    [Description("Maximum duration of one hold-to-talk recording.")]
-    [DefaultValue(15)]
-    [SliderControlParams(minimum: 3.0, maximum: 30.0)]
-    public int VoiceMaximumSeconds { get; set; } = 15;
-
-    public bool ApplyVoiceLanguageDefaultMigration()
-    {
-        if (VoiceLanguageDefaultVersion >= CurrentVoiceLanguageDefaultVersion)
-            return false;
-
-        if (string.Equals(VoiceLanguageCode?.Trim(), "auto", StringComparison.OrdinalIgnoreCase))
-            VoiceLanguageCode = VoiceLanguageOption.Chinese.ToWhisperCode();
-
-        VoiceLanguageDefaultVersion = CurrentVoiceLanguageDefaultVersion;
-        return true;
-    }
+    [Description("Reserved for the hold-to-talk speech recognition milestone.")]
+    [DefaultValue(false)]
+    public bool EnableVoiceInput { get; set; }
 }
 
 /// <summary>

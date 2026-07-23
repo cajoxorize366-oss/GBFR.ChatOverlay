@@ -100,7 +100,7 @@ This observation layer also avoids modifying Party endpoint payloads or Relink's
 
 ### Stage 1: lifecycle probe, no voice and no sends
 
-The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enabled by default for external validation; runtime validation remains outstanding.
+The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enabled by default. Host and joining-client logs have confirmed manager capture, create/connect, authentication, endpoint and remote-device lifecycle ordering in a private session.
 
 - Gate on both verified EXE and `PartyWin.dll` hashes.
 - Resolve named exports from the already loaded DLL; never call `PartyInitialize` a second time.
@@ -110,11 +110,13 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 2: muted ChatControl canary
 
+- Implemented in `Native/PartyChatControlCanary.cs`, enabled by default for the current external validation build; two-client runtime validation remains outstanding.
 - Create one local ChatControl for the existing authenticated local user.
 - Keep input muted before selecting system-default input/output.
 - Connect it only to the already joined PartyNetwork.
 - Observe local completion plus remote `ChatControlCreated`/`ChatControlJoinedNetwork` events.
 - Do not grant audio permissions yet; verify join/leave and cleanup on both clients.
+- Native work is deferred until after the game's original `PartyFinishProcessingStateChanges` returns. The canary binds no permission or endpoint-send export and rejects manager/session ambiguity, malformed batches, unknown state types, pre-existing local ChatControls and failed mute verification.
 
 ### Stage 3: push to talk
 

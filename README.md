@@ -4,15 +4,15 @@
 
 ## 当前阶段
 
-项目处于原生聊天桥接完成、联机语音底层研究阶段。目前仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口，以及 Relink 2.0.2 的原生文字聊天收发桥。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。
+项目处于原生聊天桥接完成、Party muted ChatControl 双端验证阶段。目前仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及默认启用的 Stage 2 静音 ChatControl canary。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。
 
 下一步依次完成：
 
-1. 在私密双客户端会话中启用一次 Party 生命周期探针并保存日志。
-2. 验证只连接、不授权音频的 muted ChatControl canary。
-3. canary 通过后，基于 Party ChatControl 实现按键说话与设备选择。
+1. 已用主机/客机日志确认现有 Party manager、认证、网络和 endpoint 生命周期。
+2. 当前验证只连接、始终静音且不授予 Party 聊天权限的 muted ChatControl canary。
+3. 双端 canary 与清理事件通过后，再基于 Party ChatControl 实现按键说话与设备选择。
 
-当前版本不会构造或修改网络包，也不会尝试绕过任何联机保护。原生桥只在 SHA-256 和唯一特征码都匹配已验证的 Relink 2.0.2 可执行文件时启用；否则自动退回本地预览。
+当前版本不会构造或修改网络包，也不会尝试绕过任何联机保护。Stage 2 只复用游戏已经认证的 local user、PartyNetwork 和 local device，创建一个输入预先静音的 ChatControl；不会绑定或调用 `PartyChatControlSetPermissions`。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则自动 fail-closed。
 
 第三方组件及许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

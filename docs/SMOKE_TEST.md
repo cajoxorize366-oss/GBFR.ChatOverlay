@@ -64,3 +64,34 @@ Party lifecycle state EndpointCreated (12).
 Leaving should produce endpoint, device and network leave/destroy events. `EndpointMessageReceived`, text and transcription payload events are deliberately filtered and must not appear in the probe log.
 
 Disable the probe after collecting both logs. If enabling it changes matchmaking, causes a crash, or prevents normal chat, disable the Mod and preserve the Reloaded-II log; do not proceed to the ChatControl canary.
+
+## Stage 2 muted ChatControl canary
+
+The current validation build enables `Enable Muted Party ChatControl Canary` by default. Test only in a private two-client session with the same package installed on both sides. This stage selects the system-default input/output only after synchronously setting and verifying input mute. It never binds or calls `PartyChatControlSetPermissions`, so no peer is authorized to send or receive voice.
+
+On each client, the local path should include lines equivalent to:
+
+```text
+Party lifecycle/Stage 2 canary attached at 0x...; one muted ChatControl may join the existing PartyNetwork, with no chat permissions granted.
+Stage 2 captured authenticated existing session: network=0x..., localUser=0x....
+Stage 2 confirmed Relink's existing gameplay endpoint before canary creation: endpoint=0x....
+Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before system-default I/O selection; PartyChatControlSetPermissions is not bound or called.
+Stage 2 CreateChatControlCompleted: result=0, ...
+Stage 2 ChatControlCreated (local canary): chatControl=0x....
+Stage 2 SetChatAudioInputCompleted: result=0, ... selectionType=1.
+Stage 2 SetChatAudioOutputCompleted: result=0, ... selectionType=1.
+Stage 2 ConnectChatControlCompleted: result=0, ...
+Stage 2 ChatControlJoinedNetwork (local canary): network=0x..., chatControl=0x....
+Stage 2 muted ChatControl canary joined the existing PartyNetwork. Input remains muted and chat permissions remain None.
+```
+
+After both clients are present, each side must also observe its peer without changing permissions:
+
+```text
+Stage 2 ChatControlCreated (remote/other): chatControl=0x....
+Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x....
+```
+
+Leave the session normally on both clients. Preserve lines for `ChatControlLeftNetwork`, `DestroyChatControlCompleted`, `ChatControlDestroyed`, `Stage 2 cleanup complete`, and `PartyCleanup completed`. Event interleaving can differ, but the handles in the local completion lines must match the locally owned canary.
+
+The test fails if either client logs `Stage 2 canary disabled (fail-closed)`, a nonzero Stage 2 result/error, a manager ownership conflict, missing mute verification, or a second local ChatControl. It also fails if matchmaking, native text chat or rendering changes. There must be no permission grant, audio unmute, second `PartyInitialize`, new gameplay endpoint, or `PartyEndpointSendMessage` action from this Mod. Disable `Enable Muted Party ChatControl Canary`, restart, and preserve both full logs after any failure.

@@ -1,0 +1,21 @@
+{
+  "ModId": "GBFR.ChatOverlay",
+  "ModName": "GBFR Chat Overlay",
+  "ModAuthor": "Kuro",
+  "ModVersion": "1.0.0",
+  "ModDescription": "MMO-style chat overlay and input for Granblue Fantasy: Relink.",
+  "ModDll": "GBFR.ChatOverlay.dll",
+  "ModIcon": "Preview.png",
+  "ModR2RManagedDll32": "x86/GBFR.ChatOverlay.dll",
+  "ModR2RManagedDll64": "x64/GBFR.ChatOverlay.dll",
+  "ModNativeDll32": "",
+  "ModNativeDll64": "",
+  "IsLibrary": false,
+  "ReleaseMetadataFileName": "GBFR.ChatOverlay.ReleaseMetadata.json",
+  "PluginData": {},
+  "IsUniversalMod": false,
+  "ModDependencies": [ "reloaded.sharedlib.hooks" ],
+  "OptionalDependencies": [],
+  "SupportedAppId": [],
+  "ProjectUrl": ""
+}

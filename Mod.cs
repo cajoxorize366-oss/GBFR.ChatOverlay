@@ -4,6 +4,7 @@ using GBFR.ChatOverlay.Template;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
+using GBFR.ChatOverlay.Input;
 
 namespace GBFR.ChatOverlay;
 
@@ -45,6 +46,7 @@ public class Mod : ModBase // <= Do not Remove.
 
     private readonly ChatSession _chatSession;
     private readonly ChatOverlayHost? _overlay;
+    private readonly DirectInputKeyboardHook? _directInputKeyboard;
 
     public Mod(ModContext context)
     {
@@ -81,6 +83,21 @@ public class Mod : ModBase // <= Do not Remove.
             _chatSession,
             () => _configuration,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+
+        _directInputKeyboard = new DirectInputKeyboardHook(
+            _hooks,
+            _overlay.TryRequestOpen,
+            _overlay.ShouldCaptureKeyboard,
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+        try
+        {
+            _directInputKeyboard.Initialize();
+        }
+        catch (Exception exception)
+        {
+            _logger.WriteLine($"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
+        }
+
         _ = InitializeOverlayAsync();
     }
 
@@ -93,9 +110,17 @@ public class Mod : ModBase // <= Do not Remove.
 
     public override bool CanSuspend() => _overlay is not null;
 
-    public override void Suspend() => _overlay?.Suspend();
+    public override void Suspend()
+    {
+        _directInputKeyboard?.Suspend();
+        _overlay?.Suspend();
+    }
 
-    public override void Resume() => _overlay?.Resume();
+    public override void Resume()
+    {
+        _overlay?.Resume();
+        _directInputKeyboard?.Resume();
+    }
     #endregion
 
     private async Task InitializeOverlayAsync()

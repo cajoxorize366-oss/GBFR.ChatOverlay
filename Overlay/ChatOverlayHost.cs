@@ -48,7 +48,22 @@ public sealed class ChatOverlayHost
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
-    public bool IsInitialized => _initialized;
+    public bool IsInitialized => Volatile.Read(ref _initialized);
+
+    public bool TryRequestOpen()
+    {
+        if (!Volatile.Read(ref _initialized) ||
+            !_getConfiguration().EnableOverlay ||
+            _session.Composer.IsOpen)
+            return false;
+
+        Interlocked.Exchange(ref _captureKeyboard, 1);
+        Interlocked.Exchange(ref _openRequested, 1);
+        return true;
+    }
+
+    public bool ShouldCaptureKeyboard() =>
+        _getConfiguration().EnableOverlay && Volatile.Read(ref _captureKeyboard) != 0;
 
     public async Task InitializeAsync(IReloadedHooks hooks)
     {
@@ -70,7 +85,6 @@ public sealed class ChatOverlayHost
         try
         {
             await ImguiHook.Create(Render, options).ConfigureAwait(false);
-            _initialized = true;
             try
             {
                 ConfigureFont();
@@ -79,6 +93,7 @@ public sealed class ChatOverlayHost
             {
                 _log($"CJK font setup failed; using the default ImGui font: {exception.Message}");
             }
+            Volatile.Write(ref _initialized, true);
             _log("DirectX 11 ImGui hook initialized.");
         }
         catch
@@ -252,8 +267,7 @@ public sealed class ChatOverlayHost
             (message is WmKeyDown or WmSysKeyDown) &&
             wParam == VirtualKeyY)
         {
-            Interlocked.Exchange(ref _openRequested, 1);
-            Interlocked.Exchange(ref _captureKeyboard, 1);
+            TryRequestOpen();
             Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 1);
             return true;
         }

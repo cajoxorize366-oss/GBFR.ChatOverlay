@@ -5,6 +5,7 @@ namespace GBFR.ChatOverlay.Template.Configuration;
 
 public class Configurator : IConfiguratorV3
 {
+    private const string ModId = "gbfr.qol.chatoverlay";
     private static ConfiguratorMixin _configuratorMixin = new ConfiguratorMixin();
 
     /// <summary>
@@ -30,7 +31,12 @@ public class Configurator : IConfiguratorV3
 
     private IUpdatableConfigurable[] MakeConfigurations()
     {
-        _configurations = _configuratorMixin.MakeConfigurations(ConfigFolder!);
+        var configFolder = ResolveConfigurationDirectory(
+            ConfigFolder,
+            Context.ModConfigPath,
+            AppContext.BaseDirectory);
+        Directory.CreateDirectory(configFolder);
+        _configurations = _configuratorMixin.MakeConfigurations(configFolder);
 
         // Add self-updating to configurations.
         for (int x = 0; x < Configurations.Length; x++)
@@ -72,12 +78,21 @@ public class Configurator : IConfiguratorV3
     /// <summary>
     /// Sets the config directory for the Configurator.
     /// </summary>
-    public void SetConfigDirectory(string configDirectory) => ConfigFolder = configDirectory;
+    public void SetConfigDirectory(string configDirectory)
+    {
+        ConfigFolder = configDirectory;
+        _configurations = null;
+    }
 
     /// <summary>
     /// Specifies additional context for the configurator.
     /// </summary>
-    public void SetContext(in ConfiguratorContext context) => Context = context;
+    public void SetContext(in ConfiguratorContext context)
+    {
+        Context = context;
+        if (string.IsNullOrWhiteSpace(ConfigFolder))
+            _configurations = null;
+    }
 
     /// <summary>
     /// Returns a list of user configurations.
@@ -94,4 +109,27 @@ public class Configurator : IConfiguratorV3
     /// Sets the mod directory for the Configurator.
     /// </summary>
     public void SetModDirectory(string modDirectory) { ModFolder = modDirectory; }
+
+    public static string ResolveConfigurationDirectory(
+        string? configuredDirectory,
+        string? modConfigPath,
+        string launcherBaseDirectory)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredDirectory))
+            return Path.GetFullPath(configuredDirectory);
+
+        if (!string.IsNullOrWhiteSpace(modConfigPath))
+        {
+            var modDirectory = Path.GetDirectoryName(Path.GetFullPath(modConfigPath));
+            var modsDirectory = modDirectory is null ? null : Directory.GetParent(modDirectory);
+            if (modsDirectory?.Parent is not null &&
+                string.Equals(modsDirectory.Name, "Mods", StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.Combine(modsDirectory.Parent.FullName, "User", "Mods", ModId);
+            }
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(launcherBaseDirectory);
+        return Path.Combine(Path.GetFullPath(launcherBaseDirectory), "User", "Mods", ModId);
+    }
 }

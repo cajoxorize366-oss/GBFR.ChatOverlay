@@ -49,6 +49,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly ChatOverlayHost? _overlay;
     private readonly DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
+    private readonly PartyLifecycleProbe? _partyLifecycleProbe;
 
     public Mod(ModContext context)
     {
@@ -58,6 +59,21 @@ public class Mod : ModBase // <= Do not Remove.
         _owner = context.Owner;
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
+
+        if (_hooks is not null && _configuration.EnablePartyLifecycleProbe)
+        {
+            try
+            {
+                _partyLifecycleProbe = new PartyLifecycleProbe(
+                    _hooks,
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+                _partyLifecycleProbe.Initialize();
+            }
+            catch (Exception exception)
+            {
+                _logger.WriteLine($"[{_modConfig.ModId}] Party lifecycle probe unavailable: {exception}");
+            }
+        }
 
         var historyCapacity = Math.Clamp(_configuration.HistoryCapacity, 10, 5_000);
         var history = new ChatHistory(historyCapacity);
@@ -148,6 +164,7 @@ public class Mod : ModBase // <= Do not Remove.
 
     public override void Suspend()
     {
+        _partyLifecycleProbe?.Suspend();
         _nativeChatBridge?.Suspend();
         _directInputKeyboard?.Suspend();
         _overlay?.Suspend();
@@ -158,6 +175,7 @@ public class Mod : ModBase // <= Do not Remove.
         _overlay?.Resume();
         _directInputKeyboard?.Resume();
         _nativeChatBridge?.Resume();
+        _partyLifecycleProbe?.Resume();
     }
     #endregion
 

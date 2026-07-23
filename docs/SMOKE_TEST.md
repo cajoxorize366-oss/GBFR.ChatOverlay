@@ -38,3 +38,26 @@ The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after
 - If Chinese characters render as boxes, record the `Loaded CJK font` path and Windows display language.
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.
 - Hashed quick-chat/stamp records are intentionally ignored by the incoming bridge until their text resolver is hooked.
+
+## Optional Party lifecycle probe
+
+The PlayFab Party probe is disabled by default and never sends Party data. Enable `Enable Party Lifecycle Probe` in the Reloaded-II configuration and restart the Mod only for a short private-session capture.
+
+Expected startup evidence:
+
+```text
+Party lifecycle probe attached at 0x...; observation only, no Party calls or sends.
+Party manager captured from PartyInitialize: 0x....
+```
+
+If Party initialized before the Mod attached, the manager can instead be captured from `PartyStartProcessingStateChanges`. During host/join/leave, preserve the ordered lifecycle lines. The host should include `CreateNewNetworkCompleted`; a joining client should include `ConnectToNetworkCompleted`. Both sides should then show authentication and endpoint lifecycle events such as:
+
+```text
+Party lifecycle state AuthenticateLocalUserCompleted (4).
+Party lifecycle state CreateEndpointCompleted (10).
+Party lifecycle state EndpointCreated (12).
+```
+
+Leaving should produce endpoint, device and network leave/destroy events. `EndpointMessageReceived`, text and transcription payload events are deliberately filtered and must not appear in the probe log.
+
+Disable the probe after collecting both logs. If enabling it changes matchmaking, causes a crash, or prevents normal chat, disable the Mod and preserve the Reloaded-II log; do not proceed to the ChatControl canary.

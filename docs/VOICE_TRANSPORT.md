@@ -100,6 +100,8 @@ This observation layer also avoids modifying Party endpoint payloads or Relink's
 
 ### Stage 1: lifecycle probe, no voice and no sends
 
+The default-off observation probe is implemented in `Native/PartyLifecycleProbe.cs`; runtime validation remains outstanding.
+
 - Gate on both verified EXE and `PartyWin.dll` hashes.
 - Resolve named exports from the already loaded DLL; never call `PartyInitialize` a second time.
 - Log initialize/cleanup, local user, create/connect/leave network, authentication, endpoint creation and state-change types.

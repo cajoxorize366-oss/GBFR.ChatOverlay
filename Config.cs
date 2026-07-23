@@ -16,6 +16,11 @@ public class Config : Configurable<Config>
     [DefaultValue(true)]
     public bool EnableNativeChatBridge { get; set; } = true;
 
+    [DisplayName("Enable Party Lifecycle Probe")]
+    [Description("Attach an observation-only PlayFab Party lifecycle probe. No voice or network data is sent. Changing this setting requires restarting the mod.")]
+    [DefaultValue(false)]
+    public bool EnablePartyLifecycleProbe { get; set; }
+
     [DisplayName("History Capacity")]
     [Description("Maximum number of messages kept in memory. Applied after restarting the mod.")]
     [DefaultValue(200)]
@@ -50,7 +55,7 @@ public class Config : Configurable<Config>
     public double BackgroundOpacity { get; set; } = 0.55;
 
     [DisplayName("Voice Input")]
-    [Description("Reserved for the hold-to-talk speech recognition milestone.")]
+    [Description("Reserved for the PlayFab Party push-to-talk milestone.")]
     [DefaultValue(false)]
     public bool EnableVoiceInput { get; set; }
 }

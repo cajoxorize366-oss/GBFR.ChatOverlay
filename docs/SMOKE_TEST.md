@@ -41,7 +41,7 @@ The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after
 
 ## Optional Party lifecycle probe
 
-The PlayFab Party probe is disabled by default and never sends Party data. Enable `Enable Party Lifecycle Probe` in the Reloaded-II configuration and restart the Mod only for a short private-session capture.
+The PlayFab Party probe is enabled by default for this validation build and never sends Party data. Restart the Mod after changing `Enable Party Lifecycle Probe`; disable it after preserving the private-session capture.
 
 Expected startup evidence:
 

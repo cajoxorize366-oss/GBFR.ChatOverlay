@@ -18,8 +18,8 @@ public class Config : Configurable<Config>
 
     [DisplayName("Enable Party Lifecycle Probe")]
     [Description("Attach an observation-only PlayFab Party lifecycle probe. No voice or network data is sent. Changing this setting requires restarting the mod.")]
-    [DefaultValue(false)]
-    public bool EnablePartyLifecycleProbe { get; set; }
+    [DefaultValue(true)]
+    public bool EnablePartyLifecycleProbe { get; set; } = true;
 
     [DisplayName("History Capacity")]
     [Description("Maximum number of messages kept in memory. Applied after restarting the mod.")]

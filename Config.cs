@@ -21,6 +21,11 @@ public class Config : Configurable<Config>
     [DefaultValue(true)]
     public bool EnablePartyLifecycleProbe { get; set; } = true;
 
+    [DisplayName("Enable Muted Party ChatControl Canary")]
+    [Description("Stage 2 validation: create one muted ChatControl on the existing Party session without granting chat permissions. Both clients need the mod. Changing this setting requires restarting the mod.")]
+    [DefaultValue(true)]
+    public bool EnableMutedPartyChatControlCanary { get; set; } = true;
+
     [DisplayName("History Capacity")]
     [Description("Maximum number of messages kept in memory. Applied after restarting the mod.")]
     [DefaultValue(200)]
@@ -36,7 +41,7 @@ public class Config : Configurable<Config>
         largeChange: 50.0,
         tickFrequency: 100,
         isSnapToTickEnabled: false,
-        tickPlacement:SliderControlTickPlacement.BottomRight,
+        tickPlacement: SliderControlTickPlacement.BottomRight,
         showTextField: true,
         isTextFieldEditable: true,
         textValidationRegex: "\\d{3,4}")]

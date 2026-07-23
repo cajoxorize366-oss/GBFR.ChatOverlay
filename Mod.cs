@@ -60,13 +60,17 @@ public class Mod : ModBase // <= Do not Remove.
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
 
-        if (_hooks is not null && _configuration.EnablePartyLifecycleProbe)
+        if (_hooks is not null &&
+            (_configuration.EnablePartyLifecycleProbe ||
+             _configuration.EnableMutedPartyChatControlCanary))
         {
             try
             {
                 _partyLifecycleProbe = new PartyLifecycleProbe(
                     _hooks,
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                    enableLifecycleLogging: _configuration.EnablePartyLifecycleProbe,
+                    enableMutedChatControlCanary: _configuration.EnableMutedPartyChatControlCanary);
                 _partyLifecycleProbe.Initialize();
             }
             catch (Exception exception)

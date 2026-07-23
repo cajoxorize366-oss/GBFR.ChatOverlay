@@ -18,6 +18,8 @@ public sealed class PartyLifecycleProbe
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Action<string> _log;
+    private readonly bool _enableLifecycleLogging;
+    private readonly bool _enableMutedChatControlCanary;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentQueue<string> _pendingLogs = new();
 
@@ -25,6 +27,7 @@ public sealed class PartyLifecycleProbe
     private IHook<PartyCleanupDelegate>? _cleanupHook;
     private IHook<PartyStartProcessingStateChangesDelegate>? _startProcessingHook;
     private IHook<PartyFinishProcessingStateChangesDelegate>? _finishProcessingHook;
+    private PartyChatControlCanary? _chatControlCanary;
     private nint _partyHandle;
     private bool _initialized;
     private bool _suspended;
@@ -34,10 +37,16 @@ public sealed class PartyLifecycleProbe
     private int _startFailureLogged;
     private int _finishFailureLogged;
 
-    public PartyLifecycleProbe(ReloadedHooksApi hooks, Action<string> log)
+    public PartyLifecycleProbe(
+        ReloadedHooksApi hooks,
+        Action<string> log,
+        bool enableLifecycleLogging = true,
+        bool enableMutedChatControlCanary = false)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _enableLifecycleLogging = enableLifecycleLogging;
+        _enableMutedChatControlCanary = enableMutedChatControlCanary;
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -83,6 +92,23 @@ public sealed class PartyLifecycleProbe
 
             try
             {
+                if (_enableMutedChatControlCanary)
+                {
+                    try
+                    {
+                        _chatControlCanary = new PartyChatControlCanary(
+                            new PartyNativeApi(module),
+                            EnqueueLog);
+                    }
+                    catch (Exception exception)
+                    {
+                        _chatControlCanary = null;
+                        EnqueueLog(
+                            $"Stage 2 muted ChatControl canary unavailable; lifecycle observation remains active: " +
+                            exception.Message);
+                    }
+                }
+
                 _initializeHook = _hooks.CreateHook<PartyInitializeDelegate>(
                     PartyInitialize,
                     NativeLibrary.GetExport(module, "PartyInitialize"));
@@ -104,13 +130,17 @@ public sealed class PartyLifecycleProbe
                 _finishProcessingHook.Activate();
 
                 Volatile.Write(ref _initialized, true);
-                _log(
-                    $"Party lifecycle probe attached at 0x{(nuint)module:X}; observation only, no Party calls or sends.");
+                _log(_chatControlCanary is null
+                    ? $"Party lifecycle probe attached at 0x{(nuint)module:X}; observation only, no Party calls or sends."
+                    : $"Party lifecycle/Stage 2 canary attached at 0x{(nuint)module:X}; " +
+                      "one muted ChatControl may join the existing PartyNetwork, with no chat permissions granted.");
             }
             catch
             {
                 DisableHooks();
                 ClearHooks();
+                _chatControlCanary?.Dispose();
+                _chatControlCanary = null;
                 throw;
             }
         }
@@ -118,6 +148,7 @@ public sealed class PartyLifecycleProbe
 
     public void Suspend()
     {
+        _chatControlCanary?.SuspendBestEffort();
         lock (_lifecycleSync)
         {
             Volatile.Write(ref _suspended, true);
@@ -136,6 +167,7 @@ public sealed class PartyLifecycleProbe
                 _cleanupHook?.Enable();
                 _startProcessingHook?.Enable();
                 _finishProcessingHook?.Enable();
+                _chatControlCanary?.ResumeFailClosed();
             }
             catch
             {
@@ -173,19 +205,27 @@ public sealed class PartyLifecycleProbe
 
     private uint PartyCleanup(nint handle)
     {
+        _chatControlCanary?.BeginManagerCleanup(handle);
         var result = _cleanupHook!.OriginalFunction(handle);
         if (Volatile.Read(ref _suspended))
+        {
+            if (result == 0)
+                Interlocked.CompareExchange(ref _partyHandle, nint.Zero, handle);
+            _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: result == 0);
             return result;
+        }
 
         try
         {
             if (result == 0)
             {
                 Interlocked.CompareExchange(ref _partyHandle, nint.Zero, handle);
+                _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: true);
                 EnqueueLog($"PartyCleanup completed for manager 0x{(nuint)handle:X}.");
             }
             else
             {
+                _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: false);
                 EnqueueLog($"PartyCleanup returned error 0x{result:X8}.");
             }
         }
@@ -223,7 +263,7 @@ public sealed class PartyLifecycleProbe
         try
         {
             CapturePartyHandle(handle, "PartyStartProcessingStateChanges");
-            InspectStateChanges(stateChangeCountOutput, stateChangesOutput);
+            InspectStateChanges(handle, stateChangeCountOutput, stateChangesOutput);
         }
         catch (Exception exception)
         {
@@ -239,46 +279,78 @@ public sealed class PartyLifecycleProbe
         nint stateChanges)
     {
         var result = _finishProcessingHook!.OriginalFunction(handle, stateChangeCount, stateChanges);
+        if (!Volatile.Read(ref _suspended) && result == 0)
+        {
+            try
+            {
+                _chatControlCanary?.OnBatchFinished(handle);
+            }
+            catch (Exception exception)
+            {
+                LogInspectionFailureOnce(exception);
+            }
+        }
         if (!Volatile.Read(ref _suspended) &&
             result != 0 &&
             Interlocked.Exchange(ref _finishFailureLogged, 1) == 0)
         {
+            _chatControlCanary?.DisableFailClosed(
+                $"PartyFinishProcessingStateChanges returned 0x{result:X8}");
             EnqueueLog(
                 $"PartyFinishProcessingStateChanges returned error 0x{result:X8}; further errors are suppressed.");
         }
         return result;
     }
 
-    private void InspectStateChanges(nint stateChangeCountOutput, nint stateChangesOutput)
+    private void InspectStateChanges(
+        nint handle,
+        nint stateChangeCountOutput,
+        nint stateChangesOutput)
     {
         if (stateChangeCountOutput == nint.Zero || stateChangesOutput == nint.Zero)
+        {
+            _chatControlCanary?.DisableFailClosed(
+                "Party returned null state-change output storage");
             return;
+        }
 
         var count = unchecked((uint)Marshal.ReadInt32(stateChangeCountOutput));
         if (count == 0)
             return;
         if (count > MaximumStateChangesPerBatch)
         {
+            _chatControlCanary?.DisableFailClosed(
+                $"Party state batch count {count} exceeded the safety limit");
             EnqueueLog($"Party state batch count {count} exceeds the probe safety limit; batch ignored.");
             return;
         }
 
         var stateChanges = Marshal.ReadIntPtr(stateChangesOutput);
         if (stateChanges == nint.Zero)
+        {
+            _chatControlCanary?.DisableFailClosed(
+                "Party returned a non-empty state batch with a null array");
             return;
+        }
 
         for (var index = 0u; index < count; index++)
         {
             var stateChange = Marshal.ReadIntPtr(stateChanges, checked((int)(index * (uint)nint.Size)));
             if (stateChange == nint.Zero)
+            {
+                _chatControlCanary?.DisableFailClosed(
+                    $"Party state batch entry {index} was null");
                 continue;
+            }
 
-            var stateType = unchecked((uint)Marshal.ReadInt32(stateChange));
-            if (PartyStateChangeCatalog.IsLifecycle(stateType))
+            var snapshot = PartyStateChangeReader.Read(stateChange);
+            if (_enableLifecycleLogging && PartyStateChangeCatalog.IsLifecycle(snapshot.Type))
             {
                 EnqueueLog(
-                    $"Party lifecycle state {PartyStateChangeCatalog.GetName(stateType)} ({stateType}).");
+                    $"Party lifecycle state {PartyStateChangeCatalog.GetName(snapshot.Type)} ({snapshot.Type}).");
             }
+
+            _chatControlCanary?.Observe(handle, snapshot);
         }
     }
 
@@ -287,17 +359,30 @@ public sealed class PartyLifecycleProbe
         if (handle == nint.Zero)
             return;
 
-        var previous = Interlocked.Exchange(ref _partyHandle, handle);
-        if (previous != handle)
+        var previous = Interlocked.CompareExchange(ref _partyHandle, handle, nint.Zero);
+        if (previous == nint.Zero)
         {
             EnqueueLog(
-                $"Party manager captured from {source}: 0x{(nuint)handle:X}" +
-                (previous == nint.Zero ? "." : $" (replaced 0x{(nuint)previous:X})."));
+                $"Party manager captured from {source}: 0x{(nuint)handle:X}.");
+            _chatControlCanary?.CaptureManager(handle, source);
+        }
+        else if (previous == handle)
+        {
+            _chatControlCanary?.CaptureManager(handle, source);
+        }
+        else
+        {
+            EnqueueLog(
+                $"Party manager ownership conflict at {source}: retained 0x{(nuint)previous:X}, " +
+                $"rejected 0x{(nuint)handle:X}; Stage 2 will fail closed.");
+            _chatControlCanary?.CaptureManager(handle, source);
         }
     }
 
     private void LogInspectionFailureOnce(Exception exception)
     {
+        _chatControlCanary?.DisableFailClosed(
+            $"Party state inspection threw {exception.GetType().Name}: {exception.Message}");
         if (Interlocked.Exchange(ref _inspectionFailureLogged, 1) == 0)
         {
             EnqueueLog(

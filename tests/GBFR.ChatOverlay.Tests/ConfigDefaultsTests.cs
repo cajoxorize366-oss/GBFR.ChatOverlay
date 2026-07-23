@@ -12,6 +12,12 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
+    public void MutedPartyChatControlCanary_IsEnabledForStage2ValidationBuilds()
+    {
+        Assert.True(new Config().EnableMutedPartyChatControlCanary);
+    }
+
+    [Fact]
     public void Configurator_UsesExplicitConfigurationDirectory()
     {
         var configured = Path.Combine(Path.GetTempPath(), "gbfr-explicit-config");

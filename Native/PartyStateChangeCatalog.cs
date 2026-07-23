@@ -63,6 +63,8 @@ public enum PartyStateChangeType : uint
 
 public static class PartyStateChangeCatalog
 {
+    public static bool IsKnown(uint value) => Enum.IsDefined((PartyStateChangeType)value);
+
     public static string GetName(uint value)
     {
         var type = (PartyStateChangeType)value;

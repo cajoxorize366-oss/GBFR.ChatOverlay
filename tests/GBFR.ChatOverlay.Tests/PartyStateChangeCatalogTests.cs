@@ -29,6 +29,25 @@ public sealed class PartyStateChangeCatalogTests
 
     [Theory]
     [InlineData(0u)]
+    [InlineData(31u)]
+    [InlineData(60u)]
+    public void IsKnown_AcceptsOfficialParty11012Values(uint value)
+    {
+        Assert.True(PartyStateChangeCatalog.IsKnown(value));
+    }
+
+    [Theory]
+    [InlineData(24u)]
+    [InlineData(30u)]
+    [InlineData(44u)]
+    [InlineData(61u)]
+    public void IsKnown_RejectsReservedAndUnknownValues(uint value)
+    {
+        Assert.False(PartyStateChangeCatalog.IsKnown(value));
+    }
+
+    [Theory]
+    [InlineData(0u)]
     [InlineData(2u)]
     [InlineData(12u)]
     [InlineData(19u)]

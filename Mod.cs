@@ -3,6 +3,7 @@ using Reloaded.Mod.Interfaces;
 using GBFR.ChatOverlay.Template;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
+using GBFR.ChatOverlay.Overlay;
 
 namespace GBFR.ChatOverlay;
 
@@ -43,6 +44,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly IModConfig _modConfig;
 
     private readonly ChatSession _chatSession;
+    private readonly ChatOverlayHost? _overlay;
 
     public Mod(ModContext context)
     {
@@ -54,13 +56,32 @@ public class Mod : ModBase // <= Do not Remove.
         _modConfig = context.ModConfig;
 
         var historyCapacity = Math.Clamp(_configuration.HistoryCapacity, 10, 5_000);
-        _chatSession = new ChatSession(
-            new ChatHistory(historyCapacity),
-            new ChatComposer(),
-            new UnavailableChatTransport());
+        var history = new ChatHistory(historyCapacity);
+        history.Add(
+            "System",
+            "GBFR Chat Overlay loaded. Press Y to open local preview chat.",
+            ChatMessageKind.System);
+        history.Add(
+            "System",
+            "Relink chat send/receive is not connected yet; preview messages stay on this PC.",
+            ChatMessageKind.System);
 
-        _logger.WriteLine(
-            $"[{_modConfig.ModId}] Chat core initialized; rendering and game chat bridges are not attached yet.");
+        _chatSession = new ChatSession(
+            history,
+            new ChatComposer(),
+            new LocalPreviewChatTransport());
+
+        if (_hooks is null)
+        {
+            _logger.WriteLine($"[{_modConfig.ModId}] Reloaded.Hooks is unavailable; overlay disabled.");
+            return;
+        }
+
+        _overlay = new ChatOverlayHost(
+            _chatSession,
+            () => _configuration,
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+        _ = InitializeOverlayAsync();
     }
 
     #region Standard Overrides
@@ -69,7 +90,25 @@ public class Mod : ModBase // <= Do not Remove.
         _configuration = configuration;
         _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
     }
+
+    public override bool CanSuspend() => _overlay is not null;
+
+    public override void Suspend() => _overlay?.Suspend();
+
+    public override void Resume() => _overlay?.Resume();
     #endregion
+
+    private async Task InitializeOverlayAsync()
+    {
+        try
+        {
+            await _overlay!.InitializeAsync(_hooks!).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.WriteLine($"[{_modConfig.ModId}] Failed to initialize overlay: {exception}");
+        }
+    }
 
     #region For Exports, Serialization etc.
 #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.

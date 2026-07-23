@@ -46,6 +46,8 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.ILLink.Tasks" Version="8.0.3" />
+    <PackageReference Include="Reloaded.Imgui.Hook" Version="4.1.0" />
+    <PackageReference Include="Reloaded.Imgui.Hook.Direct3D11" Version="1.0.2" />
     <PackageReference Include="Reloaded.Mod.Interfaces" Version="2.4.0" ExcludeAssets="runtime" />
     <PackageReference Include="Reloaded.SharedLib.Hooks" Version="1.9.0" />
   </ItemGroup>

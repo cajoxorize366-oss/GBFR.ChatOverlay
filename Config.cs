@@ -12,7 +12,7 @@ public class Config : Configurable<Config>
     public bool EnableOverlay { get; set; } = true;
 
     [DisplayName("History Capacity")]
-    [Description("Maximum number of messages kept in memory.")]
+    [Description("Maximum number of messages kept in memory. Applied after restarting the mod.")]
     [DefaultValue(200)]
     public int HistoryCapacity { get; set; } = 200;
 

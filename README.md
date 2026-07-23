@@ -4,11 +4,11 @@
 
 ## 当前阶段
 
-项目处于原生聊天桥与本地语音输入的实机验证阶段。目前仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及隔离进程运行的 Whisper `base` 多语言语音识别。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；按住 `U` 或手柄 `LB + R3` 可以录音，松开后识别结果会进入可编辑草稿。语音语言默认固定为中文，也可在配置列表中选择日语、英语、韩语或自动检测。
+项目处于原生聊天桥与本地语音输入的实机验证阶段。目前仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及隔离进程运行的 Whisper `base` 多语言语音识别。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；按住 `U` 或手柄 `LB + R3` 可以录音，松开后识别结果会进入可编辑草稿。语音语言默认固定为中文，也可选择日语、英语、韩语或自动检测；麦克风可按 Windows endpoint 名称或 ID 指定。
 
 下一步依次完成：
 
-1. 实机验证键盘 `U` 与 XInput 手柄 `LB + R3` 的录音、取消和中英日识别。
+1. 使用 debug 留档实机验证键盘 `U` 与 XInput 手柄 `LB + R3` 的设备选择、录音、取消和中英日识别。
 2. 根据实测延迟决定是否把每次启动 CLI 升级为常驻 whisper.cpp 推理服务。
 3. 解析原版哈希快捷消息，并用玩家表补全稳定的发送者名称。
 
@@ -16,7 +16,7 @@
 
 第三方组件及许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-Relink 2.0.2 的实机检查见 [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md)，语音验证见 [docs/STT_VALIDATION.md](docs/STT_VALIDATION.md)，聊天收发逆向边界见 [docs/CHAT_BRIDGE.md](docs/CHAT_BRIDGE.md)。
+Relink 2.0.2 的实机检查见 [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md)，语音验证见 [docs/STT_VALIDATION.md](docs/STT_VALIDATION.md)，debug 包的麦克风选择、留档内容和隐私说明见 [docs/STT_DEBUG.md](docs/STT_DEBUG.md)，聊天收发逆向边界见 [docs/CHAT_BRIDGE.md](docs/CHAT_BRIDGE.md)。
 
 ## 构建
 

@@ -11,6 +11,11 @@ public class Config : Configurable<Config>
     [DefaultValue(true)]
     public bool EnableOverlay { get; set; } = true;
 
+    [DisplayName("Enable Native Chat Bridge")]
+    [Description("Connect directly to supported Relink chat functions. Changing this setting requires restarting the mod.")]
+    [DefaultValue(true)]
+    public bool EnableNativeChatBridge { get; set; } = true;
+
     [DisplayName("History Capacity")]
     [Description("Maximum number of messages kept in memory. Applied after restarting the mod.")]
     [DefaultValue(200)]

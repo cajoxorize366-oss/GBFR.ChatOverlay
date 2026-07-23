@@ -105,6 +105,13 @@ public sealed class ChatOverlayHost
 
     public void Suspend()
     {
+        _session.Composer.Cancel();
+        Interlocked.Exchange(ref _openRequested, 0);
+        Interlocked.Exchange(ref _captureKeyboard, 0);
+        Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
+        _releaseCaptureFrames = 0;
+        _focusInputNextFrame = false;
+        _statusText = null;
         if (_initialized)
             ImguiHook.Disable();
     }
@@ -117,6 +124,7 @@ public sealed class ChatOverlayHost
 
     private void Render()
     {
+        _session.DrainIncoming();
         var configuration = _getConfiguration();
         if (!configuration.EnableOverlay)
         {
@@ -135,7 +143,7 @@ public sealed class ChatOverlayHost
             _session.Composer.OpenKeyboard();
             SyncInputBufferFromDraft();
             _focusInputNextFrame = true;
-            _statusText = "Local preview: the Relink chat bridge is not attached yet.";
+            _statusText = _session.TransportStatusText;
         }
 
         if (_session.Composer.IsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))

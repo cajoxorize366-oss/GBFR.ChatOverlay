@@ -5,6 +5,7 @@ using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
 using GBFR.ChatOverlay.Input;
+using GBFR.ChatOverlay.Native;
 
 namespace GBFR.ChatOverlay;
 
@@ -47,6 +48,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly ChatSession _chatSession;
     private readonly ChatOverlayHost? _overlay;
     private readonly DirectInputKeyboardHook? _directInputKeyboard;
+    private readonly RelinkChatBridge? _nativeChatBridge;
 
     public Mod(ModContext context)
     {
@@ -61,17 +63,51 @@ public class Mod : ModBase // <= Do not Remove.
         var history = new ChatHistory(historyCapacity);
         history.Add(
             "System",
-            "GBFR Chat Overlay loaded. Press Y to open local preview chat.",
+            "GBFR Chat Overlay loaded. Press Y to open chat.",
             ChatMessageKind.System);
-        history.Add(
-            "System",
-            "Relink chat send/receive is not connected yet; preview messages stay on this PC.",
-            ChatMessageKind.System);
+
+        IChatTransport transport = new LocalPreviewChatTransport();
+        IIncomingChatSource? incoming = null;
+        var transportStatus = "Local preview: the Relink chat bridge is not attached.";
+        if (_hooks is not null && _configuration.EnableNativeChatBridge)
+        {
+            try
+            {
+                _nativeChatBridge = new RelinkChatBridge(
+                    _hooks,
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+                _nativeChatBridge.Initialize();
+                transport = _nativeChatBridge;
+                incoming = _nativeChatBridge;
+                transportStatus = "Native Relink chat connected (2.0.2).";
+                history.Add(
+                    "System",
+                    "Native Relink chat send/receive bridge connected for game version 2.0.2.",
+                    ChatMessageKind.System);
+            }
+            catch (Exception exception)
+            {
+                _logger.WriteLine($"[{_modConfig.ModId}] Native chat bridge unavailable: {exception}");
+                history.Add(
+                    "System",
+                    "Native chat bridge validation failed; messages remain in local preview.",
+                    ChatMessageKind.System);
+            }
+        }
+        else
+        {
+            history.Add(
+                "System",
+                "Native chat bridge is disabled or Reloaded.Hooks is unavailable; messages remain local.",
+                ChatMessageKind.System);
+        }
 
         _chatSession = new ChatSession(
             history,
             new ChatComposer(),
-            new LocalPreviewChatTransport());
+            transport,
+            incoming: incoming,
+            transportStatusText: transportStatus);
 
         if (_hooks is null)
         {
@@ -112,6 +148,7 @@ public class Mod : ModBase // <= Do not Remove.
 
     public override void Suspend()
     {
+        _nativeChatBridge?.Suspend();
         _directInputKeyboard?.Suspend();
         _overlay?.Suspend();
     }
@@ -120,6 +157,7 @@ public class Mod : ModBase // <= Do not Remove.
     {
         _overlay?.Resume();
         _directInputKeyboard?.Resume();
+        _nativeChatBridge?.Resume();
     }
     #endregion
 

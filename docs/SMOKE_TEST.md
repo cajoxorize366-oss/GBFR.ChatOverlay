@@ -14,6 +14,7 @@ The Reloaded-II log should contain messages equivalent to:
 [gbfr.qol.chatoverlay] IDirectInputDevice8::GetDeviceState hooked.
 [gbfr.qol.chatoverlay] Loaded CJK font: ...
 [gbfr.qol.chatoverlay] DirectX 11 ImGui hook initialized.
+[gbfr.qol.chatoverlay] STT worker ready; Whisper base model hash verified.
 ```
 
 The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after the game initializes DirectInput.
@@ -29,6 +30,8 @@ The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after
 7. While the input field is open, press movement and combat keys. The game should not respond to them.
 8. Press Escape. The input field should close, and controls should resume after held keys have been released.
 9. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
+10. Hold `U`, speak, and release. Confirm `Recording` changes to `Transcribing` and the result becomes an editable draft.
+11. Repeat with an XInput-visible controller by holding `LB + R3`.
 
 ## Failure handling
 

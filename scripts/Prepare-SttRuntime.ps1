@@ -86,6 +86,17 @@ $whisperOutput = Join-Path $runtimeRoot "whisper"
 $modelOutput = Join-Path $runtimeRoot "models"
 $workerOutput = Join-Path $runtimeRoot "worker"
 $licensesOutput = Join-Path $runtimeRoot "licenses"
+
+$resolvedRuntimePrefix = $runtimeRoot.TrimEnd('\') + '\'
+foreach ($outputDirectory in @($whisperOutput, $modelOutput, $workerOutput, $licensesOutput)) {
+    $resolvedOutput = [IO.Path]::GetFullPath($outputDirectory)
+    if (-not $resolvedOutput.StartsWith($resolvedRuntimePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clear an output directory outside the STT runtime."
+    }
+    if (Test-Path -LiteralPath $resolvedOutput) {
+        Remove-Item -LiteralPath $resolvedOutput -Recurse -Force
+    }
+}
 New-Item -ItemType Directory -Force -Path $whisperOutput, $modelOutput, $workerOutput, $licensesOutput | Out-Null
 
 $requiredWhisperFiles = @("whisper-cli.exe", "whisper.dll", "ggml.dll", "ggml-base.dll")
@@ -104,6 +115,8 @@ dotnet publish $workerProject `
     --configuration $Configuration `
     --runtime win-x64 `
     --self-contained false `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
     --output $workerOutput
 if ($LASTEXITCODE -ne 0) {
     throw "STT worker publish failed with exit code $LASTEXITCODE."

@@ -6,7 +6,6 @@ using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
 using Reloaded.Hooks.ReloadedII.Interfaces;
 using Reloaded.Imgui.Hook;
-using Reloaded.Imgui.Hook.Direct3D11;
 using Reloaded.Imgui.Hook.Implementations;
 
 namespace GBFR.ChatOverlay.Overlay;
@@ -31,6 +30,8 @@ public sealed class ChatOverlayHost
     private int _openRequested;
     private int _captureKeyboard;
     private int _swallowActivationKeyUntilRelease;
+    private int _wndProcDisabled;
+    private int _wndProcFailureLogged;
     private int _releaseCaptureFrames;
     private bool _focusInputNextFrame;
     private bool _windowOpen = true;
@@ -79,7 +80,7 @@ public sealed class ChatOverlayHost
             EnableViewports = false,
             IgnoreWindowUnactivate = false,
             CustomWndProcHandlerPointer = GetCustomWndProcPointer(),
-            Implementations = new List<IImguiHook> { new ImguiHookDx11() },
+            Implementations = new List<IImguiHook> { new SafeImguiHookDx11(_log) },
         };
 
         try
@@ -341,10 +342,48 @@ public sealed class ChatOverlayHost
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     private static unsafe nint CustomWndProc(nint hWnd, uint message, nint wParam, nint lParam)
     {
-        ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
-        if (s_activeHost?.ShouldCaptureWindowMessage(message, wParam) is true)
-            return nint.Zero;
+        var host = s_activeHost;
+        if (host is not null && Volatile.Read(ref host._wndProcDisabled) == 0)
+        {
+            try
+            {
+                ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
+                if (host.ShouldCaptureWindowMessage(message, wParam))
+                    return nint.Zero;
+            }
+            catch (Exception exception)
+            {
+                host.DisableCustomWndProc("ImGui/input handling", exception);
+            }
+        }
 
-        return WndProcHook.Instance.Hook.OriginalFunction.Value.Invoke(hWnd, message, wParam, lParam);
+        try
+        {
+            return WndProcHook.Instance.Hook.OriginalFunction.Value.Invoke(hWnd, message, wParam, lParam);
+        }
+        catch (Exception exception)
+        {
+            host?.DisableCustomWndProc("original window procedure", exception);
+            return nint.Zero;
+        }
+    }
+
+    private void DisableCustomWndProc(string stage, Exception exception)
+    {
+        Interlocked.Exchange(ref _wndProcDisabled, 1);
+        if (Interlocked.Exchange(ref _wndProcFailureLogged, 1) != 0)
+            return;
+
+        try
+        {
+            _log(
+                $"Custom WndProc disabled after {stage} failed: " +
+                $"{exception.GetType().Name} (0x{unchecked((uint)exception.HResult):X8}): " +
+                $"{exception.Message}. Game window messages will continue through the original handler.");
+        }
+        catch
+        {
+            // A logger must not let an exception cross an unmanaged callback.
+        }
     }
 }

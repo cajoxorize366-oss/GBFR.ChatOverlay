@@ -2,7 +2,7 @@
   "ModId": "gbfr.qol.chatoverlay",
   "ModName": "GBFR Chat Overlay",
   "ModAuthor": "Kuro",
-  "ModVersion": "0.2.0",
+  "ModVersion": "0.2.1",
   "ModDescription": "MMO-style chat overlay with native chat and local push-to-talk for Granblue Fantasy: Relink.",
   "ModDll": "GBFR.ChatOverlay.dll",
   "ModIcon": "Preview.png",

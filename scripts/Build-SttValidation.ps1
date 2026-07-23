@@ -9,7 +9,9 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $validationRoot = Join-Path $repoRoot "artifacts\validation"
 $modsRoot = Join-Path $validationRoot "Mods"
 $modOutput = Join-Path $modsRoot "GBFR.ChatOverlay"
-$archivePath = Join-Path $validationRoot "GBFR.ChatOverlay-0.2.0-stt-base.zip"
+$sourceModConfig = Get-Content -LiteralPath (Join-Path $repoRoot "ModConfig.json") -Raw |
+    ConvertFrom-Json
+$archivePath = Join-Path $validationRoot "GBFR.ChatOverlay-$($sourceModConfig.ModVersion)-stt-base.zip"
 $expectedModelSha256 = "60ED5BC3DD14EEA856493D334349B405782DDCAF0028D4B5DF4088345FBA2EFE"
 
 & (Join-Path $PSScriptRoot "Prepare-SttRuntime.ps1") -Configuration Release

@@ -60,6 +60,7 @@ public class Mod : ModBase // <= Do not Remove.
         _owner = context.Owner;
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
+        MigrateVoiceLanguageDefault();
 
         var historyCapacity = Math.Clamp(_configuration.HistoryCapacity, 10, 5_000);
         var history = new ChatHistory(historyCapacity);
@@ -123,7 +124,7 @@ public class Mod : ModBase // <= Do not Remove.
                                     ?? AppContext.BaseDirectory;
             var worker = SttWorkerProcessClient.Create(
                 assemblyDirectory,
-                _configuration.VoiceLanguage,
+                _configuration.VoiceLanguageCode,
                 _configuration.VoiceCpuThreads,
                 _configuration.VoiceMaximumSeconds,
                 message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
@@ -174,6 +175,7 @@ public class Mod : ModBase // <= Do not Remove.
     public override void ConfigurationUpdated(Config configuration)
     {
         _configuration = configuration;
+        MigrateVoiceLanguageDefault();
         _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
     }
 
@@ -211,6 +213,27 @@ public class Mod : ModBase // <= Do not Remove.
         catch (Exception exception)
         {
             _logger.WriteLine($"[{_modConfig.ModId}] Failed to initialize overlay: {exception}");
+        }
+    }
+
+    private void MigrateVoiceLanguageDefault()
+    {
+        var previousLanguage = _configuration.VoiceLanguageCode;
+        if (!_configuration.ApplyVoiceLanguageDefaultMigration())
+            return;
+
+        try
+        {
+            _configuration.Save?.Invoke();
+            if (string.Equals(previousLanguage?.Trim(), "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Migrated the previous automatic voice-language default to Chinese (zh).");
+            }
+        }
+        catch (Exception exception)
+        {
+            _logger.WriteLine($"[{_modConfig.ModId}] Failed to persist voice-language migration: {exception.Message}");
         }
     }
 

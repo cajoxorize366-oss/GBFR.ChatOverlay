@@ -15,6 +15,7 @@ public static class SttRuntimeManifest
     public const string RuntimeDirectoryName = "SttRuntime";
     public const string WhisperVersion = "1.9.1";
     public const string ModelName = "base";
+    public const string DefaultLanguageCode = "zh";
 
     public const string ModelSha256 = "60ED5BC3DD14EEA856493D334349B405782DDCAF0028D4B5DF4088345FBA2EFE";
 
@@ -64,11 +65,11 @@ public static class SttRuntimeManifest
     private static string NormalizeLanguage(string? language)
     {
         if (string.IsNullOrWhiteSpace(language))
-            return "auto";
+            return DefaultLanguageCode;
 
         var value = language.Trim().ToLowerInvariant();
         return value.Length <= 16 && value.All(character => char.IsAsciiLetter(character) || character is '-' or '_')
             ? value
-            : "auto";
+            : DefaultLanguageCode;
     }
 }

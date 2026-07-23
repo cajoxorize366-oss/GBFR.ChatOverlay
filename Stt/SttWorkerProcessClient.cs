@@ -52,6 +52,9 @@ public sealed class SttWorkerProcessClient : ISttWorkerClient
         AddArgument(startInfo, "--model", options.ModelFile);
         AddArgument(startInfo, "--model-sha256", options.ModelSha256);
         AddArgument(startInfo, "--language", options.Language);
+        AddArgument(startInfo, "--device", options.MicrophoneSelector);
+        AddArgument(startInfo, "--diagnostics", options.DiagnosticsEnabled.ToString());
+        AddArgument(startInfo, "--diagnostics-directory", options.DiagnosticsDirectory);
         AddArgument(startInfo, "--threads", options.ThreadCount.ToString());
         AddArgument(startInfo, "--max-seconds", options.MaximumCaptureSeconds.ToString());
         AddArgument(startInfo, "--work-directory", Path.Combine(options.RuntimeRoot, "work"));
@@ -81,6 +84,9 @@ public sealed class SttWorkerProcessClient : ISttWorkerClient
     public static ISttWorkerClient Create(
         string modDirectory,
         string language,
+        string? microphoneSelector,
+        bool diagnosticsEnabled,
+        string diagnosticsDirectory,
         int threadCount,
         int maximumCaptureSeconds,
         Action<string> log)
@@ -88,6 +94,9 @@ public sealed class SttWorkerProcessClient : ISttWorkerClient
         if (!SttRuntimeManifest.TryResolve(
                 modDirectory,
                 language,
+                microphoneSelector,
+                diagnosticsEnabled,
+                diagnosticsDirectory,
                 threadCount,
                 maximumCaptureSeconds,
                 out var options,

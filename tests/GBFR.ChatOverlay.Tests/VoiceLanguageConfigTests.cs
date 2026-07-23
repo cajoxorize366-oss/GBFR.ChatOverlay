@@ -12,6 +12,8 @@ public sealed class VoiceLanguageConfigTests
 
         Assert.Equal(VoiceLanguageOption.Chinese, configuration.VoiceLanguage);
         Assert.Equal("zh", configuration.VoiceLanguageCode);
+        Assert.Equal("default", configuration.VoiceMicrophone);
+        Assert.True(configuration.EnableVoiceDiagnostics);
     }
 
     [Theory]
@@ -60,5 +62,21 @@ public sealed class VoiceLanguageConfigTests
 
         Assert.Contains("\"VoiceLanguage\": \"ja\"", json, StringComparison.Ordinal);
         Assert.DoesNotContain("VoiceLanguageCode", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void JsonKeepsMicrophoneAndDiagnosticsSettings()
+    {
+        var configuration = new Config
+        {
+            VoiceMicrophone = "USB Microphone",
+            EnableVoiceDiagnostics = false,
+        };
+
+        var json = JsonSerializer.Serialize(configuration, Config.SerializerOptions);
+        var roundTrip = JsonSerializer.Deserialize<Config>(json, Config.SerializerOptions)!;
+
+        Assert.Equal("USB Microphone", roundTrip.VoiceMicrophone);
+        Assert.False(roundTrip.EnableVoiceDiagnostics);
     }
 }

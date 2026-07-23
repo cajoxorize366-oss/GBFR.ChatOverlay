@@ -8,6 +8,7 @@ internal sealed class SttWorkerHost : IAsyncDisposable
     private readonly object _stateSync = new();
     private readonly WorkerOptions _options;
     private readonly ProtocolWriter _protocol;
+    private readonly WorkerDiagnostics _diagnostics;
     private readonly WhisperCliTranscriber _transcriber;
     private MicrophoneCapture? _capture;
     private CancellationTokenSource? _transcriptionCancellation;
@@ -15,11 +16,15 @@ internal sealed class SttWorkerHost : IAsyncDisposable
     private long _activeRequestId;
     private int _shutdown;
 
-    public SttWorkerHost(WorkerOptions options, ProtocolWriter protocol)
+    public SttWorkerHost(
+        WorkerOptions options,
+        ProtocolWriter protocol,
+        WorkerDiagnostics diagnostics)
     {
         _options = options;
         _protocol = protocol;
-        _transcriber = new WhisperCliTranscriber(options);
+        _diagnostics = diagnostics;
+        _transcriber = new WhisperCliTranscriber(options, diagnostics);
     }
 
     public async Task HandleAsync(SttCommand command)
@@ -99,9 +104,11 @@ internal sealed class SttWorkerHost : IAsyncDisposable
         }
 
         var capture = new MicrophoneCapture(
-            _options.WorkDirectory,
+            _diagnostics.WorkDirectory,
             requestId,
-            _options.MaximumCaptureSeconds);
+            _options.MaximumCaptureSeconds,
+            _options.DeviceSelector,
+            _diagnostics);
         capture.MaximumDurationReached += () => BeginTranscription(requestId);
         lock (_stateSync)
             _capture = capture;
@@ -109,6 +116,7 @@ internal sealed class SttWorkerHost : IAsyncDisposable
         try
         {
             capture.Start();
+            _diagnostics.Log($"request={requestId} recording state entered");
             _protocol.Write(new SttEvent(SttMessageTypes.Recording, requestId));
         }
         catch (Exception exception)
@@ -122,6 +130,7 @@ internal sealed class SttWorkerHost : IAsyncDisposable
                 }
             }
             await capture.DisposeAsync().ConfigureAwait(false);
+            _diagnostics.Log($"request={requestId} recording failed: {exception}");
             _protocol.Write(new SttEvent(SttMessageTypes.Error, requestId, Error: exception.Message));
         }
     }
@@ -156,8 +165,18 @@ internal sealed class SttWorkerHost : IAsyncDisposable
         {
             _protocol.Write(new SttEvent(SttMessageTypes.Transcribing, requestId));
             audioPath = await capture.StopAndNormalizeAsync(cancellation.Token).ConfigureAwait(false);
-            var transcript = await _transcriber.TranscribeAsync(audioPath, cancellation.Token)
+            var transcript = await _transcriber.TranscribeAsync(audioPath, requestId, cancellation.Token)
                 .ConfigureAwait(false);
+            _diagnostics.WriteJson(
+                $"request-{requestId}-result.json",
+                new
+                {
+                    requestId,
+                    transcript,
+                    elapsedMilliseconds = stopwatch.ElapsedMilliseconds,
+                    language = _options.Language,
+                    deviceSelector = _options.DeviceSelector,
+                });
             _protocol.Write(new SttEvent(
                 SttMessageTypes.Result,
                 requestId,
@@ -166,10 +185,13 @@ internal sealed class SttWorkerHost : IAsyncDisposable
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
+            _diagnostics.Log($"request={requestId} transcription cancelled");
             _protocol.Write(new SttEvent(SttMessageTypes.Cancelled, requestId));
         }
         catch (Exception exception)
         {
+            _diagnostics.Log(
+                $"request={requestId} transcription failed elapsedMs={stopwatch.ElapsedMilliseconds}: {exception}");
             _protocol.Write(new SttEvent(
                 SttMessageTypes.Error,
                 requestId,
@@ -178,7 +200,7 @@ internal sealed class SttWorkerHost : IAsyncDisposable
         }
         finally
         {
-            if (audioPath is not null)
+            if (audioPath is not null && !_diagnostics.PreserveArtifacts)
                 TryDelete(audioPath);
             await capture.DisposeAsync().ConfigureAwait(false);
             lock (_stateSync)

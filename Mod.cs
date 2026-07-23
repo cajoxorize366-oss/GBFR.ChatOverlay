@@ -122,9 +122,13 @@ public class Mod : ModBase // <= Do not Remove.
         {
             var assemblyDirectory = Path.GetDirectoryName(typeof(Mod).Assembly.Location)
                                     ?? AppContext.BaseDirectory;
+            var diagnosticsDirectory = GetVoiceDiagnosticsDirectory(assemblyDirectory);
             var worker = SttWorkerProcessClient.Create(
                 assemblyDirectory,
                 _configuration.VoiceLanguageCode,
+                _configuration.VoiceMicrophone,
+                _configuration.EnableVoiceDiagnostics,
+                diagnosticsDirectory,
                 _configuration.VoiceCpuThreads,
                 _configuration.VoiceMaximumSeconds,
                 message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
@@ -142,6 +146,13 @@ public class Mod : ModBase // <= Do not Remove.
                     "System",
                     "Local Whisper base voice input ready. Hold U or LB + R3, then review and press Enter.",
                     ChatMessageKind.System);
+                if (_configuration.EnableVoiceDiagnostics)
+                {
+                    history.Add(
+                        "System",
+                        $"Voice diagnostics are enabled. Evidence directory: {diagnosticsDirectory}",
+                        ChatMessageKind.System);
+                }
             }
         }
 
@@ -176,7 +187,8 @@ public class Mod : ModBase // <= Do not Remove.
     {
         _configuration = configuration;
         MigrateVoiceLanguageDefault();
-        _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
+        _logger.WriteLine(
+            $"[{_modConfig.ModId}] Config updated. Voice worker settings apply after restarting the mod.");
     }
 
     public override bool CanSuspend() => _overlay is not null;
@@ -235,6 +247,12 @@ public class Mod : ModBase // <= Do not Remove.
         {
             _logger.WriteLine($"[{_modConfig.ModId}] Failed to persist voice-language migration: {exception.Message}");
         }
+    }
+
+    private string GetVoiceDiagnosticsDirectory(string assemblyDirectory)
+    {
+        var configDirectory = Path.GetDirectoryName(_configuration.FilePath);
+        return Path.GetFullPath(Path.Combine(configDirectory ?? assemblyDirectory, "STT-Debug"));
     }
 
     #region For Exports, Serialization etc.

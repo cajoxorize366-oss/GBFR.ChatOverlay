@@ -116,6 +116,16 @@ public class Config : Configurable<Config>
     [Browsable(false)]
     public int VoiceLanguageDefaultVersion { get; set; }
 
+    [DisplayName("Voice Microphone")]
+    [Description("Windows microphone endpoint: default, or copy an endpoint ID / exact name from STT-Debug\\microphones.json. Restart after changing it.")]
+    [DefaultValue("default")]
+    public string VoiceMicrophone { get; set; } = "default";
+
+    [DisplayName("Voice Diagnostics")]
+    [Description("Retain microphone recordings and Whisper logs for debugging. Audio is stored on disk; restart after changing it.")]
+    [DefaultValue(true)]
+    public bool EnableVoiceDiagnostics { get; set; } = true;
+
     [DisplayName("Voice CPU Threads")]
     [Description("CPU threads used by the isolated Whisper worker. Restart the mod after changing this setting.")]
     [DefaultValue(4)]

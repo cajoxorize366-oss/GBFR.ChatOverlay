@@ -53,6 +53,63 @@ public sealed class SttRuntimeManifestTests
         }
     }
 
+    [Fact]
+    public void DebugLaunchOptionsPreserveMicrophoneAndDiagnosticsSettings()
+    {
+        var modDirectory = CreateFakeRuntime();
+        var diagnosticsDirectory = Path.Combine(modDirectory, "diagnostics");
+        try
+        {
+            Assert.True(SttRuntimeManifest.TryResolve(
+                modDirectory,
+                "zh",
+                "  USB Microphone  ",
+                diagnosticsEnabled: true,
+                diagnosticsDirectory,
+                threadCount: 8,
+                maximumCaptureSeconds: 20,
+                out var options,
+                out var error));
+
+            Assert.Null(error);
+            Assert.Equal("USB Microphone", options!.MicrophoneSelector);
+            Assert.True(options.DiagnosticsEnabled);
+            Assert.Equal(Path.GetFullPath(diagnosticsDirectory), options.DiagnosticsDirectory);
+        }
+        finally
+        {
+            Directory.Delete(modDirectory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void EmptyMicrophoneSelectionFallsBackToWindowsDefault(string? selector)
+    {
+        var modDirectory = CreateFakeRuntime();
+        try
+        {
+            Assert.True(SttRuntimeManifest.TryResolve(
+                modDirectory,
+                "zh",
+                selector,
+                diagnosticsEnabled: false,
+                Path.Combine(modDirectory, "diagnostics"),
+                threadCount: 4,
+                maximumCaptureSeconds: 15,
+                out var options,
+                out _));
+
+            Assert.Equal(AudioCaptureDeviceSelector.DefaultSelector, options!.MicrophoneSelector);
+        }
+        finally
+        {
+            Directory.Delete(modDirectory, recursive: true);
+        }
+    }
+
     private static string CreateFakeRuntime()
     {
         var modDirectory = Path.Combine(

@@ -11,12 +11,15 @@ internal static class Program
         Console.InputEncoding = new UTF8Encoding(false);
         Console.OutputEncoding = new UTF8Encoding(false);
         var protocol = new ProtocolWriter();
+        WorkerDiagnostics? diagnostics = null;
 
         try
         {
             var options = WorkerOptions.Parse(args);
+            diagnostics = new WorkerDiagnostics(options);
             await ValidateRuntimeAsync(options).ConfigureAwait(false);
-            await using var host = new SttWorkerHost(options, protocol);
+            diagnostics.Log("Whisper model hash verified.");
+            await using var host = new SttWorkerHost(options, protocol, diagnostics);
 
             protocol.Write(new SttEvent(SttMessageTypes.Ready));
             while (await Console.In.ReadLineAsync().ConfigureAwait(false) is { } line)
@@ -40,7 +43,10 @@ internal static class Program
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine(exception);
+            if (diagnostics is null)
+                Console.Error.WriteLine(exception);
+            else
+                diagnostics.Log($"worker fatal error: {exception}");
             try
             {
                 protocol.Write(new SttEvent(SttMessageTypes.Error, Error: exception.Message));

@@ -13,6 +13,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\Stt\AudioCaptureDeviceSelection.cs" Link="AudioCaptureDeviceSelection.cs" />
     <Compile Include="..\Stt\SttProtocol.cs" Link="SttProtocol.cs" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>

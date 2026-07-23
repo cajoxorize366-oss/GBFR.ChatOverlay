@@ -1,5 +1,6 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using GBFR.ChatOverlay.Stt;
 
 namespace GBFR.ChatOverlay.SttWorker;
 
@@ -9,22 +10,36 @@ internal sealed class MicrophoneCapture : IAsyncDisposable
     private readonly string _rawPath;
     private readonly string _normalizedPath;
     private readonly TimeSpan _maximumDuration;
+    private readonly long _requestId;
+    private readonly string _deviceSelector;
+    private readonly WorkerDiagnostics _diagnostics;
     private readonly CancellationTokenSource _durationCancellation = new();
     private readonly TaskCompletionSource<StoppedEventArgs> _stopped =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private WasapiCapture? _capture;
+    private AudioDeviceLease? _deviceLease;
+    private AudioCaptureDeviceSelection? _deviceSelection;
+    private string? _rawWaveFormat;
     private WaveFileWriter? _writer;
     private Task? _durationTask;
     private int _stopRequested;
     private int _disposed;
 
-    public MicrophoneCapture(string workDirectory, long requestId, int maximumCaptureSeconds)
+    public MicrophoneCapture(
+        string workDirectory,
+        long requestId,
+        int maximumCaptureSeconds,
+        string deviceSelector,
+        WorkerDiagnostics diagnostics)
     {
         var stem = $"capture-{requestId}-{Guid.NewGuid():N}";
         _rawPath = Path.Combine(workDirectory, stem + ".raw.wav");
         _normalizedPath = Path.Combine(workDirectory, stem + ".wav");
         _maximumDuration = TimeSpan.FromSeconds(maximumCaptureSeconds);
+        _requestId = requestId;
+        _deviceSelector = deviceSelector;
+        _diagnostics = diagnostics;
     }
 
     public event Action? MaximumDurationReached;
@@ -35,27 +50,46 @@ internal sealed class MicrophoneCapture : IAsyncDisposable
         if (_capture is not null)
             throw new InvalidOperationException("Microphone capture has already started.");
 
-        var capture = new WasapiCapture();
-        var writer = new WaveFileWriter(_rawPath, capture.WaveFormat);
-        capture.DataAvailable += CaptureDataAvailable;
-        capture.RecordingStopped += CaptureRecordingStopped;
-        _capture = capture;
-        _writer = writer;
-
+        AudioDeviceLease? lease = null;
+        WasapiCapture? capture = null;
+        WaveFileWriter? writer = null;
         try
         {
+            lease = AudioDeviceCatalog.Resolve(_deviceSelector);
+            capture = new WasapiCapture(lease.Device);
+            writer = new WaveFileWriter(_rawPath, capture.WaveFormat);
+            capture.DataAvailable += CaptureDataAvailable;
+            capture.RecordingStopped += CaptureRecordingStopped;
+            _deviceLease = lease;
+            _deviceSelection = lease.Selection;
+            _rawWaveFormat = capture.WaveFormat.ToString();
+            _capture = capture;
+            _writer = writer;
+
+            if (!string.IsNullOrWhiteSpace(lease.Selection.Warning))
+                _diagnostics.Log($"request={_requestId} {lease.Selection.Warning}");
+            _diagnostics.Log(
+                $"request={_requestId} recording device=\"{lease.Selection.Device.Name}\" " +
+                $"id=\"{lease.Selection.Device.Id}\" format=\"{_rawWaveFormat}\" raw=\"{_rawPath}\"");
             capture.StartRecording();
             _durationTask = MonitorMaximumDurationAsync();
         }
-        catch
+        catch (Exception exception)
         {
-            capture.DataAvailable -= CaptureDataAvailable;
-            capture.RecordingStopped -= CaptureRecordingStopped;
-            writer.Dispose();
-            capture.Dispose();
+            if (capture is not null)
+            {
+                capture.DataAvailable -= CaptureDataAvailable;
+                capture.RecordingStopped -= CaptureRecordingStopped;
+            }
+            writer?.Dispose();
+            capture?.Dispose();
+            lease?.Dispose();
             _capture = null;
             _writer = null;
-            DeleteIfPresent(_rawPath);
+            _deviceLease = null;
+            if (!_diagnostics.PreserveArtifacts)
+                DeleteIfPresent(_rawPath);
+            _diagnostics.Log($"request={_requestId} microphone start failed: {exception}");
             throw;
         }
     }
@@ -78,7 +112,9 @@ internal sealed class MicrophoneCapture : IAsyncDisposable
             WaveFileWriter.CreateWaveFile(_normalizedPath, resampler);
         }
 
-        DeleteIfPresent(_rawPath);
+        WriteAudioDiagnostics();
+        if (!_diagnostics.PreserveArtifacts)
+            DeleteIfPresent(_rawPath);
         return _normalizedPath;
     }
 
@@ -93,8 +129,17 @@ internal sealed class MicrophoneCapture : IAsyncDisposable
         }
         finally
         {
-            DeleteIfPresent(_rawPath);
-            DeleteIfPresent(_normalizedPath);
+            if (!_diagnostics.PreserveArtifacts)
+            {
+                DeleteIfPresent(_rawPath);
+                DeleteIfPresent(_normalizedPath);
+            }
+            else
+            {
+                _diagnostics.Log(
+                    $"request={_requestId} capture cancelled; retained raw=\"{_rawPath}\" " +
+                    $"normalized=\"{_normalizedPath}\"");
+            }
         }
     }
 
@@ -137,6 +182,8 @@ internal sealed class MicrophoneCapture : IAsyncDisposable
             }
             capture.Dispose();
             _capture = null;
+            _deviceLease?.Dispose();
+            _deviceLease = null;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -166,6 +213,46 @@ internal sealed class MicrophoneCapture : IAsyncDisposable
 
     private void CaptureRecordingStopped(object? sender, StoppedEventArgs eventArgs) =>
         _stopped.TrySetResult(eventArgs);
+
+    private void WriteAudioDiagnostics()
+    {
+        try
+        {
+            var metrics = AudioFileDiagnostics.Analyze(_normalizedPath);
+            _diagnostics.WriteJson(
+                $"request-{_requestId}-audio.json",
+                new
+                {
+                    requestId = _requestId,
+                    device = _deviceSelection?.Device,
+                    usedFallback = _deviceSelection?.UsedFallback,
+                    warning = _deviceSelection?.Warning,
+                    rawPath = _rawPath,
+                    rawBytes = File.Exists(_rawPath) ? new FileInfo(_rawPath).Length : 0,
+                    rawFormat = _rawWaveFormat,
+                    normalizedPath = _normalizedPath,
+                    normalized = metrics,
+                });
+            _diagnostics.Log(
+                $"request={_requestId} normalized durationMs={metrics.DurationMilliseconds:F0} " +
+                $"peak={metrics.Peak:F4} rms={metrics.Rms:F4} silence={metrics.SilenceRatio:P1} " +
+                $"clipping={metrics.ClippingRatio:P2} wav=\"{_normalizedPath}\"");
+            if (metrics.LikelySilent)
+            {
+                _diagnostics.Log(
+                    $"request={_requestId} WARNING input is near-silent; verify the selected microphone and Windows input level.");
+            }
+            else if (metrics.LikelyClipping)
+            {
+                _diagnostics.Log(
+                    $"request={_requestId} WARNING input is clipping; lower the Windows microphone input level.");
+            }
+        }
+        catch (Exception exception)
+        {
+            _diagnostics.Log($"request={_requestId} audio diagnostics failed: {exception.Message}");
+        }
+    }
 
     private static void DeleteIfPresent(string path)
     {

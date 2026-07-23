@@ -5,6 +5,9 @@ internal sealed record WorkerOptions(
     string ModelFile,
     string ModelSha256,
     string Language,
+    string DeviceSelector,
+    bool DiagnosticsEnabled,
+    string DiagnosticsDirectory,
     int ThreadCount,
     int MaximumCaptureSeconds,
     string WorkDirectory)
@@ -33,15 +36,23 @@ internal sealed record WorkerOptions(
             throw new ArgumentException("--language is invalid.");
         }
 
+        var deviceSelector = GetRequired(values, "--device").Trim();
+        if (deviceSelector.Length > 2_048)
+            throw new ArgumentException("--device is too long.");
+        var diagnosticsEnabled = ParseBoolean(values, "--diagnostics");
+        var diagnosticsDirectory = GetRequiredPath(values, "--diagnostics-directory");
+
         var threadCount = ParseBoundedInt(values, "--threads", 1, 16);
         var maximumSeconds = ParseBoundedInt(values, "--max-seconds", 3, 30);
-        Directory.CreateDirectory(workDirectory);
 
         return new WorkerOptions(
             whisper,
             model,
             modelSha256,
             language,
+            deviceSelector,
+            diagnosticsEnabled,
+            diagnosticsDirectory,
             threadCount,
             maximumSeconds,
             workDirectory);
@@ -66,6 +77,14 @@ internal sealed record WorkerOptions(
         var raw = GetRequired(values, name);
         if (!int.TryParse(raw, out var value) || value < minimum || value > maximum)
             throw new ArgumentOutOfRangeException(name, $"{name} must be between {minimum} and {maximum}.");
+        return value;
+    }
+
+    private static bool ParseBoolean(Dictionary<string, string> values, string name)
+    {
+        var raw = GetRequired(values, name);
+        if (!bool.TryParse(raw, out var value))
+            throw new ArgumentException($"{name} must be true or false.");
         return value;
     }
 }

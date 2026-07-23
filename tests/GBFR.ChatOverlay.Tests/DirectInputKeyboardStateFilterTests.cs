@@ -71,4 +71,50 @@ public sealed class DirectInputKeyboardStateFilterTests
         Assert.False(filter.Process(state, () => false, () => false));
         Assert.Equal(0x80, state[42]);
     }
+
+    [Fact]
+    public void Process_HoldUStartsAndReleaseStopsVoiceCapture()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var state = new byte[256];
+        var starts = 0;
+        var stops = 0;
+        state[0x16] = 0x80;
+
+        Assert.True(filter.Process(state, () => false, () => false, Begin, () => stops++, () => true));
+        Assert.Equal(0, state[0x16]);
+        state[0x16] = 0x80;
+        filter.Process(state, () => false, () => false, Begin, () => stops++, () => true);
+        state[0x16] = 0;
+        filter.Process(state, () => false, () => false, Begin, () => stops++, () => true);
+
+        Assert.Equal(1, starts);
+        Assert.Equal(1, stops);
+        return;
+
+        bool Begin()
+        {
+            starts++;
+            return true;
+        }
+    }
+
+    [Fact]
+    public void Process_DoesNotConsumeUWhenVoiceRequestIsRejected()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var state = new byte[256];
+        state[0x16] = 0x80;
+
+        var filtered = filter.Process(
+            state,
+            () => false,
+            () => false,
+            () => false,
+            () => { },
+            () => true);
+
+        Assert.False(filtered);
+        Assert.Equal(0x80, state[0x16]);
+    }
 }

@@ -4,6 +4,8 @@ using System.Text;
 using DearImguiSharp;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
+using GBFR.ChatOverlay.Input;
+using GBFR.ChatOverlay.Stt;
 using Reloaded.Hooks.ReloadedII.Interfaces;
 using Reloaded.Imgui.Hook;
 using Reloaded.Imgui.Hook.Direct3D11;
@@ -27,11 +29,20 @@ public sealed class ChatOverlayHost
     private readonly ChatSession _session;
     private readonly Func<Config> _getConfiguration;
     private readonly Action<string> _log;
+    private readonly VoiceInputCoordinator? _voiceInput;
+    private readonly IXInputStateSource _xInputStateSource;
+    private readonly PushToTalkChordDetector _controllerVoiceDetector = new();
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
+    private readonly object _requestSync = new();
+    private readonly object _renderSync = new();
     private int _openRequested;
     private int _captureKeyboard;
     private int _swallowActivationKeyUntilRelease;
     private int _releaseCaptureFrames;
+    private int _voiceStartRequested;
+    private int _voiceStopRequested;
+    private int _composerOpenSnapshot;
+    private int _shutdown;
     private bool _focusInputNextFrame;
     private bool _windowOpen = true;
     private bool _initialized;
@@ -41,33 +52,75 @@ public sealed class ChatOverlayHost
     public ChatOverlayHost(
         ChatSession session,
         Func<Config> getConfiguration,
-        Action<string> log)
+        Action<string> log,
+        VoiceInputCoordinator? voiceInput = null,
+        IXInputStateSource? xInputStateSource = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _voiceInput = voiceInput;
+        _xInputStateSource = xInputStateSource ?? new XInputStateSource();
+        PublishComposerState();
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
 
     public bool TryRequestOpen()
     {
-        if (!Volatile.Read(ref _initialized) ||
-            !_getConfiguration().EnableOverlay ||
-            _session.Composer.IsOpen)
-            return false;
+        lock (_requestSync)
+        {
+            if (Volatile.Read(ref _shutdown) != 0 ||
+                !Volatile.Read(ref _initialized) ||
+                !_getConfiguration().EnableOverlay ||
+                Volatile.Read(ref _composerOpenSnapshot) != 0 ||
+                Volatile.Read(ref _openRequested) != 0 ||
+                Volatile.Read(ref _voiceStartRequested) != 0)
+            {
+                return false;
+            }
 
-        Interlocked.Exchange(ref _captureKeyboard, 1);
-        Interlocked.Exchange(ref _openRequested, 1);
-        return true;
+            Interlocked.Exchange(ref _captureKeyboard, 1);
+            Interlocked.Exchange(ref _openRequested, 1);
+            return true;
+        }
     }
 
     public bool ShouldCaptureKeyboard() =>
         _getConfiguration().EnableOverlay && Volatile.Read(ref _captureKeyboard) != 0;
 
+    public bool IsVoiceInputEnabled()
+    {
+        var configuration = _getConfiguration();
+        return Volatile.Read(ref _shutdown) == 0 &&
+               Volatile.Read(ref _initialized) &&
+               configuration.EnableOverlay &&
+               configuration.EnableVoiceInput &&
+               _voiceInput is { State: not VoiceRecognitionState.Unavailable };
+    }
+
+    public bool TryRequestVoiceCapture()
+    {
+        lock (_requestSync)
+        {
+            if (!IsVoiceInputEnabled() ||
+                Volatile.Read(ref _composerOpenSnapshot) != 0 ||
+                Volatile.Read(ref _captureKeyboard) != 0 ||
+                Volatile.Read(ref _openRequested) != 0)
+            {
+                return false;
+            }
+
+            return Interlocked.CompareExchange(ref _voiceStartRequested, 1, 0) == 0;
+        }
+    }
+
+    public void RequestVoiceCaptureEnd() => Interlocked.Exchange(ref _voiceStopRequested, 1);
+
     public async Task InitializeAsync(IReloadedHooks hooks)
     {
         ArgumentNullException.ThrowIfNull(hooks);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _shutdown) != 0, this);
 
         if (Interlocked.CompareExchange(ref s_activeHost, this, null) is not null)
             throw new InvalidOperationException("Only one GBFR chat overlay host can be active.");
@@ -94,6 +147,13 @@ public sealed class ChatOverlayHost
                 _log($"CJK font setup failed; using the default ImGui font: {exception.Message}");
             }
             Volatile.Write(ref _initialized, true);
+            if (Volatile.Read(ref _shutdown) != 0)
+            {
+                ImguiHook.Disable();
+                Volatile.Write(ref _initialized, false);
+                Interlocked.CompareExchange(ref s_activeHost, null, this);
+                return;
+            }
             _log("DirectX 11 ImGui hook initialized.");
         }
         catch
@@ -105,34 +165,81 @@ public sealed class ChatOverlayHost
 
     public void Suspend()
     {
-        _session.Composer.Cancel();
-        Interlocked.Exchange(ref _openRequested, 0);
-        Interlocked.Exchange(ref _captureKeyboard, 0);
-        Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
-        _releaseCaptureFrames = 0;
-        _focusInputNextFrame = false;
-        _statusText = null;
-        if (_initialized)
-            ImguiHook.Disable();
+        lock (_renderSync)
+        {
+            _voiceInput?.CancelCapture();
+            _controllerVoiceDetector.Reset();
+            _session.Composer.Cancel();
+            Interlocked.Exchange(ref _openRequested, 0);
+            Interlocked.Exchange(ref _captureKeyboard, 0);
+            Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
+            Interlocked.Exchange(ref _voiceStartRequested, 0);
+            Interlocked.Exchange(ref _voiceStopRequested, 0);
+            _releaseCaptureFrames = 0;
+            _focusInputNextFrame = false;
+            _statusText = null;
+            PublishComposerState();
+            if (_initialized)
+                ImguiHook.Disable();
+        }
+    }
+
+    public void Shutdown()
+    {
+        if (Interlocked.Exchange(ref _shutdown, 1) != 0)
+            return;
+
+        Suspend();
+        Volatile.Write(ref _initialized, false);
+        Interlocked.CompareExchange(ref s_activeHost, null, this);
     }
 
     public void Resume()
     {
-        if (_initialized)
+        if (Volatile.Read(ref _shutdown) == 0 && _initialized)
             ImguiHook.Enable();
     }
 
     private void Render()
     {
+        lock (_renderSync)
+        {
+            if (Volatile.Read(ref _shutdown) != 0)
+                return;
+
+            RenderCore();
+        }
+    }
+
+    private void RenderCore()
+    {
         _session.DrainIncoming();
         var configuration = _getConfiguration();
+        _controllerVoiceDetector.Poll(
+            _xInputStateSource,
+            IsVoiceInputEnabled(),
+            TryRequestVoiceCapture,
+            RequestVoiceCaptureEnd);
+
         if (!configuration.EnableOverlay)
         {
+            if (_voiceInput?.State is VoiceRecognitionState.Recording or VoiceRecognitionState.Transcribing)
+                _voiceInput.CancelCapture();
             _session.Composer.Cancel();
             Interlocked.Exchange(ref _openRequested, 0);
             Interlocked.Exchange(ref _captureKeyboard, 0);
+            PublishComposerState();
             return;
         }
+
+        if (!configuration.EnableVoiceInput &&
+            _voiceInput?.State is VoiceRecognitionState.Recording or VoiceRecognitionState.Transcribing)
+        {
+            _voiceInput.CancelCapture();
+        }
+
+        ProcessVoiceInput();
+        PublishComposerState();
 
         if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
             Interlocked.Exchange(ref _captureKeyboard, 0);
@@ -141,6 +248,7 @@ public sealed class ChatOverlayHost
         if (openedThisFrame)
         {
             _session.Composer.OpenKeyboard();
+            PublishComposerState();
             SyncInputBufferFromDraft();
             _focusInputNextFrame = true;
             _statusText = _session.TransportStatusText;
@@ -148,12 +256,17 @@ public sealed class ChatOverlayHost
 
         if (_session.Composer.IsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
         {
-            _session.Composer.Cancel();
+            if (_voiceInput?.State is VoiceRecognitionState.Recording or VoiceRecognitionState.Transcribing)
+                _voiceInput.CancelCapture();
+            else
+                _session.Composer.Cancel();
             _releaseCaptureFrames = 2;
             _statusText = null;
+            PublishComposerState();
         }
 
         DrawChatWindow(configuration, openedThisFrame);
+        PublishComposerState();
     }
 
     private void DrawChatWindow(Config configuration, bool openedThisFrame)
@@ -225,6 +338,12 @@ public sealed class ChatOverlayHost
     private unsafe void DrawComposer(bool openedThisFrame)
     {
         ImGui.Separator();
+        if (_session.Composer.Mode is ChatInputMode.VoiceRecording)
+        {
+            ImGui.TextWrapped(_voiceInput?.StatusText ?? "Voice input is unavailable.");
+            return;
+        }
+
         if (_focusInputNextFrame && !openedThisFrame)
         {
             ImGui.SetKeyboardFocusHere(0);
@@ -270,14 +389,18 @@ public sealed class ChatOverlayHost
         if (!_getConfiguration().EnableOverlay)
             return false;
 
-        var composerOpen = _session.Composer.IsOpen;
+        var composerOpen = Volatile.Read(ref _composerOpenSnapshot) != 0;
         if (!composerOpen &&
             (message is WmKeyDown or WmSysKeyDown) &&
             wParam == VirtualKeyY)
         {
-            TryRequestOpen();
-            Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 1);
-            return true;
+            if (TryRequestOpen())
+            {
+                Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 1);
+                return true;
+            }
+
+            return false;
         }
 
         if ((message is WmKeyUp or WmSysKeyUp) &&
@@ -289,6 +412,45 @@ public sealed class ChatOverlayHost
 
         return Volatile.Read(ref _captureKeyboard) != 0 &&
                message is WmKeyDown or WmKeyUp or WmChar or WmSysKeyDown or WmSysKeyUp or WmSysChar;
+    }
+
+    private void ProcessVoiceInput()
+    {
+        if (_voiceInput is null)
+        {
+            Interlocked.Exchange(ref _voiceStartRequested, 0);
+            Interlocked.Exchange(ref _voiceStopRequested, 0);
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _voiceStartRequested, 0) != 0)
+        {
+            if (_voiceInput.TryBeginCapture())
+            {
+                Interlocked.Exchange(ref _captureKeyboard, 0);
+                _statusText = _voiceInput.StatusText;
+            }
+            else
+            {
+                _statusText = _voiceInput.StatusText;
+            }
+        }
+
+        if (Interlocked.Exchange(ref _voiceStopRequested, 0) != 0 && _voiceInput.TryEndCapture())
+            _statusText = _voiceInput.StatusText;
+
+        var update = _voiceInput.Drain();
+        if (update.DraftChanged)
+        {
+            SyncInputBufferFromDraft();
+            Interlocked.Exchange(ref _captureKeyboard, 1);
+            _focusInputNextFrame = true;
+            _statusText = _voiceInput.StatusText;
+        }
+        else if (update.StateChanged && _session.Composer.IsOpen)
+        {
+            _statusText = _voiceInput.StatusText;
+        }
     }
 
     private void SyncInputBufferFromDraft()
@@ -306,6 +468,9 @@ public sealed class ChatOverlayHost
             length = _inputBuffer.Length;
         return Encoding.UTF8.GetString(_inputBuffer, 0, length);
     }
+
+    private void PublishComposerState() =>
+        Volatile.Write(ref _composerOpenSnapshot, _session.Composer.IsOpen ? 1 : 0);
 
     private unsafe void ConfigureFont()
     {

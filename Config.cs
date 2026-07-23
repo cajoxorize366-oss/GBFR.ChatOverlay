@@ -50,9 +50,26 @@ public class Config : Configurable<Config>
     public double BackgroundOpacity { get; set; } = 0.55;
 
     [DisplayName("Voice Input")]
-    [Description("Reserved for the hold-to-talk speech recognition milestone.")]
-    [DefaultValue(false)]
-    public bool EnableVoiceInput { get; set; }
+    [Description("Enable local hold-to-talk using U or the controller LB + R3 chord. Restart the mod after changing this setting.")]
+    [DefaultValue(true)]
+    public bool EnableVoiceInput { get; set; } = true;
+
+    [DisplayName("Voice Language")]
+    [Description("Whisper language code, or auto for automatic detection. Restart the mod after changing this setting.")]
+    [DefaultValue("auto")]
+    public string VoiceLanguage { get; set; } = "auto";
+
+    [DisplayName("Voice CPU Threads")]
+    [Description("CPU threads used by the isolated Whisper worker. Restart the mod after changing this setting.")]
+    [DefaultValue(4)]
+    [SliderControlParams(minimum: 1.0, maximum: 16.0)]
+    public int VoiceCpuThreads { get; set; } = 4;
+
+    [DisplayName("Maximum Voice Seconds")]
+    [Description("Maximum duration of one hold-to-talk recording.")]
+    [DefaultValue(15)]
+    [SliderControlParams(minimum: 3.0, maximum: 30.0)]
+    public int VoiceMaximumSeconds { get; set; } = 15;
 }
 
 /// <summary>

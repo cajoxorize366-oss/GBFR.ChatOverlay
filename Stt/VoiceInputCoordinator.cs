@@ -23,6 +23,7 @@ public sealed class VoiceInputCoordinator : IDisposable
     private readonly ISttWorkerClient _worker;
     private long _nextRequestId;
     private long _activeRequestId;
+    private int _state;
 
     public VoiceInputCoordinator(ChatComposer composer, ISttWorkerClient worker)
     {
@@ -32,7 +33,11 @@ public sealed class VoiceInputCoordinator : IDisposable
         LastError = worker.UnavailableReason;
     }
 
-    public VoiceRecognitionState State { get; private set; }
+    public VoiceRecognitionState State
+    {
+        get => (VoiceRecognitionState)Volatile.Read(ref _state);
+        private set => Volatile.Write(ref _state, (int)value);
+    }
     public string? LastError { get; private set; }
     public long ActiveRequestId => _activeRequestId;
 

@@ -21,6 +21,9 @@ public sealed unsafe class DirectInputKeyboardHook
     private readonly ReloadedHooksApi _hooks;
     private readonly Func<bool> _tryActivate;
     private readonly Func<bool> _shouldCapture;
+    private readonly Func<bool> _tryBeginVoiceCapture;
+    private readonly Action _endVoiceCapture;
+    private readonly Func<bool> _isVoiceInputEnabled;
     private readonly Action<string> _log;
     private readonly DirectInputKeyboardStateFilter _stateFilter = new();
     private readonly object _hookSync = new();
@@ -35,11 +38,17 @@ public sealed unsafe class DirectInputKeyboardHook
         ReloadedHooksApi hooks,
         Func<bool> tryActivate,
         Func<bool> shouldCapture,
+        Func<bool> tryBeginVoiceCapture,
+        Action endVoiceCapture,
+        Func<bool> isVoiceInputEnabled,
         Action<string> log)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _tryActivate = tryActivate ?? throw new ArgumentNullException(nameof(tryActivate));
         _shouldCapture = shouldCapture ?? throw new ArgumentNullException(nameof(shouldCapture));
+        _tryBeginVoiceCapture = tryBeginVoiceCapture ?? throw new ArgumentNullException(nameof(tryBeginVoiceCapture));
+        _endVoiceCapture = endVoiceCapture ?? throw new ArgumentNullException(nameof(endVoiceCapture));
+        _isVoiceInputEnabled = isVoiceInputEnabled ?? throw new ArgumentNullException(nameof(isVoiceInputEnabled));
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
@@ -116,17 +125,16 @@ public sealed unsafe class DirectInputKeyboardHook
         {
             Volatile.Write(ref _keyboardDevice, device);
             _log("DirectInput system keyboard device detected.");
-        }
-
-        lock (_hookSync)
-        {
-            if (_getDeviceStateHook is null)
+            lock (_hookSync)
             {
-                var function = GetVtableFunction(device, GetDeviceStateVtableIndex);
-                _getDeviceStateHook = _hooks
-                    .CreateHook<GetDeviceStateDelegate>(GetDeviceState, function)
-                    .Activate();
-                _log("IDirectInputDevice8::GetDeviceState hooked.");
+                if (_getDeviceStateHook is null)
+                {
+                    var function = GetVtableFunction(device, GetDeviceStateVtableIndex);
+                    _getDeviceStateHook = _hooks
+                        .CreateHook<GetDeviceStateDelegate>(GetDeviceState, function)
+                        .Activate();
+                    _log("Keyboard IDirectInputDevice8::GetDeviceState hooked.");
+                }
             }
         }
 
@@ -148,7 +156,10 @@ public sealed unsafe class DirectInputKeyboardHook
         _stateFilter.Process(
             new Span<byte>((void*)state, byteCount),
             _tryActivate,
-            _shouldCapture);
+            _shouldCapture,
+            _tryBeginVoiceCapture,
+            _endVoiceCapture,
+            _isVoiceInputEnabled);
         return result;
     }
 

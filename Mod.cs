@@ -6,6 +6,7 @@ using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
+using GBFR.ChatOverlay.Stt;
 
 namespace GBFR.ChatOverlay;
 
@@ -49,6 +50,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly ChatOverlayHost? _overlay;
     private readonly DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
+    private readonly VoiceInputCoordinator? _voiceInput;
 
     public Mod(ModContext context)
     {
@@ -115,15 +117,46 @@ public class Mod : ModBase // <= Do not Remove.
             return;
         }
 
+        if (_configuration.EnableVoiceInput)
+        {
+            var assemblyDirectory = Path.GetDirectoryName(typeof(Mod).Assembly.Location)
+                                    ?? AppContext.BaseDirectory;
+            var worker = SttWorkerProcessClient.Create(
+                assemblyDirectory,
+                _configuration.VoiceLanguage,
+                _configuration.VoiceCpuThreads,
+                _configuration.VoiceMaximumSeconds,
+                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+            _voiceInput = new VoiceInputCoordinator(_chatSession.Composer, worker);
+            if (_voiceInput.State is VoiceRecognitionState.Unavailable)
+            {
+                history.Add(
+                    "System",
+                    $"Voice input unavailable: {_voiceInput.StatusText}",
+                    ChatMessageKind.System);
+            }
+            else
+            {
+                history.Add(
+                    "System",
+                    "Local Whisper base voice input ready. Hold U or LB + R3, then review and press Enter.",
+                    ChatMessageKind.System);
+            }
+        }
+
         _overlay = new ChatOverlayHost(
             _chatSession,
             () => _configuration,
-            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+            _voiceInput);
 
         _directInputKeyboard = new DirectInputKeyboardHook(
             _hooks,
             _overlay.TryRequestOpen,
             _overlay.ShouldCaptureKeyboard,
+            _overlay.TryRequestVoiceCapture,
+            _overlay.RequestVoiceCaptureEnd,
+            _overlay.IsVoiceInputEnabled,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
@@ -158,6 +191,14 @@ public class Mod : ModBase // <= Do not Remove.
         _overlay?.Resume();
         _directInputKeyboard?.Resume();
         _nativeChatBridge?.Resume();
+    }
+
+    public override void Disposing()
+    {
+        _nativeChatBridge?.Suspend();
+        _directInputKeyboard?.Suspend();
+        _overlay?.Shutdown();
+        _voiceInput?.Dispose();
     }
     #endregion
 

@@ -183,7 +183,11 @@ public sealed class SttWorkerProcessClient : ISttWorkerClient
                     break;
 
                 if (SttProtocol.TryParseEvent(line, out var message, out var error))
+                {
                     _events.Enqueue(message!);
+                    if (message!.Type is SttMessageTypes.Ready)
+                        _log("STT worker ready; Whisper base model hash verified.");
+                }
                 else
                     _log($"Ignored invalid STT worker event: {Truncate(error ?? line)}");
             }

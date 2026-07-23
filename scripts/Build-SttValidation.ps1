@@ -16,13 +16,15 @@ $expectedModelSha256 = "60ED5BC3DD14EEA856493D334349B405782DDCAF0028D4B5DF408834
 
 & (Join-Path $PSScriptRoot "Prepare-SttRuntime.ps1") -Configuration Release
 
-if (Test-Path -LiteralPath $validationRoot) {
-    $resolvedArtifacts = [IO.Path]::GetFullPath((Join-Path $repoRoot "artifacts")).TrimEnd('\') + '\'
-    $resolvedValidation = [IO.Path]::GetFullPath($validationRoot)
-    if (-not $resolvedValidation.StartsWith($resolvedArtifacts, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to clear a validation directory outside artifacts."
+$resolvedValidationPrefix = [IO.Path]::GetFullPath($validationRoot).TrimEnd('\') + '\'
+foreach ($outputToClear in @($modOutput, $archivePath)) {
+    $resolvedOutput = [IO.Path]::GetFullPath($outputToClear)
+    if (-not ($resolvedOutput + '\').StartsWith($resolvedValidationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clear an output path outside the validation directory."
     }
-    Remove-Item -LiteralPath $validationRoot -Recurse -Force
+    if (Test-Path -LiteralPath $resolvedOutput) {
+        Remove-Item -LiteralPath $resolvedOutput -Recurse -Force
+    }
 }
 New-Item -ItemType Directory -Force -Path $modsRoot | Out-Null
 

@@ -41,6 +41,25 @@ public sealed class ChatSessionTests
         Assert.Equal("hello party", Assert.Single(session.History.Snapshot()).Text);
     }
 
+    [Fact]
+    public void DrainIncoming_AppendsHookRecordsOnOwningThread()
+    {
+        var source = new StubIncomingSource(
+            new IncomingChatMessage("Lyria", "Ready!", 1, 2, 3, DateTimeOffset.UtcNow));
+        var session = new ChatSession(
+            new ChatHistory(10),
+            new ChatComposer(),
+            new StubTransport(ChatSendResult.Sent()),
+            incoming: source);
+
+        Assert.Equal(1, session.DrainIncoming());
+        var message = Assert.Single(session.History.Snapshot());
+        Assert.Equal("Lyria", message.Sender);
+        Assert.Equal("Ready!", message.Text);
+        Assert.Equal(ChatMessageKind.Party, message.Kind);
+        Assert.Equal(0, session.DrainIncoming());
+    }
+
     private sealed class StubTransport(ChatSendResult result) : IChatTransport
     {
         public string? LastMessage { get; private set; }
@@ -50,5 +69,12 @@ public sealed class ChatSessionTests
             LastMessage = message;
             return result;
         }
+    }
+
+    private sealed class StubIncomingSource(params IncomingChatMessage[] messages) : IIncomingChatSource
+    {
+        private readonly Queue<IncomingChatMessage> _messages = new(messages);
+
+        public bool TryRead(out IncomingChatMessage message) => _messages.TryDequeue(out message);
     }
 }

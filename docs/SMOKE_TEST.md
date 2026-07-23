@@ -9,6 +9,7 @@ The Reloaded-II log should contain messages equivalent to:
 ```text
 [gbfr.qol.chatoverlay] Relink 2.0.2 native chat bridge attached: send=..., receive=....
 [gbfr.qol.chatoverlay] DirectInput8 keyboard interception initialized.
+[gbfr.qol.chatoverlay] DX11 safety backend attached (guarded Present/ResizeBuffers callbacks).
 [gbfr.qol.chatoverlay] IDirectInput8::CreateDevice hooked (...).
 [gbfr.qol.chatoverlay] DirectInput system keyboard device detected.
 [gbfr.qol.chatoverlay] IDirectInputDevice8::GetDeviceState hooked.
@@ -34,6 +35,8 @@ The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after
 
 - If `Native chat bridge validation failed` appears, preserve the reported executable SHA-256. The Overlay should remain usable as a local preview.
 - If the game fails before `DirectX 11 ImGui hook initialized`, disable the Mod and preserve the Reloaded-II log.
+- If `DX11 overlay disabled after a graphics error; game rendering will continue` appears, the guard worked but the Overlay was degraded for that session. Preserve the complete line: it identifies the exact Present/ResizeBuffers stage, dimensions and HRESULT needed for the next compatibility fix. This is not a successful visual test unless the Overlay remains visible.
+- An unhandled exception whose stack ends in `ImguiHookDx11.ResizeBuffersImpl` means the guarded backend was not loaded. Confirm that `DX11 safety backend attached` appeared and that `GBFR.ChatOverlay.dll` came from the same package; do not mix individual DLLs from different builds.
 - If the Overlay renders but controls still respond, preserve the three DirectInput log lines; their presence distinguishes a state-filter bug from a missed hook.
 - If Chinese characters render as boxes, record the `Loaded CJK font` path and Windows display language.
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.

@@ -1,5 +1,7 @@
 bin/
 obj/
+**/bin/
+**/obj/
 .vs/
 .idea/
 artifacts/
@@ -7,4 +9,3 @@ artifacts/
 *.suo
 *.nupkg
 *.zip
-

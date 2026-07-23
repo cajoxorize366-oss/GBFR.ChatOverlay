@@ -4,13 +4,12 @@
 
 ## 当前阶段
 
-项目处于早期原型阶段。目前仓库包含 Reloaded-II Mod 骨架，下一步依次实现：
+项目处于早期原型阶段。目前仓库包含 Reloaded-II Mod 骨架，以及可单元测试的聊天记录、文字编辑和发送状态机。下一步依次实现：
 
-1. 独立可测试的聊天记录与输入状态机。
-2. DirectX 11 ImGui Overlay。
-3. 键盘输入捕获与中文输入法验证。
-4. 原版聊天发送、接收桥接。
-5. 手柄语音转文字。
+1. DirectX 11 ImGui Overlay。
+2. 键盘输入捕获与中文输入法验证。
+3. 原版聊天发送、接收桥接。
+4. 手柄语音转文字。
 
 当前版本不会修改网络包，也不会尝试绕过任何联机保护。
 
@@ -20,6 +19,7 @@
 
 ```powershell
 dotnet build --configuration Debug
+dotnet test tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj
 ```
 
 如果设置了 `RELOADEDIIMODS` 环境变量，构建产物会复制到对应的 Reloaded-II Mods 目录；否则产物位于 `bin/Debug`。

@@ -2,9 +2,7 @@
 using Reloaded.Mod.Interfaces;
 using GBFR.ChatOverlay.Template;
 using GBFR.ChatOverlay.Configuration;
-#if DEBUG
-using System.Diagnostics;
-#endif
+using GBFR.ChatOverlay.Core;
 
 namespace GBFR.ChatOverlay;
 
@@ -44,6 +42,8 @@ public class Mod : ModBase // <= Do not Remove.
     /// </summary>
     private readonly IModConfig _modConfig;
 
+    private readonly ChatSession _chatSession;
+
     public Mod(ModContext context)
     {
         _modLoader = context.ModLoader;
@@ -53,25 +53,19 @@ public class Mod : ModBase // <= Do not Remove.
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
 
-#if DEBUG
-        // Attaches debugger in debug mode; ignored in release.
-        Debugger.Launch();
-#endif
+        var historyCapacity = Math.Clamp(_configuration.HistoryCapacity, 10, 5_000);
+        _chatSession = new ChatSession(
+            new ChatHistory(historyCapacity),
+            new ChatComposer(),
+            new UnavailableChatTransport());
 
-        // For more information about this template, please see
-        // https://reloaded-project.github.io/Reloaded-II/ModTemplate/
-
-        // If you want to implement e.g. unload support in your mod,
-        // and some other neat features, override the methods in ModBase.
-
-        // TODO: Implement some mod logic
+        _logger.WriteLine(
+            $"[{_modConfig.ModId}] Chat core initialized; rendering and game chat bridges are not attached yet.");
     }
 
     #region Standard Overrides
     public override void ConfigurationUpdated(Config configuration)
     {
-        // Apply settings from configuration.
-        // ... your code here.
         _configuration = configuration;
         _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
     }

@@ -169,6 +169,7 @@ public class Mod : ModBase // <= Do not Remove.
         _overlay = new ChatOverlayHost(
             _chatSession,
             () => _configuration,
+            GetVoiceUiStatus,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
         _directInputKeyboard = new DirectInputKeyboardHook(
@@ -227,6 +228,14 @@ public class Mod : ModBase // <= Do not Remove.
         {
             _logger.WriteLine($"[{_modConfig.ModId}] Failed to initialize overlay: {exception}");
         }
+    }
+
+    private PartyVoiceUiStatus GetVoiceUiStatus()
+    {
+        if (!_configuration.EnableVoiceInput)
+            return PartyVoiceUiStatus.Disabled;
+
+        return _partyLifecycleProbe?.VoiceUiStatus ?? PartyVoiceUiStatus.Unavailable;
     }
 
     #region For Exports, Serialization etc.

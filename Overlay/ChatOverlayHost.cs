@@ -4,6 +4,7 @@ using System.Text;
 using DearImguiSharp;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
+using GBFR.ChatOverlay.Native;
 using Reloaded.Hooks.ReloadedII.Interfaces;
 using Reloaded.Imgui.Hook;
 using Reloaded.Imgui.Hook.Implementations;
@@ -25,6 +26,7 @@ public sealed class ChatOverlayHost
 
     private readonly ChatSession _session;
     private readonly Func<Config> _getConfiguration;
+    private readonly Func<PartyVoiceUiStatus> _getVoiceUiStatus;
     private readonly Action<string> _log;
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private int _openRequested;
@@ -39,13 +41,15 @@ public sealed class ChatOverlayHost
     private long _lastRenderedSequence;
     private string? _statusText;
 
-    public ChatOverlayHost(
+    internal ChatOverlayHost(
         ChatSession session,
         Func<Config> getConfiguration,
+        Func<PartyVoiceUiStatus> getVoiceUiStatus,
         Action<string> log)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
+        _getVoiceUiStatus = getVoiceUiStatus ?? throw new ArgumentNullException(nameof(getVoiceUiStatus));
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
@@ -194,11 +198,22 @@ public sealed class ChatOverlayHost
             return;
         }
 
+        DrawVoiceStatus();
         DrawHistory(composerOpen);
         if (composerOpen)
             DrawComposer(openedThisFrame);
 
         ImGui.End();
+    }
+
+    private void DrawVoiceStatus()
+    {
+        var presentation = VoiceOverlayPresenter.Create(_getVoiceUiStatus());
+        if (!presentation.IsVisible)
+            return;
+
+        ImGui.TextWrapped(presentation.Text);
+        ImGui.Separator();
     }
 
     private void DrawHistory(bool composerOpen)

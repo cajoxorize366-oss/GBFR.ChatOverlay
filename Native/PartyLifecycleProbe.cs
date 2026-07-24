@@ -66,6 +66,19 @@ public sealed class PartyLifecycleProbe
 
     public bool IsVoiceTestAvailable => IsInitialized && _enableVoiceTest && _chatControlCanary is not null;
 
+    internal PartyVoiceUiStatus VoiceUiStatus
+    {
+        get
+        {
+            if (!_enableVoiceTest)
+                return PartyVoiceUiStatus.Disabled;
+            if (!IsInitialized || Volatile.Read(ref _suspended))
+                return PartyVoiceUiStatus.Unavailable;
+
+            return _chatControlCanary?.VoiceUiStatus ?? PartyVoiceUiStatus.Unavailable;
+        }
+    }
+
     public void Initialize()
     {
         lock (_lifecycleSync)

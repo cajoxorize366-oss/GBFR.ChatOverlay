@@ -299,9 +299,17 @@ public sealed class PartyChatControlCanaryTests
             action => action(),
             enableVoiceTest: true);
 
-        AdvanceToVoiceReady(canary);
+        Assert.Equal(PartyVoiceUiState.WaitingForSession, canary.VoiceUiStatus.State);
+
+        AdvanceToJoined(canary);
+
+        Assert.Equal(PartyVoiceUiState.WaitingForPeer, canary.VoiceUiStatus.State);
+
+        ObserveRemoteJoined(canary);
+        canary.OnBatchFinished(Manager);
 
         Assert.Equal(PartyChatControlCanaryPhase.VoiceReady, canary.Phase);
+        Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
         Assert.Contains("SetPermissions:7000:0x0005", api.Calls);
         Assert.DoesNotContain(api.Calls, call => call == "SetAudioInputMuted:False");
 
@@ -316,6 +324,7 @@ public sealed class PartyChatControlCanaryTests
                 "GetAudioInputMuted",
             },
             api.Calls);
+        Assert.Equal(PartyVoiceUiState.Speaking, canary.VoiceUiStatus.State);
         Assert.Contains(logs, line => line.Contains("microphone UNMUTED", StringComparison.Ordinal));
 
         api.Calls.Clear();
@@ -328,6 +337,7 @@ public sealed class PartyChatControlCanaryTests
                 "GetAudioInputMuted",
             },
             api.Calls);
+        Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
         Assert.Contains(logs, line => line.Contains("push-to-talk microphone muted", StringComparison.Ordinal));
     }
 
@@ -371,6 +381,7 @@ public sealed class PartyChatControlCanaryTests
         canary.SetPushToTalkPressed(true);
 
         Assert.Empty(api.Calls);
+        Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
 
         canary.OnBatchFinished(Manager);
 
@@ -381,6 +392,7 @@ public sealed class PartyChatControlCanaryTests
                 "GetAudioInputMuted",
             },
             api.Calls);
+        Assert.Equal(PartyVoiceUiState.Speaking, canary.VoiceUiStatus.State);
     }
 
     [Fact]
@@ -550,6 +562,34 @@ public sealed class PartyChatControlCanaryTests
         Assert.Contains("DestroyChatControl", api.Calls);
         Assert.DoesNotContain(logs, line => line.Contains("microphone UNMUTED", StringComparison.Ordinal));
         Assert.Equal(PartyChatControlCanaryPhase.Destroying, canary.Phase);
+        Assert.Equal(PartyVoiceUiState.Faulted, canary.VoiceUiStatus.State);
+    }
+
+    [Fact]
+    public void VoiceUi_NeverReportsSpeakingWhenNativeReadbackRemainsMuted()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl)
+        {
+            ReportMutedOverride = true,
+        };
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(
+            api,
+            logs.Add,
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
+        api.Calls.Clear();
+
+        canary.SetPushToTalkPressed(true);
+
+        Assert.Contains("SetAudioInputMuted:False", api.Calls);
+        Assert.Contains("GetAudioInputMuted", api.Calls);
+        Assert.Contains("SetAudioInputMuted:True", api.Calls);
+        Assert.DoesNotContain(logs, line => line.Contains("microphone UNMUTED", StringComparison.Ordinal));
+        Assert.Equal(PartyVoiceUiState.Faulted, canary.VoiceUiStatus.State);
     }
 
     [Fact]

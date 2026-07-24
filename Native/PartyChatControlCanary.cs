@@ -132,6 +132,15 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
     }
 
+    internal PartyVoiceUiStatus VoiceUiStatus
+    {
+        get
+        {
+            lock (_stateSync)
+                return GetVoiceUiStatusLocked();
+        }
+    }
+
     internal nint CreateAsyncIdentifier => _createToken;
 
     internal nint AudioInputAsyncIdentifier => _inputToken;
@@ -1732,6 +1741,47 @@ internal sealed class PartyChatControlCanary : IDisposable
         _joinedObserved &&
         _phase == PartyChatControlCanaryPhase.VoiceReady &&
         _permissionedRemoteChatControls.Count != 0;
+
+    private PartyVoiceUiStatus GetVoiceUiStatusLocked()
+    {
+        if (!_enableVoiceTest)
+            return PartyVoiceUiStatus.Disabled;
+
+        if (_sessionFaulted || _phase == PartyChatControlCanaryPhase.Disabled)
+            return new PartyVoiceUiStatus(PartyVoiceUiState.Faulted);
+
+        if (_disposed != 0 || _suspended || !_nativeCallsAllowed)
+            return PartyVoiceUiStatus.Unavailable;
+
+        if (_phase == PartyChatControlCanaryPhase.VoiceReady)
+        {
+            if (_permissionedRemoteChatControls.Count == 0)
+                return new PartyVoiceUiStatus(PartyVoiceUiState.WaitingForPeer);
+
+            // _inputUnmuted changes only after Party accepts the transition and the mute readback
+            // confirms the requested native state. A raw key-down can never report Speaking.
+            return _inputUnmuted && _microphoneMayBeOpen
+                ? new PartyVoiceUiStatus(PartyVoiceUiState.Speaking)
+                : new PartyVoiceUiStatus(PartyVoiceUiState.Ready);
+        }
+
+        return _phase switch
+        {
+            PartyChatControlCanaryPhase.WaitingForAuthenticatedSession or
+            PartyChatControlCanaryPhase.Completed =>
+                new PartyVoiceUiStatus(PartyVoiceUiState.WaitingForSession),
+            PartyChatControlCanaryPhase.Creating or
+            PartyChatControlCanaryPhase.ConfiguringMutedAudio or
+            PartyChatControlCanaryPhase.Connecting =>
+                new PartyVoiceUiStatus(PartyVoiceUiState.Connecting),
+            PartyChatControlCanaryPhase.JoinedMuted =>
+                new PartyVoiceUiStatus(PartyVoiceUiState.WaitingForPeer),
+            PartyChatControlCanaryPhase.Disconnecting or
+            PartyChatControlCanaryPhase.Destroying =>
+                new PartyVoiceUiStatus(PartyVoiceUiState.Disconnecting),
+            _ => PartyVoiceUiStatus.Unavailable,
+        };
+    }
 
     private void BeginNewSessionLocked(nint network, nint localUser)
     {

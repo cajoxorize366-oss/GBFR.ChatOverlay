@@ -109,13 +109,16 @@ Before touching `U`, both logs must contain a grant for the remote control disco
 Stage 3 voice test permissions granted for remote ChatControl=0x... on network=0x...: SendMicrophoneAudio|ReceiveMicrophoneAudio (0x0005). Input remains muted until U is held.
 ```
 
+The voice row at the top of the chat overlay should progress from `[VOICE] 等待进入联机房间` to `[VOICE] 等待队友语音通道`, then `[VOICE] 已就绪 · 按住 U 说话` after the permission line. A key-down alone must not display the speaking state before Party confirms the native unmute.
+
 Run this exact test in both directions:
 
 1. Client A holds `U`, speaks a short phrase, then releases `U`.
-2. A must log `Stage 3 push-to-talk microphone UNMUTED while U is held.` on key-down and `Stage 3 push-to-talk microphone muted.` on release.
-3. Client B must hear the phrase only during A's hold interval. Party does not expose a useful “audio was heard” state-change here, so the receiving result is a manual observation rather than a log line.
-4. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
-5. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. Return to the game and repeat a normal hold/release once to prove recovery.
+2. After Party confirms unmute, A's overlay must show `>>> [VOICE] 正在语音 · 松开 U 静音 <<<` and log `Stage 3 push-to-talk microphone UNMUTED while U is held.`
+3. On release, A's overlay must return to `[VOICE] 已就绪 · 按住 U 说话` and log `Stage 3 push-to-talk microphone muted.`
+4. Client B must hear the phrase only during A's hold interval. Party does not expose a useful “audio was heard” state-change here, so the receiving result is a manual observation rather than a log line.
+5. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
+6. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. After focus returns, the overlay must no longer show `正在语音`. Repeat a normal hold/release once to prove recovery.
 
 `U` is consumed by the Mod while this preview is available, so it should not reach Relink. The microphone must remain silent before the permission log, while `U` is released, after focus loss, and after the last remote Mod ChatControl leaves.
 

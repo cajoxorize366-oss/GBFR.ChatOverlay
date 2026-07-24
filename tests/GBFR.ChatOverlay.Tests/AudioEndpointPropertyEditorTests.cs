@@ -23,6 +23,25 @@ public sealed class AudioEndpointPropertyEditorTests
     }
 
     [Fact]
+    public void ReloadedPropertyResolver_DefaultsBothDeviceListsToExplicitDefault()
+    {
+        RunSta(() =>
+        {
+            var config = new Config();
+            var legacyBlankConfig = new Config
+            {
+                VoiceMicrophoneDeviceId = string.Empty,
+                VoicePlaybackDeviceId = string.Empty,
+            };
+
+            VerifyDefaultSelection(config, nameof(Config.VoiceMicrophoneDeviceId));
+            VerifyDefaultSelection(config, nameof(Config.VoicePlaybackDeviceId));
+            VerifyDefaultSelection(legacyBlankConfig, nameof(Config.VoiceMicrophoneDeviceId));
+            VerifyDefaultSelection(legacyBlankConfig, nameof(Config.VoicePlaybackDeviceId));
+        });
+    }
+
+    [Fact]
     public void ReloadedPropertyResolver_UsesFriendlyNameComboBoxesThatPersistRawIds()
     {
         RunSta(() =>
@@ -78,13 +97,32 @@ public sealed class AudioEndpointPropertyEditorTests
                           .Contains("Unavailable saved device", StringComparison.Ordinal));
         Assert.Contains(
             comboBox.Items.Cast<object>(),
-            choice => GetChoiceValue(choice, "Id").Length == 0 &&
+            choice => GetChoiceValue(choice, "Id") == "default" &&
                       GetChoiceValue(choice, "DisplayName")
-                          .Contains("Windows default communications", StringComparison.Ordinal));
+                          .StartsWith("Default", StringComparison.Ordinal));
 
-        comboBox.SelectedValue = string.Empty;
+        comboBox.SelectedValue = "default";
         BindingOperations.GetBindingExpression(comboBox, Selector.SelectedValueProperty)!.UpdateSource();
-        Assert.Equal(string.Empty, descriptor.GetValue(config));
+        Assert.Equal("default", descriptor.GetValue(config));
+    }
+
+    private static void VerifyDefaultSelection(Config config, string propertyName)
+    {
+        var descriptor = TypeDescriptor.GetProperties(config)[propertyName]!;
+        var editor = new PropertyResolver().ResolveEditor(descriptor);
+        var propertyItem = new PropertyItem
+        {
+            Value = config,
+            PropertyName = propertyName,
+            PropertyType = typeof(string),
+            IsReadOnly = false,
+        };
+        var comboBox = Assert.IsType<System.Windows.Controls.ComboBox>(editor.CreateElement(propertyItem));
+        editor.CreateBinding(propertyItem, comboBox);
+
+        Assert.Equal("default", comboBox.SelectedValue);
+        Assert.Equal("default", descriptor.GetValue(config));
+        Assert.StartsWith("Default", GetChoiceValue(comboBox.SelectedItem!, "DisplayName"));
     }
 
     private static string GetChoiceValue(object choice, string propertyName) =>

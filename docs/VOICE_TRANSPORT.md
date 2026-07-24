@@ -121,13 +121,13 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 3: push to talk
 
-- The external voice test is implemented and enabled by default in `0.3.0-preview.2`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
+- The external voice test is implemented and enabled by default in `0.3.0-preview.3`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
 - Negotiate Mod capability through a remote ChatControl joining the same existing PartyNetwork, not through gameplay endpoint packets.
 - Call `PartyChatControlSetPermissions(local, remote, 0x0005)` for each observed Mod peer. The only enabled bits are `SendMicrophoneAudio` (`0x0001`) and `ReceiveMicrophoneAudio` (`0x0004`); text-to-speech, text-chat and transcription permissions remain unset.
 - Keep the microphone synchronously muted and verified by default. DirectInput consumes `U` for the voice test; holding it unsets Party input mute and releasing it restores mute.
 - A 350 ms input heartbeat watchdog forces release after focus loss, lost key-up or stalled keyboard polling. Mod suspend, remote-capability loss, pre-leave cleanup and terminal failure also force a best-effort mute before ChatControl destruction.
 - Party calls are fenced while Relink owns a state-change batch. Permission and mute work runs only after the original `PartyFinishProcessingStateChanges` has returned.
-- Reloaded-II exposes independent dynamic lists for active Windows capture and render endpoints. The saved value is the stable `IMMDevice` endpoint ID while the UI displays the friendly device name. A blank selection follows Party's Windows default communications device; a saved endpoint that is no longer active falls back to that default with an explicit startup log. Party `Manual` selection is accepted only when the completion event confirms the exact endpoint ID before the ChatControl can connect.
+- Reloaded-II exposes independent dynamic lists for active Windows capture and render endpoints. Both lists default to an explicit `Default (Windows system default)` entry, which maps to Party's Windows default communications device. Manual choices save the stable `IMMDevice` endpoint ID while the UI displays the friendly device name. Legacy blank values migrate to `Default`; a saved endpoint that is no longer active falls back to that default with an explicit startup log. Party `Manual` selection is accepted only when the completion event confirms the exact endpoint ID before the ChatControl can connect.
 - Controller push-to-talk, per-player volume/mute and final in-overlay voice status remain future work.
 
 ## Safety and service boundary

@@ -20,6 +20,16 @@ public interface IAudioEndpointCatalog
     IReadOnlyList<AudioEndpointInfo> GetActiveEndpoints(AudioEndpointFlow flow);
 }
 
+public static class AudioEndpointSelectionValues
+{
+    public const string SystemDefault = "default";
+    public const string SystemDefaultLabel = "Default (Windows system default)";
+
+    public static bool IsSystemDefault(string? value) =>
+        string.IsNullOrWhiteSpace(value) ||
+        string.Equals(value, SystemDefault, StringComparison.OrdinalIgnoreCase);
+}
+
 public readonly record struct ResolvedAudioEndpointSelection(
     bool UseSystemDefault,
     string? DeviceId,
@@ -30,7 +40,7 @@ public readonly record struct ResolvedAudioEndpointSelection(
         new(
             UseSystemDefault: true,
             DeviceId: null,
-            DisplayName: AudioEndpointIdTypeConverter.SystemDefaultLabel,
+            DisplayName: AudioEndpointSelectionValues.SystemDefaultLabel,
             FellBack: fellBack);
 }
 
@@ -46,7 +56,7 @@ internal static class AudioEndpointSelectionResolver
         ArgumentNullException.ThrowIfNull(log);
 
         var role = flow == AudioEndpointFlow.Capture ? "microphone" : "playback";
-        if (string.IsNullOrWhiteSpace(configuredDeviceId))
+        if (AudioEndpointSelectionValues.IsSystemDefault(configuredDeviceId))
         {
             log($"Stage 3 voice {role}: following the Windows default communications device.");
             return ResolvedAudioEndpointSelection.SystemDefault();
@@ -92,8 +102,6 @@ internal static class AudioEndpointSelectionResolver
 /// </summary>
 public abstract class AudioEndpointIdTypeConverter : StringConverter
 {
-    public const string SystemDefaultLabel = "Follow Windows default communications device (recommended)";
-
     private readonly AudioEndpointFlow _flow;
     private readonly IAudioEndpointCatalog _catalog;
     private readonly object _snapshotSync = new();
@@ -117,7 +125,10 @@ public abstract class AudioEndpointIdTypeConverter : StringConverter
     public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context)
     {
         var endpoints = RefreshSnapshot();
-        var values = new List<string>(endpoints.Count + 2) { string.Empty };
+        var values = new List<string>(endpoints.Count + 2)
+        {
+            AudioEndpointSelectionValues.SystemDefault,
+        };
         values.AddRange(endpoints.Select(endpoint => endpoint.Id));
 
         var current = context?.PropertyDescriptor?.GetValue(context.Instance) as string;
@@ -142,8 +153,13 @@ public abstract class AudioEndpointIdTypeConverter : StringConverter
     {
         if (value is string text)
         {
-            if (string.Equals(text, SystemDefaultLabel, StringComparison.Ordinal))
-                return string.Empty;
+            if (string.Equals(
+                    text,
+                    AudioEndpointSelectionValues.SystemDefaultLabel,
+                    StringComparison.Ordinal))
+            {
+                return AudioEndpointSelectionValues.SystemDefault;
+            }
 
             var endpoints = GetSnapshot(refreshWhenEmpty: true);
             foreach (var endpoint in endpoints)
@@ -167,8 +183,8 @@ public abstract class AudioEndpointIdTypeConverter : StringConverter
     {
         if (destinationType == typeof(string) && value is string endpointId)
         {
-            if (string.IsNullOrWhiteSpace(endpointId))
-                return SystemDefaultLabel;
+            if (AudioEndpointSelectionValues.IsSystemDefault(endpointId))
+                return AudioEndpointSelectionValues.SystemDefaultLabel;
 
             var endpoints = GetSnapshot(refreshWhenEmpty: true);
             var endpoint = endpoints.FirstOrDefault(

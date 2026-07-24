@@ -59,6 +59,27 @@ public sealed class AudioEndpointCatalogTests
         Assert.Contains(logs, line => line.Contains("not active", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("default")]
+    [InlineData("DEFAULT")]
+    public void Resolver_ExplicitOrLegacyDefaultUsesWindowsSystemDefault(string? configuredValue)
+    {
+        var catalog = new FakeAudioEndpointCatalog([], []);
+
+        var selection = AudioEndpointSelectionResolver.Resolve(
+            configuredValue,
+            AudioEndpointFlow.Capture,
+            catalog,
+            _ => { });
+
+        Assert.True(selection.UseSystemDefault);
+        Assert.False(selection.FellBack);
+        Assert.Null(selection.DeviceId);
+        Assert.Equal(AudioEndpointSelectionValues.SystemDefaultLabel, selection.DisplayName);
+    }
+
     [Fact]
     public void Resolver_EnumerationFailureFallsBackToWindowsDefault()
     {
@@ -93,10 +114,15 @@ public sealed class AudioEndpointCatalogTests
             .Cast<string>()
             .ToArray();
 
-        Assert.Equal(new[] { string.Empty, "mic-default", "mic-other" }, values);
         Assert.Equal(
-            AudioEndpointIdTypeConverter.SystemDefaultLabel,
+            new[] { AudioEndpointSelectionValues.SystemDefault, "mic-default", "mic-other" },
+            values);
+        Assert.Equal(
+            AudioEndpointSelectionValues.SystemDefaultLabel,
             converter.ConvertToInvariantString(string.Empty));
+        Assert.Equal(
+            AudioEndpointSelectionValues.SystemDefaultLabel,
+            converter.ConvertToInvariantString(AudioEndpointSelectionValues.SystemDefault));
         Assert.Equal(
             "Studio Mic (Windows communications default)",
             converter.ConvertToInvariantString("mic-default"));
@@ -109,8 +135,8 @@ public sealed class AudioEndpointCatalogTests
         var config = new Config();
         var properties = TypeDescriptor.GetProperties(config);
 
-        Assert.Empty(config.VoiceMicrophoneDeviceId);
-        Assert.Empty(config.VoicePlaybackDeviceId);
+        Assert.Equal(AudioEndpointSelectionValues.SystemDefault, config.VoiceMicrophoneDeviceId);
+        Assert.Equal(AudioEndpointSelectionValues.SystemDefault, config.VoicePlaybackDeviceId);
         Assert.IsType<VoiceMicrophoneDeviceIdConverter>(
             properties[nameof(Config.VoiceMicrophoneDeviceId)]!.Converter);
         Assert.IsType<VoicePlaybackDeviceIdConverter>(

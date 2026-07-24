@@ -66,22 +66,22 @@ public class Config : Configurable<Config>
     public bool EnableVoiceInput { get; set; } = true;
 
     [DisplayName("Voice Microphone")]
-    [Description("Recording endpoint used by Party voice. The list is detected from active Windows microphones. Choose the default entry to follow Windows communication-device changes. Restart required.")]
+    [Description("Recording endpoint used by Party voice. Defaults to Default (Windows system default); active Windows microphones are listed as manual choices. Restart required.")]
     [Editor(
         "GBFR.ChatOverlay.ConfiguratorUI.VoiceMicrophonePropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
         "HandyControl.Controls.PropertyEditorBase, HandyControl")]
     [TypeConverter(typeof(VoiceMicrophoneDeviceIdConverter))]
-    [DefaultValue("")]
-    public string VoiceMicrophoneDeviceId { get; set; } = string.Empty;
+    [DefaultValue(AudioEndpointSelectionValues.SystemDefault)]
+    public string VoiceMicrophoneDeviceId { get; set; } = AudioEndpointSelectionValues.SystemDefault;
 
     [DisplayName("Voice Playback Device")]
-    [Description("Playback endpoint used for Party voice. The list is detected from active Windows speakers and headsets. Choose the default entry to follow Windows communication-device changes. Restart required.")]
+    [Description("Playback endpoint used for Party voice. Defaults to Default (Windows system default); active Windows speakers and headsets are listed as manual choices. Restart required.")]
     [Editor(
         "GBFR.ChatOverlay.ConfiguratorUI.VoicePlaybackPropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
         "HandyControl.Controls.PropertyEditorBase, HandyControl")]
     [TypeConverter(typeof(VoicePlaybackDeviceIdConverter))]
-    [DefaultValue("")]
-    public string VoicePlaybackDeviceId { get; set; } = string.Empty;
+    [DefaultValue(AudioEndpointSelectionValues.SystemDefault)]
+    public string VoicePlaybackDeviceId { get; set; } = AudioEndpointSelectionValues.SystemDefault;
 }
 
 /// <summary>

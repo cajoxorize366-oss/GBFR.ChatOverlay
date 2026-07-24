@@ -2,7 +2,7 @@
   "ModId": "gbfr.qol.chatoverlay",
   "ModName": "GBFR Chat Overlay",
   "ModAuthor": "Kuro",
-  "ModVersion": "0.3.0-preview.2",
+  "ModVersion": "0.3.0-preview.3",
   "ModDescription": "MMO-style chat overlay plus an experimental hold-U PlayFab Party voice test with selectable microphone and playback devices.",
   "ModDll": "GBFR.ChatOverlay.dll",
   "ModIcon": "Preview.png",

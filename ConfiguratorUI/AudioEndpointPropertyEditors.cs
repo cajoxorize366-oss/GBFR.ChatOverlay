@@ -10,8 +10,8 @@ public sealed record AudioEndpointChoice(string Id, string DisplayName);
 
 public abstract class AudioEndpointPropertyEditor : PropertyEditorBase
 {
-    public const string SystemDefaultLabel =
-        "Follow Windows default communications device (recommended)";
+    public const string SystemDefaultValue = "default";
+    public const string SystemDefaultLabel = "Default (Windows system default)";
 
     private readonly AudioEndpointFlow _flow;
 
@@ -23,9 +23,16 @@ public abstract class AudioEndpointPropertyEditor : PropertyEditorBase
     public override FrameworkElement CreateElement(PropertyItem propertyItem)
     {
         ArgumentNullException.ThrowIfNull(propertyItem);
-        var currentId = TypeDescriptor.GetProperties(propertyItem.Value)
-            [propertyItem.PropertyName]
-            ?.GetValue(propertyItem.Value) as string;
+        var propertyDescriptor = TypeDescriptor.GetProperties(propertyItem.Value)
+            [propertyItem.PropertyName];
+        var currentId = propertyDescriptor?.GetValue(propertyItem.Value) as string;
+        if (string.IsNullOrWhiteSpace(currentId) ||
+            string.Equals(currentId, SystemDefaultValue, StringComparison.OrdinalIgnoreCase))
+        {
+            currentId = SystemDefaultValue;
+            if (propertyDescriptor?.IsReadOnly == false)
+                propertyDescriptor.SetValue(propertyItem.Value, currentId);
+        }
 
         return new System.Windows.Controls.ComboBox
         {
@@ -79,7 +86,7 @@ internal static class AudioEndpointChoiceCatalog
 
         var choices = new List<AudioEndpointChoice>(endpoints.Count + 2)
         {
-            new(string.Empty, defaultLabel),
+            new(AudioEndpointPropertyEditor.SystemDefaultValue, defaultLabel),
         };
         foreach (var endpoint in endpoints)
         {
@@ -97,6 +104,10 @@ internal static class AudioEndpointChoiceCatalog
         }
 
         if (!string.IsNullOrWhiteSpace(currentId) &&
+            !string.Equals(
+                currentId,
+                AudioEndpointPropertyEditor.SystemDefaultValue,
+                StringComparison.OrdinalIgnoreCase) &&
             choices.All(choice => !string.Equals(choice.Id, currentId, StringComparison.Ordinal)))
         {
             choices.Add(new AudioEndpointChoice(

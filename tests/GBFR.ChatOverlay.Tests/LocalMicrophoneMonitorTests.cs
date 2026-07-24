@@ -32,6 +32,8 @@ public sealed class LocalMicrophoneMonitorTests
         Assert.True(backend.Silenced);
         Assert.True(backend.Stopped);
         Assert.True(backend.Disposed);
+        Assert.Contains(logs, line =>
+            line.Contains("playback was gated off", StringComparison.Ordinal));
         Assert.Contains(logs, line => line.Contains("result: PASS", StringComparison.Ordinal));
     }
 
@@ -47,6 +49,26 @@ public sealed class LocalMicrophoneMonitorTests
 
         Assert.Contains(logs, line =>
             line.Contains("no microphone signal", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SecondHold_StartsANewBackendAfterTheFirstRelease()
+    {
+        var first = new FakeBackend();
+        var second = new FakeBackend();
+        var factory = new FakeFactory(first, second);
+        using var monitor = CreateMonitor(factory, []);
+
+        monitor.SetPressed(true);
+        monitor.SetPressed(false);
+        monitor.SetPressed(true);
+
+        Assert.Equal(2, factory.CreateCount);
+        Assert.True(first.Silenced);
+        Assert.True(first.Stopped);
+        Assert.True(first.Disposed);
+        Assert.True(second.Started);
+        Assert.Equal(LocalMicrophoneMonitorState.Monitoring, monitor.State);
     }
 
     [Fact]
@@ -100,6 +122,43 @@ public sealed class LocalMicrophoneMonitorTests
         queue.Dequeue().Invoke();
 
         Assert.Equal(0, factory.CreateCount);
+        Assert.Equal(LocalMicrophoneMonitorState.Idle, monitor.State);
+    }
+
+    [Fact]
+    public async Task ReleaseWhileEndpointStartIsInFlight_GatesAndPreventsResurrection()
+    {
+        using var startEntered = new ManualResetEventSlim();
+        using var allowStartToReturn = new ManualResetEventSlim();
+        var backend = new FakeBackend
+        {
+            BeforeStartReturns = () =>
+            {
+                startEntered.Set();
+                Assert.True(allowStartToReturn.Wait(TimeSpan.FromSeconds(3)));
+            },
+        };
+        var factory = new FakeFactory(backend);
+        using var monitor = new LocalMicrophoneMonitor(
+            factory,
+            Input,
+            Output,
+            0.35f,
+            _ => { },
+            action => { _ = Task.Run(action); });
+
+        monitor.SetPressed(true);
+        Assert.True(startEntered.Wait(TimeSpan.FromSeconds(3)));
+
+        monitor.SetPressed(false);
+
+        Assert.True(backend.Silenced);
+        Assert.Equal(LocalMicrophoneMonitorState.Idle, monitor.State);
+        allowStartToReturn.Set();
+        Assert.True(SpinWait.SpinUntil(
+            () => backend.Stopped && backend.Disposed,
+            TimeSpan.FromSeconds(3)));
+        await Task.Yield();
         Assert.Equal(LocalMicrophoneMonitorState.Idle, monitor.State);
     }
 
@@ -163,7 +222,13 @@ public sealed class LocalMicrophoneMonitorTests
 
         public bool Disposed { get; private set; }
 
-        public void Start() => Started = true;
+        public Action? BeforeStartReturns { get; init; }
+
+        public void Start()
+        {
+            Started = true;
+            BeforeStartReturns?.Invoke();
+        }
 
         public void SilenceImmediately() => Silenced = true;
 

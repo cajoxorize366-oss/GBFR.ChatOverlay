@@ -101,15 +101,20 @@ Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x..
 
 ## Stage 3 two-client realtime voice test
 
-Before arranging a second tester, wear headphones and run the local preflight from the main menu: hold `I`, speak, and release. The overlay should show `本地监听中`, then `本地自检通过` after a signal is detected. You should hear the selected microphone through the selected playback device only while `I` is held. Expected logs are:
+Before arranging a second tester, wear headphones and run the local preflight from the main menu twice in immediate succession: hold `I`, speak, release, then press and hold `I` again without waiting for endpoint cleanup. The overlay should show `本地监听中`, then `本地自检通过` after a signal is detected on both holds. You should hear the selected microphone through the selected playback device only while `I` is held; release must silence it immediately, and the second hold must not remain stuck at `本地监听中`. Expected logs are:
 
 ```text
 Local microphone monitor started: input="...", output="...", volume=35%. Audio remains on this PC and is not sent through Party.
 Local microphone monitor detected input signal (peak ...%).
+Local microphone monitor release acknowledged; local playback was gated off and endpoint cleanup continues in the background.
 Local microphone monitor result: PASS — microphone signal was detected and sent to the selected local playback path.
+Local microphone monitor cleanup queued (stop requested); the playback gate is already closed.
+Local microphone monitor RecordingStopped event observed=True after ... ms.
+Local microphone monitor playback stopped after ... ms; PlaybackStopped event observed=True.
+Local microphone monitor cleanup complete after ... ms.
 ```
 
-No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. If `I` passes but Party later reports `NoAudioInput`, the physical Windows path is working and the remaining fault is inside Party selection/integration. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
+Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. If `I` passes but Party later reports `NoAudioInput`, the physical Windows path is working and the remaining fault is inside Party selection/integration. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
 
 Prerequisites for `U`: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Voice (U Party / I Local Test)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has both successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual) and displayed device name.
 

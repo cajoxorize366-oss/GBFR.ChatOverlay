@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
@@ -5,24 +6,35 @@ namespace GBFR.ChatOverlay.Audio;
 
 internal sealed class WasapiLocalAudioMonitorBackendFactory : ILocalAudioMonitorBackendFactory
 {
+    private readonly Action<string> _log;
+
+    public WasapiLocalAudioMonitorBackendFactory(Action<string>? log = null)
+    {
+        _log = log ?? (_ => { });
+    }
+
     public ILocalAudioMonitorBackend Create(
         ResolvedAudioEndpointSelection inputSelection,
         ResolvedAudioEndpointSelection outputSelection,
         float volume) =>
-        new WasapiLocalAudioMonitorBackend(inputSelection, outputSelection, volume);
+        new WasapiLocalAudioMonitorBackend(inputSelection, outputSelection, volume, _log);
 }
 
 /// <summary>
-/// One-shot shared-mode WASAPI capture-to-render path. The Party ChatControl is deliberately not
-/// involved: this backend exists only to let the local user hear the configured microphone.
+/// One-shot shared-mode WASAPI capture-to-render path. Release closes a lock-free playback gate
+/// synchronously, then moves every potentially blocking NAudio Stop/Dispose call to a dedicated
+/// background thread. A stuck endpoint cleanup can therefore neither keep audio audible nor block
+/// the next I hold or DirectInput polling.
 /// </summary>
 internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 {
-    private static readonly TimeSpan CaptureStopWait = TimeSpan.FromMilliseconds(750);
+    private static readonly TimeSpan CaptureStopWait = TimeSpan.FromMilliseconds(1_500);
+    private static readonly TimeSpan CleanupWarningDelay = TimeSpan.FromSeconds(2);
 
     private readonly ResolvedAudioEndpointSelection _inputSelection;
     private readonly ResolvedAudioEndpointSelection _outputSelection;
     private readonly float _volume;
+    private readonly Action<string> _log;
     private readonly object _sync = new();
     private readonly object _callbackSync = new();
     private readonly ManualResetEventSlim _recordingStopped = new(initialState: false);
@@ -33,23 +45,30 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
     private MMDevice? _renderDevice;
     private WasapiCapture? _capture;
     private WasapiOut? _output;
-    private BufferedWaveProvider? _buffer;
+    private GatedBufferedWaveProvider? _buffer;
+    private Timer? _cleanupWatchdog;
+    private string _cleanupPhase = "not started";
     private bool _started;
-    private bool _stopping;
-    private bool _silenced;
-    private bool _disposed;
     private bool _callbacksClosed;
     private int _callbacksInFlight;
+    private int _disposeRequested;
+    private int _cleanupStarted;
+    private int _stopping;
+    private int _cleanupCompleted;
     private int _faultSignaled;
+    private int _peakSignaled;
+    private int _playbackStoppedEventObserved;
 
     public WasapiLocalAudioMonitorBackend(
         ResolvedAudioEndpointSelection inputSelection,
         ResolvedAudioEndpointSelection outputSelection,
-        float volume)
+        float volume,
+        Action<string>? log = null)
     {
         _inputSelection = inputSelection;
         _outputSelection = outputSelection;
         _volume = Math.Clamp(volume, 0f, 0.5f);
+        _log = log ?? (_ => { });
     }
 
     public event Action<float>? PeakLevelChanged;
@@ -60,9 +79,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
     {
         lock (_sync)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_stopping)
-                throw new InvalidOperationException("A stopped local monitor backend cannot be restarted.");
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposeRequested) != 0, this);
             if (_started)
                 return;
 
@@ -72,13 +89,11 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
             EnsureActive(_captureDevice, "microphone");
             EnsureActive(_renderDevice, "playback");
 
-            _capture = new WasapiCapture(_captureDevice, useEventSync: true, audioBufferMillisecondsLength: 40);
-            _buffer = new BufferedWaveProvider(_capture.WaveFormat)
-            {
-                BufferDuration = TimeSpan.FromMilliseconds(250),
-                DiscardOnBufferOverflow = true,
-                ReadFully = true,
-            };
+            _capture = new WasapiCapture(
+                _captureDevice,
+                useEventSync: true,
+                audioBufferMillisecondsLength: 40);
+            _buffer = new GatedBufferedWaveProvider(_capture.WaveFormat, TimeSpan.FromMilliseconds(250));
             _output = new WasapiOut(
                 _renderDevice,
                 AudioClientShareMode.Shared,
@@ -93,16 +108,13 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 
             try
             {
-                // Start silence first, then capture. Teardown reverses this order so feedback ends
-                // before the microphone client is stopped.
                 _output.Play();
                 _capture.StartRecording();
                 _started = true;
             }
             catch
             {
-                _stopping = true;
-                DisposeResourcesLocked(requestCaptureStop: true);
+                RequestStopAndDispose("startup failure");
                 throw;
             }
         }
@@ -110,85 +122,154 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 
     public void SilenceImmediately()
     {
-        Volatile.Write(ref _silenced, true);
+        // Disable never takes the circular-buffer lock. A racing Read double-checks the gate after
+        // copying and overwrites the output with zeroes, so at most the render quantum already
+        // handed to WASAPI can remain audible.
+        Volatile.Read(ref _buffer)?.Disable();
+    }
+
+    public void Stop() => RequestStopAndDispose("stop requested");
+
+    public void Dispose() => RequestStopAndDispose("dispose requested");
+
+    private void RequestStopAndDispose(string reason)
+    {
+        Interlocked.Exchange(ref _stopping, 1);
+        SilenceImmediately();
+
+        Interlocked.Exchange(ref _disposeRequested, 1);
+        if (Interlocked.CompareExchange(ref _cleanupStarted, 1, 0) != 0)
+            return;
+
+        Thread cleanupThread;
+        lock (_sync)
+        {
+            SetCleanupPhase("queued");
+            _cleanupWatchdog = new Timer(
+                static state => ((WasapiLocalAudioMonitorBackend)state!).ReportSlowCleanup(),
+                this,
+                CleanupWarningDelay,
+                Timeout.InfiniteTimeSpan);
+            cleanupThread = new Thread(CleanupThreadMain)
+            {
+                IsBackground = true,
+                Name = "GBFR local microphone monitor cleanup",
+            };
+        }
+
+        SafeLog(
+            $"Local microphone monitor cleanup queued ({reason}); the playback gate is already closed.");
         try
         {
-            _buffer?.ClearBuffer();
+            cleanupThread.Start();
         }
-        catch
+        catch (Exception exception)
         {
-            // The background worker will still perform bounded Stop/Dispose.
+            SafeLog(
+                $"Local microphone monitor cleanup thread could not start: {exception.Message}; " +
+                "falling back to the thread pool.");
+            _ = ThreadPool.QueueUserWorkItem(
+                static state => ((WasapiLocalAudioMonitorBackend)state!).CleanupThreadMain(),
+                this);
         }
     }
 
-    public void Stop()
+    private void CleanupThreadMain()
     {
+        var stopwatch = Stopwatch.StartNew();
         WasapiCapture? capture;
         WasapiOut? output;
-        BufferedWaveProvider? buffer;
         lock (_sync)
         {
-            if (_disposed || _stopping)
-                return;
-
-            _stopping = true;
             capture = _capture;
             output = _output;
-            buffer = _buffer;
         }
 
-        // Stop local playback first so no buffered microphone audio can continue after I release.
         try
         {
-            SilenceImmediately();
-            output?.Stop();
-        }
-        catch
-        {
-            // Continue with capture shutdown and resource disposal.
-        }
+            SetCleanupPhase("requesting microphone stop");
+            if (capture is not null)
+            {
+                try
+                {
+                    capture.StopRecording();
+                }
+                catch (Exception exception)
+                {
+                    SafeLog($"Local microphone monitor capture stop request failed: {exception.Message}");
+                }
 
-        buffer?.ClearBuffer();
-        if (capture is not null)
+                var captureStopped = _recordingStopped.Wait(CaptureStopWait);
+                SafeLog(
+                    $"Local microphone monitor RecordingStopped event observed={captureStopped} " +
+                    $"after {stopwatch.ElapsedMilliseconds} ms.");
+            }
+
+            SetCleanupPhase("stopping local playback");
+            if (output is not null)
+            {
+                try
+                {
+                    output.Stop();
+                    SafeLog(
+                        $"Local microphone monitor playback stopped after " +
+                        $"{stopwatch.ElapsedMilliseconds} ms; " +
+                        $"PlaybackStopped event observed=" +
+                        $"{Volatile.Read(ref _playbackStoppedEventObserved) != 0}.");
+                }
+                catch (Exception exception)
+                {
+                    SafeLog($"Local microphone monitor playback stop failed: {exception.Message}");
+                }
+            }
+        }
+        finally
         {
+            CloseCallbacksAndWait();
+            SetCleanupPhase("disposing endpoints");
             try
             {
-                capture.StopRecording();
-                _recordingStopped.Wait(CaptureStopWait);
+                lock (_sync)
+                    DisposeResourcesLocked();
             }
-            catch
+            catch (Exception exception)
             {
-                // Dispose remains the final fail-closed boundary.
+                SafeLog($"Local microphone monitor endpoint disposal failed: {exception.Message}");
             }
-        }
 
-        lock (_sync)
-            DisposeResourcesLocked(requestCaptureStop: false);
+            Interlocked.Exchange(ref _cleanupCompleted, 1);
+            SetCleanupPhase("complete");
+            _cleanupWatchdog?.Dispose();
+            SafeLog(
+                $"Local microphone monitor cleanup complete after {stopwatch.ElapsedMilliseconds} ms.");
+        }
     }
 
-    public void Dispose()
+    private void CloseCallbacksAndWait()
     {
-        Stop();
+        SetCleanupPhase("draining audio callbacks");
         lock (_sync)
         {
-            if (_disposed)
-                return;
-
-            _disposed = true;
-            DisposeResourcesLocked(requestCaptureStop: false);
+            if (_capture is not null)
+            {
+                _capture.DataAvailable -= OnDataAvailable;
+                _capture.RecordingStopped -= OnRecordingStopped;
+            }
+            if (_output is not null)
+                _output.PlaybackStopped -= OnPlaybackStopped;
         }
 
-        // No callback can enter after callbacksClosed. If an already-running callback exceeded the
-        // bounded drain wait, leave these tiny managed wait objects for GC instead of racing a late
-        // Set() against Dispose().
         lock (_callbackSync)
         {
+            _callbacksClosed = true;
             if (_callbacksInFlight == 0)
-            {
-                _recordingStopped.Dispose();
-                _callbacksDrained.Dispose();
-            }
+                _callbacksDrained.Set();
         }
+
+        // This is a disposable background thread. Waiting here is safer than disposing a native
+        // endpoint under a callback; the watchdog identifies a pathological delay without ever
+        // blocking DirectInput, rendering, or a subsequent I hold.
+        _callbacksDrained.Wait();
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs args)
@@ -198,20 +279,18 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 
         try
         {
-            if (Volatile.Read(ref _stopping) ||
-                Volatile.Read(ref _silenced) ||
-                args.BytesRecorded <= 0)
+            if (Volatile.Read(ref _stopping) != 0 || args.BytesRecorded <= 0)
                 return;
 
-            var capture = _capture;
-            var buffer = _buffer;
+            var capture = Volatile.Read(ref _capture);
+            var buffer = Volatile.Read(ref _buffer);
             if (capture is null || buffer is null)
                 return;
 
             var peak = AudioSamplePeakMeter.Measure(
                 args.Buffer.AsSpan(0, args.BytesRecorded),
                 capture.WaveFormat);
-            PeakLevelChanged?.Invoke(peak);
+            PublishPeakOnce(peak);
             buffer.AddSamples(args.Buffer, 0, args.BytesRecorded);
         }
         catch (Exception exception)
@@ -232,7 +311,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
         try
         {
             _recordingStopped.Set();
-            if (!Volatile.Read(ref _stopping))
+            if (Volatile.Read(ref _stopping) == 0)
             {
                 SignalFault(args.Exception ??
                     new InvalidOperationException("The microphone capture endpoint stopped unexpectedly."));
@@ -251,7 +330,8 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 
         try
         {
-            if (!Volatile.Read(ref _stopping))
+            Interlocked.Exchange(ref _playbackStoppedEventObserved, 1);
+            if (Volatile.Read(ref _stopping) == 0)
             {
                 SignalFault(args.Exception ??
                     new InvalidOperationException("The local playback endpoint stopped unexpectedly."));
@@ -268,71 +348,45 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
         if (Interlocked.Exchange(ref _faultSignaled, 1) != 0)
             return;
 
-        try
-        {
-            Faulted?.Invoke(exception);
-        }
-        catch
-        {
-            // A subscriber failure must never escape a Core Audio callback.
-        }
+        var handler = Faulted;
+        if (handler is not null)
+            QueueManagedCallback(() => handler(exception));
     }
 
-    private void DisposeResourcesLocked(bool requestCaptureStop)
+    private void PublishPeakOnce(float peak)
     {
-        if (requestCaptureStop && _capture is not null)
+        if (!float.IsFinite(peak) ||
+            peak < 0.01f ||
+            Interlocked.Exchange(ref _peakSignaled, 1) != 0)
         {
-            try
-            {
-                _capture.StopRecording();
-            }
-            catch
-            {
-                // Best-effort during failed startup.
-            }
+            return;
         }
 
-        if (_capture is not null)
-        {
-            _capture.DataAvailable -= OnDataAvailable;
-            _capture.RecordingStopped -= OnRecordingStopped;
-        }
-        if (_output is not null)
-            _output.PlaybackStopped -= OnPlaybackStopped;
-
-        lock (_callbackSync)
-        {
-            _callbacksClosed = true;
-            if (_callbacksInFlight == 0)
-                _callbacksDrained.Set();
-        }
-        _callbacksDrained.Wait(CaptureStopWait);
-
-        _output?.Dispose();
-        _capture?.Dispose();
-        _renderDevice?.Dispose();
-        _captureDevice?.Dispose();
-        _enumerator?.Dispose();
-
-        _output = null;
-        _capture = null;
-        _buffer = null;
-        _renderDevice = null;
-        _captureDevice = null;
-        _enumerator = null;
-        _started = false;
+        var handler = PeakLevelChanged;
+        if (handler is not null)
+            QueueManagedCallback(() => handler(peak));
     }
 
-    private static MMDevice ResolveDevice(
-        MMDeviceEnumerator enumerator,
-        ResolvedAudioEndpointSelection selection,
-        DataFlow flow)
+    private void QueueManagedCallback(Action callback)
     {
-        if (selection.UseSystemDefault)
-            return enumerator.GetDefaultAudioEndpoint(flow, Role.Communications);
-        if (string.IsNullOrWhiteSpace(selection.DeviceId))
-            throw new InvalidOperationException("A manual audio endpoint selection has no device ID.");
-        return enumerator.GetDevice(selection.DeviceId);
+        if (ThreadPool.QueueUserWorkItem(
+                static state =>
+                {
+                    try
+                    {
+                        ((Action)state!).Invoke();
+                    }
+                    catch
+                    {
+                        // Managed subscribers cannot destabilize Core Audio or cleanup threads.
+                    }
+                },
+                callback))
+        {
+            return;
+        }
+
+        SafeLog("Local microphone monitor could not queue a managed audio notification.");
     }
 
     private bool TryEnterCallback()
@@ -359,6 +413,69 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
         }
     }
 
+    private void DisposeResourcesLocked()
+    {
+        _output?.Dispose();
+        _capture?.Dispose();
+        _renderDevice?.Dispose();
+        _captureDevice?.Dispose();
+        _enumerator?.Dispose();
+
+        _output = null;
+        _capture = null;
+        _buffer = null;
+        _renderDevice = null;
+        _captureDevice = null;
+        _enumerator = null;
+        _started = false;
+
+        lock (_callbackSync)
+        {
+            if (_callbacksInFlight == 0)
+            {
+                _recordingStopped.Dispose();
+                _callbacksDrained.Dispose();
+            }
+        }
+    }
+
+    private void ReportSlowCleanup()
+    {
+        if (Volatile.Read(ref _cleanupCompleted) != 0)
+            return;
+
+        SafeLog(
+            $"Local microphone monitor cleanup is still running after " +
+            $"{CleanupWarningDelay.TotalMilliseconds:0} ms at phase=\"{Volatile.Read(ref _cleanupPhase)}\". " +
+            "Playback remains gated off and another I hold is not blocked.");
+    }
+
+    private void SetCleanupPhase(string phase) => Volatile.Write(ref _cleanupPhase, phase);
+
+    private void SafeLog(string message)
+    {
+        try
+        {
+            _log(message);
+        }
+        catch
+        {
+            // Cleanup and audio callbacks cannot depend on the logger.
+        }
+    }
+
+    private static MMDevice ResolveDevice(
+        MMDeviceEnumerator enumerator,
+        ResolvedAudioEndpointSelection selection,
+        DataFlow flow)
+    {
+        if (selection.UseSystemDefault)
+            return enumerator.GetDefaultAudioEndpoint(flow, Role.Communications);
+        if (string.IsNullOrWhiteSpace(selection.DeviceId))
+            throw new InvalidOperationException("A manual audio endpoint selection has no device ID.");
+        return enumerator.GetDevice(selection.DeviceId);
+    }
+
     private static void EnsureActive(MMDevice device, string role)
     {
         if ((device.State & DeviceState.Active) == 0)
@@ -367,4 +484,52 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
                 $"The selected {role} endpoint is not active: {device.FriendlyName} ({device.State}).");
         }
     }
+}
+
+/// <summary>
+/// Buffered provider with a lock-free, one-way silence gate. Disable is safe on DirectInput's
+/// thread and never waits for BufferedWaveProvider's circular-buffer lock.
+/// </summary>
+internal sealed class GatedBufferedWaveProvider : IWaveProvider
+{
+    private readonly BufferedWaveProvider _inner;
+    private int _enabled = 1;
+
+    public GatedBufferedWaveProvider(WaveFormat format, TimeSpan bufferDuration)
+    {
+        _inner = new BufferedWaveProvider(format)
+        {
+            BufferDuration = bufferDuration,
+            DiscardOnBufferOverflow = true,
+            ReadFully = true,
+        };
+    }
+
+    public WaveFormat WaveFormat => _inner.WaveFormat;
+
+    public void AddSamples(byte[] buffer, int offset, int count)
+    {
+        if (Volatile.Read(ref _enabled) == 0)
+            return;
+        _inner.AddSamples(buffer, offset, count);
+    }
+
+    public int Read(byte[] buffer, int offset, int count)
+    {
+        if (Volatile.Read(ref _enabled) == 0)
+        {
+            Array.Clear(buffer, offset, count);
+            return count;
+        }
+
+        var read = _inner.Read(buffer, offset, count);
+        if (Volatile.Read(ref _enabled) == 0)
+        {
+            Array.Clear(buffer, offset, count);
+            return count;
+        }
+        return read;
+    }
+
+    public void Disable() => Interlocked.Exchange(ref _enabled, 0);
 }

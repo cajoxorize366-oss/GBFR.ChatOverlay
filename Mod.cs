@@ -111,7 +111,7 @@ public class Mod : ModBase // <= Do not Remove.
             try
             {
                 _localMicrophoneMonitor = new LocalMicrophoneMonitor(
-                    new WasapiLocalAudioMonitorBackendFactory(),
+                    new WasapiLocalAudioMonitorBackendFactory(moduleLog),
                     audioInputSelection,
                     audioOutputSelection,
                     (float)_configuration.MicrophoneSelfMonitorVolume,

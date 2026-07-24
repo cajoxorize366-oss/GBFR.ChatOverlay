@@ -1,6 +1,6 @@
 # One-run Party voice troubleshooting matrix
 
-This is the required test for `0.3.0-preview.6`. It follows Microsoft PlayFab Party's official audio troubleshooting flow and is designed to extract the useful evidence from one two-client session. Do not repeat isolated device-switch experiments before collecting this run.
+This is the required test for `0.3.0-preview.7`. It follows Microsoft PlayFab Party's official audio troubleshooting flow and is designed to extract the useful evidence from one two-client session. Do not repeat isolated device-switch experiments before collecting this run.
 
 ## What the package now measures
 

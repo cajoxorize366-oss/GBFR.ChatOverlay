@@ -114,7 +114,8 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             if (!pressed && _desiredPressed)
             {
                 resultLog = !_holdStarted
-                    ? "Local microphone monitor stopped before audio activation completed."
+                    ? "Local microphone monitor release acknowledged before audio activation completed; " +
+                      "the pending start was cancelled."
                     : _signalDetected
                         ? "Local microphone monitor result: PASS — microphone signal was detected and sent to the selected local playback path."
                         : "Local microphone monitor result: no microphone signal was observed during this hold.";
@@ -137,9 +138,15 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             scheduleReconcile = MarkReconcileScheduledLocked();
         }
 
+        var playbackWasGated = SilenceImmediately(silenceBackend);
+        if (playbackWasGated)
+        {
+            SafeLog(
+                "Local microphone monitor release acknowledged; local playback was gated off " +
+                "and endpoint cleanup continues in the background.");
+        }
         if (resultLog is not null)
             SafeLog(resultLog);
-        SilenceImmediately(silenceBackend);
         if (scheduleReconcile)
             ScheduleReconcile();
     }
@@ -161,7 +168,7 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             scheduleReconcile = MarkReconcileScheduledLocked();
         }
 
-        SilenceImmediately(silenceBackend);
+        _ = SilenceImmediately(silenceBackend);
         if (scheduleReconcile)
             ScheduleReconcile();
     }
@@ -195,7 +202,7 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             scheduleReconcile = MarkReconcileScheduledLocked();
         }
 
-        SilenceImmediately(silenceBackend);
+        _ = SilenceImmediately(silenceBackend);
         if (scheduleReconcile)
             ScheduleReconcile();
     }
@@ -368,7 +375,7 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
                 $"Local microphone monitor failed closed with {exception.GetType().Name}: " +
                 $"{exception.Message}");
         }
-        SilenceImmediately(silenceBackend);
+        _ = SilenceImmediately(silenceBackend);
         if (scheduleReconcile)
             ScheduleReconcile();
     }
@@ -444,18 +451,22 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
         }
     }
 
-    private static void SilenceImmediately(ILocalAudioMonitorBackend? backend)
+    private bool SilenceImmediately(ILocalAudioMonitorBackend? backend)
     {
         if (backend is null)
-            return;
+            return false;
 
         try
         {
             backend.SilenceImmediately();
+            return true;
         }
-        catch
+        catch (Exception exception)
         {
-            // The serialized worker still owns final Stop/Dispose.
+            SafeLog(
+                $"Local microphone monitor immediate silence request failed: {exception.Message}; " +
+                "the background endpoint cleanup remains queued.");
+            return false;
         }
     }
 

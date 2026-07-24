@@ -107,6 +107,7 @@ public static class PartyStateChangeCatalog
             PartyStateChangeType.ChatControlLeftNetwork or
             PartyStateChangeType.ConnectChatControlCompleted or
             PartyStateChangeType.DisconnectChatControlCompleted or
+            PartyStateChangeType.ConfigureAudioManipulationCaptureStreamCompleted or
             PartyStateChangeType.CreateInvitationCompleted or
             PartyStateChangeType.RevokeInvitationCompleted or
             PartyStateChangeType.InvitationCreated or

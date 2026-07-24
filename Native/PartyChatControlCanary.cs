@@ -28,6 +28,8 @@ internal sealed class PartyChatControlCanary : IDisposable
 {
     private const uint Success = 0;
     private const uint SucceededStateChange = 0;
+    private const float CaptureSignalThreshold = 0.01f;
+    private const int MaximumConsecutiveCaptureSubmitFailures = 3;
     private static readonly long VoiceDiagnosticIntervalTicks = Math.Max(1, Stopwatch.Frequency / 4);
     private const PartyChatPermissionOptions MicrophoneVoicePermissions =
         PartyChatPermissionOptions.SendMicrophoneAudio |
@@ -37,6 +39,8 @@ internal sealed class PartyChatControlCanary : IDisposable
     private readonly Action<string> _log;
     private readonly Action<Action> _schedule;
     private readonly bool _enableVoiceTest;
+    private readonly IPartyMicrophoneCaptureBackendFactory? _captureBackendFactory;
+    private readonly bool _useCaptureBridge;
     private readonly ResolvedAudioEndpointSelection _audioInputSelection;
     private readonly ResolvedAudioEndpointSelection _audioOutputSelection;
     private readonly object _stateSync = new();
@@ -48,12 +52,14 @@ internal sealed class PartyChatControlCanary : IDisposable
     private readonly GCHandle _createTokenHandle;
     private readonly GCHandle _inputTokenHandle;
     private readonly GCHandle _outputTokenHandle;
+    private readonly GCHandle _captureStreamTokenHandle;
     private readonly GCHandle _connectTokenHandle;
     private readonly GCHandle _disconnectTokenHandle;
     private readonly GCHandle _destroyTokenHandle;
     private readonly nint _createToken;
     private readonly nint _inputToken;
     private readonly nint _outputToken;
+    private readonly nint _captureStreamToken;
     private readonly nint _connectToken;
     private readonly nint _disconnectToken;
     private readonly nint _destroyToken;
@@ -75,6 +81,8 @@ internal sealed class PartyChatControlCanary : IDisposable
     private bool _createdObserved;
     private bool _inputCompleted;
     private bool _outputCompleted;
+    private bool _captureStreamConfigureCompleted;
+    private bool _captureStreamAcquired;
     private bool _connectCompleted;
     private bool _joinedObserved;
     private bool _disconnectQueued;
@@ -90,6 +98,17 @@ internal sealed class PartyChatControlCanary : IDisposable
     // Conservative native-state marker. This is set before an unmute call so a concurrent
     // fail-closed path never relies solely on the managed mirror being updated afterwards.
     private bool _microphoneMayBeOpen;
+    private nint _captureStream;
+    private IPartyMicrophoneCaptureBackend? _activeCaptureBackend;
+    private long _activeCaptureEpoch;
+    private long _nextCaptureEpoch;
+    private int _captureFramesSubmitted;
+    private int _captureFramesSkippedForStateBatch;
+    private int _captureSubmitFailures;
+    private int _captureConsecutiveSubmitFailures;
+    private float _capturePeak;
+    private bool _captureSignalSubmitted;
+    private bool _captureFirstFrameLogged;
     private PartyAudioInputState? _audioInputState;
     private uint _audioInputStateErrorDetail;
     private PartyAudioOutputState? _audioOutputState;
@@ -116,11 +135,14 @@ internal sealed class PartyChatControlCanary : IDisposable
         Action<Action>? schedule = null,
         bool enableVoiceTest = false,
         ResolvedAudioEndpointSelection? audioInputSelection = null,
-        ResolvedAudioEndpointSelection? audioOutputSelection = null)
+        ResolvedAudioEndpointSelection? audioOutputSelection = null,
+        IPartyMicrophoneCaptureBackendFactory? captureBackendFactory = null)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _enableVoiceTest = enableVoiceTest;
+        _captureBackendFactory = captureBackendFactory;
+        _useCaptureBridge = enableVoiceTest && captureBackendFactory is not null;
         _audioInputSelection = audioInputSelection ??
             ResolvedAudioEndpointSelection.SystemDefault();
         _audioOutputSelection = audioOutputSelection ??
@@ -130,12 +152,14 @@ internal sealed class PartyChatControlCanary : IDisposable
         _createTokenHandle = AllocateToken("create");
         _inputTokenHandle = AllocateToken("audio-input");
         _outputTokenHandle = AllocateToken("audio-output");
+        _captureStreamTokenHandle = AllocateToken("audio-manipulation-capture-stream");
         _connectTokenHandle = AllocateToken("connect");
         _disconnectTokenHandle = AllocateToken("disconnect");
         _destroyTokenHandle = AllocateToken("destroy");
         _createToken = GCHandle.ToIntPtr(_createTokenHandle);
         _inputToken = GCHandle.ToIntPtr(_inputTokenHandle);
         _outputToken = GCHandle.ToIntPtr(_outputTokenHandle);
+        _captureStreamToken = GCHandle.ToIntPtr(_captureStreamTokenHandle);
         _connectToken = GCHandle.ToIntPtr(_connectTokenHandle);
         _disconnectToken = GCHandle.ToIntPtr(_disconnectTokenHandle);
         _destroyToken = GCHandle.ToIntPtr(_destroyTokenHandle);
@@ -173,6 +197,8 @@ internal sealed class PartyChatControlCanary : IDisposable
     internal nint AudioInputAsyncIdentifier => _inputToken;
 
     internal nint AudioOutputAsyncIdentifier => _outputToken;
+
+    internal nint CaptureStreamAsyncIdentifier => _captureStreamToken;
 
     internal nint ConnectAsyncIdentifier => _connectToken;
 
@@ -250,6 +276,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                     break;
                 case PartyStateChangeType.LocalChatAudioOutputChanged:
                     ObserveAudioStateChangedLocked(state, input: false);
+                    break;
+                case PartyStateChangeType.ConfigureAudioManipulationCaptureStreamCompleted:
+                    ObserveCaptureStreamConfiguredLocked(state);
                     break;
                 case PartyStateChangeType.ConnectChatControlCompleted:
                     ObserveConnectCompletedLocked(state);
@@ -347,7 +376,11 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 _localChatControl = nint.Zero;
                 _localDevice = nint.Zero;
+                _captureStream = nint.Zero;
+                _captureStreamAcquired = false;
+                _captureStreamConfigureCompleted = false;
                 _pushToTalkPressed = false;
+                StopActiveCaptureLocked("local ChatControl destroyed");
                 _inputUnmuted = false;
                 _microphoneMayBeOpen = false;
                 EnqueueVoiceDiagnosticSummaryLocked("local ChatControl destroyed");
@@ -371,6 +404,7 @@ internal sealed class PartyChatControlCanary : IDisposable
 
     public void SetPushToTalkPressed(bool pressed)
     {
+        IPartyMicrophoneCaptureBackend? captureToStop = null;
         lock (_stateSync)
         {
             if (_disposed != 0)
@@ -380,7 +414,18 @@ internal sealed class PartyChatControlCanary : IDisposable
             _pushToTalkPressed = normalizedPressed;
             if (changed && _enableVoiceTest && _localChatControl != nint.Zero)
                 _voiceDiagnosticRequested = true;
+            if (changed && !normalizedPressed && _activeCaptureBackend is not null)
+            {
+                captureToStop = _activeCaptureBackend;
+                DetachCaptureBackendLocked(
+                    captureToStop,
+                    _activeCaptureEpoch,
+                    "U released or was revoked");
+            }
         }
+
+        if (captureToStop is not null)
+            StopCaptureBackendSafely(captureToStop);
 
         TryScheduleWork();
     }
@@ -426,6 +471,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 if (_stateBatchActive)
                 {
                     _pushToTalkPressed = false;
+                    StopActiveCaptureLocked("network leave during Party state batch");
                     _sessionFaulted = true;
                     _nativeCallsAllowed = false;
                     _phase = PartyChatControlCanaryPhase.Disabled;
@@ -444,6 +490,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _authenticated = false;
                 _teardownRequested = _localChatControl != nint.Zero;
                 _pushToTalkPressed = false;
+                StopActiveCaptureLocked("Relink network leave");
                 EnqueueVoiceDiagnosticSummaryLocked("Relink network leave");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
@@ -575,6 +622,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                     return;
 
                 _pushToTalkPressed = false;
+                StopActiveCaptureLocked("Party manager cleanup");
                 _generation++;
                 chatControl = _localChatControl;
             }
@@ -674,6 +722,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _suspended = true;
                 _nativeCallsAllowed = false;
                 _pushToTalkPressed = false;
+                StopActiveCaptureLocked("Mod suspension");
                 EnqueueVoiceDiagnosticSummaryLocked("Mod suspension");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
@@ -764,6 +813,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _nativeCallsAllowed = false;
                 _teardownRequested = false;
                 _pushToTalkPressed = false;
+                StopActiveCaptureLocked("Mod disposal");
                 EnqueueVoiceDiagnosticSummaryLocked("Mod disposal");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
@@ -813,7 +863,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
 
         // Party treats asyncIdentifier as an opaque pointer and may return it in a later state
-        // change. The Mod is marked CanUnload=false, so retaining these six tiny GCHandles until
+        // change. The Mod is marked CanUnload=false, so retaining these seven tiny GCHandles until
         // process exit is safer than allowing their pointer values to be recycled after an
         // initialization failure while Party may still have an operation in flight.
     }
@@ -978,6 +1028,24 @@ internal sealed class PartyChatControlCanary : IDisposable
             _voiceDiagnosticRequested = true;
     }
 
+    private void ObserveCaptureStreamConfiguredLocked(PartyStateChangeSnapshot state)
+    {
+        if (!_useCaptureBridge || state.AsyncIdentifier != _captureStreamToken)
+            return;
+
+        EnqueueLogLocked(
+            $"Stage 3 ConfigureAudioManipulationCaptureStreamCompleted: result={state.Result}, " +
+            $"error=0x{state.ErrorDetail:X8}, chatControl={Hex(state.ChatControl)}.");
+        if (state.Result != SucceededStateChange || state.ChatControl != _localChatControl)
+        {
+            RequestTeardownLocked(
+                "ConfigureAudioManipulationCaptureStreamCompleted did not confirm the owned capture sink operation");
+            return;
+        }
+
+        _captureStreamConfigureCompleted = true;
+    }
+
     private void ObserveConnectCompletedLocked(PartyStateChangeSnapshot state)
     {
         if (state.AsyncIdentifier != _connectToken)
@@ -1054,6 +1122,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         if (state.ChatControl == _localChatControl)
         {
             _pushToTalkPressed = false;
+            StopActiveCaptureLocked("local ChatControl left network");
             EnqueueVoiceDiagnosticSummaryLocked("local ChatControl left network");
             _remoteChatControls.Clear();
             _permissionedRemoteChatControls.Clear();
@@ -1077,6 +1146,8 @@ internal sealed class PartyChatControlCanary : IDisposable
                     _phase == PartyChatControlCanaryPhase.VoiceReady)
                 {
                     _phase = PartyChatControlCanaryPhase.JoinedMuted;
+                    _pushToTalkPressed = false;
+                    StopActiveCaptureLocked("last permissioned remote ChatControl left");
                 }
                 if (_remoteChatControls.Count == 0)
                     EnqueueVoiceDiagnosticSummaryLocked("last remote ChatControl left network");
@@ -1123,6 +1194,8 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _phase == PartyChatControlCanaryPhase.VoiceReady)
             {
                 _phase = PartyChatControlCanaryPhase.JoinedMuted;
+                _pushToTalkPressed = false;
+                StopActiveCaptureLocked("last permissioned remote ChatControl was destroyed");
             }
             if (_remoteChatControls.Count == 0)
                 EnqueueVoiceDiagnosticSummaryLocked("last remote ChatControl destroyed");
@@ -1145,6 +1218,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _endpointReady = false;
         _authenticated = false;
         _pushToTalkPressed = false;
+        StopActiveCaptureLocked("Party network cleanup state");
         EnqueueVoiceDiagnosticSummaryLocked("Party network cleanup state");
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
@@ -1163,6 +1237,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _authenticated = false;
         _networkLeaving = true;
         _pushToTalkPressed = false;
+        StopActiveCaptureLocked("local Party user removed");
         EnqueueVoiceDiagnosticSummaryLocked("local Party user removed");
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
@@ -1241,6 +1316,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 case CanaryWorkKind.GrantVoicePermissions:
                 case CanaryWorkKind.ApplyPushToTalk:
                 case CanaryWorkKind.CaptureVoiceDiagnostics:
+                case CanaryWorkKind.AcquireCaptureStream:
                     break;
             }
         }
@@ -1290,10 +1366,21 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
 
         if (_phase == PartyChatControlCanaryPhase.ConfiguringMutedAudio &&
+            _useCaptureBridge &&
+            _captureStreamConfigureCompleted &&
+            !_captureStreamAcquired &&
+            _localChatControl != nint.Zero &&
+            !_networkLeaving)
+        {
+            return CaptureWorkLocked(CanaryWorkKind.AcquireCaptureStream);
+        }
+
+        if (_phase == PartyChatControlCanaryPhase.ConfiguringMutedAudio &&
             _createCompleted &&
             _createdObserved &&
             _inputCompleted &&
             _outputCompleted &&
+            (!_useCaptureBridge || _captureStreamAcquired) &&
             _localChatControl != nint.Zero &&
             !_networkLeaving)
         {
@@ -1382,6 +1469,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                     case CanaryWorkKind.CaptureVoiceDiagnostics:
                         ExecuteVoiceDiagnosticsNonFatal(work);
                         break;
+                    case CanaryWorkKind.AcquireCaptureStream:
+                        ExecuteAcquireCaptureStream(work);
+                        break;
                 }
             }
         }
@@ -1455,24 +1545,40 @@ internal sealed class PartyChatControlCanary : IDisposable
             return;
         }
 
+        var staleCreate = false;
         lock (_stateSync)
         {
             if (!IsWorkCurrentLocked(work))
             {
-                _ = _api.SetAudioInputMuted(chatControl, muted: true);
-                _ = _api.DestroyChatControl(localDevice, chatControl, _destroyToken);
-                EnqueueLogLocked(
-                    "Stage 2 create completed after its session became stale; the orphaned ChatControl was immediately muted and destroyed.");
-                return;
+                staleCreate = true;
             }
-            _localDevice = localDevice;
-            _localChatControl = chatControl;
-            _inputUnmuted = false;
-            _microphoneMayBeOpen = false;
-            _pushToTalkPressed = false;
-            _remoteChatControls.Clear();
-            _permissionedRemoteChatControls.Clear();
-            ResetVoiceDiagnosticEvidenceLocked();
+            else
+            {
+                _localDevice = localDevice;
+                _localChatControl = chatControl;
+                _inputUnmuted = false;
+                _microphoneMayBeOpen = false;
+                _pushToTalkPressed = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
+                ResetVoiceDiagnosticEvidenceLocked();
+            }
+        }
+
+        if (staleCreate)
+        {
+            // ExecuteWork already owns _apiCallSync. Keep Party calls out of _stateSync so a
+            // synchronous native callback can never invert the API/state lock order.
+            var orphanMuteResult = _api.SetAudioInputMuted(chatControl, muted: true);
+            var orphanDestroyResult = _api.DestroyChatControl(localDevice, chatControl, _destroyToken);
+            lock (_stateSync)
+            {
+                EnqueueLogLocked(
+                    "Stage 2 create completed after its session became stale; the orphaned " +
+                    $"ChatControl cleanup returned mute=0x{orphanMuteResult:X8}, " +
+                    $"destroy=0x{orphanDestroyResult:X8}.");
+            }
+            return;
         }
 
         result = _api.SetAudioInputMuted(chatControl, muted: true);
@@ -1522,6 +1628,21 @@ internal sealed class PartyChatControlCanary : IDisposable
             return;
         }
 
+        if (_useCaptureBridge)
+        {
+            result = _api.ConfigureAudioManipulationCaptureStream(
+                chatControl,
+                _captureStreamToken);
+            if (result != Success)
+            {
+                FailNativeAction(
+                    "PartyChatControlConfigureAudioManipulationCaptureStream(24kHz mono float)",
+                    result,
+                    hasOwnedChatControl: true);
+                return;
+            }
+        }
+
         lock (_stateSync)
         {
             if (!IsWorkCurrentLocked(work))
@@ -1534,7 +1655,10 @@ internal sealed class PartyChatControlCanary : IDisposable
                 $"microphone=\"{_audioInputSelection.DisplayName}\" ({inputSelectionType}), " +
                 $"playback=\"{_audioOutputSelection.DisplayName}\" ({outputSelectionType}); " +
                 (_enableVoiceTest
-                    ? "microphone permissions remain None until a remote Mod ChatControl joins this network."
+                    ? _useCaptureBridge
+                        ? "the official Party capture sink was requested at 24 kHz mono float; " +
+                          "microphone permissions remain None until a remote Mod ChatControl joins this network."
+                        : "microphone permissions remain None until a remote Mod ChatControl joins this network."
                     : "PartyChatControlSetPermissions will not be called."));
         }
     }
@@ -1556,6 +1680,50 @@ internal sealed class PartyChatControlCanary : IDisposable
                     $"Stage 2 ConnectChatControl queued for existing network={Hex(work.Network)}, " +
                     $"chatControl={Hex(work.ChatControl)}; awaiting completion and joined events.");
             }
+        }
+    }
+
+    private void ExecuteAcquireCaptureStream(CanaryWorkItem work)
+    {
+        var result = _api.GetAudioManipulationCaptureStream(
+            work.ChatControl,
+            out var captureStream);
+        if (result != Success || captureStream == nint.Zero)
+        {
+            FailNativeAction(
+                "PartyChatControlGetAudioManipulationCaptureStream",
+                result,
+                hasOwnedChatControl: true);
+            return;
+        }
+
+        result = _api.GetAudioManipulationSinkFormat(captureStream, out var format);
+        if (result != Success || !IsExpectedCaptureFormat(format))
+        {
+            lock (_stateSync)
+            {
+                if (IsWorkCurrentLocked(work))
+                {
+                    RequestTeardownLocked(
+                        result != Success
+                            ? $"PartyAudioManipulationSinkStreamGetFormat returned 0x{result:X8}"
+                            : $"Party capture sink returned unsupported format {FormatAudioFormat(format)}");
+                }
+            }
+            return;
+        }
+
+        lock (_stateSync)
+        {
+            if (!IsWorkCurrentLocked(work))
+                return;
+
+            _captureStream = captureStream;
+            _captureStreamAcquired = true;
+            EnqueueLogLocked(
+                $"Stage 3 official Party capture sink acquired: stream={Hex(captureStream)}, " +
+                $"format={FormatAudioFormat(format)}. U microphone frames will use this sink and " +
+                "the existing authenticated PartyNetwork; no gameplay endpoint packets are used.");
         }
     }
 
@@ -1597,16 +1765,103 @@ internal sealed class PartyChatControlCanary : IDisposable
 
     private void ExecutePushToTalk(CanaryWorkItem work)
     {
+        IPartyMicrophoneCaptureBackend? startedCapture = null;
+        var captureEpoch = 0L;
+        if (work.UnmuteInput && _useCaptureBridge)
+        {
+            try
+            {
+                startedCapture = _captureBackendFactory!.Create(_audioInputSelection);
+                lock (_stateSync)
+                {
+                    if (!IsWorkCurrentLocked(work) ||
+                        !_captureStreamAcquired ||
+                        _captureStream == nint.Zero)
+                    {
+                        StopCaptureBackendSafely(startedCapture);
+                        return;
+                    }
+
+                    captureEpoch = ++_nextCaptureEpoch;
+                    _activeCaptureEpoch = captureEpoch;
+                    _activeCaptureBackend = startedCapture;
+                    ResetCaptureHoldEvidenceLocked();
+                }
+
+                var capture = startedCapture;
+                capture.FrameReady += frame => OnCaptureFrameReady(capture, captureEpoch, frame);
+                capture.Faulted += exception => OnCaptureBackendFaulted(capture, captureEpoch, exception);
+                capture.Start();
+
+                lock (_stateSync)
+                {
+                    if (!IsWorkCurrentLocked(work) ||
+                        !ReferenceEquals(_activeCaptureBackend, capture) ||
+                        _activeCaptureEpoch != captureEpoch)
+                    {
+                        DetachCaptureBackendLocked(capture, captureEpoch, "U hold ended during microphone startup");
+                        StopCaptureBackendSafely(capture);
+                        return;
+                    }
+
+                    EnqueueLogLocked(
+                        $"Stage 3 Party microphone capture started for U: " +
+                        $"input=\"{_audioInputSelection.DisplayName}\", " +
+                        $"sourceFormat={capture.CaptureFormatDescription}, " +
+                        "PartySinkFormat=24000 Hz mono float32, frame=40 ms.");
+                }
+            }
+            catch (Exception exception)
+            {
+                if (startedCapture is not null)
+                {
+                    lock (_stateSync)
+                        DetachCaptureBackendLocked(startedCapture, captureEpoch, "microphone startup failure");
+                    StopCaptureBackendSafely(startedCapture);
+                }
+
+                lock (_stateSync)
+                {
+                    if (IsWorkCurrentLocked(work))
+                    {
+                        RequestEmergencyVoiceTeardownLocked(
+                            $"Windows microphone capture could not start: " +
+                            $"{exception.GetType().Name}: {Sanitize(exception.Message)}");
+                    }
+                }
+                return;
+            }
+        }
+
         if (work.UnmuteInput)
         {
+            var startBecameStale = false;
             lock (_stateSync)
             {
                 if (!IsWorkCurrentLocked(work))
-                    return;
+                {
+                    startBecameStale = true;
+                    if (startedCapture is not null)
+                    {
+                        DetachCaptureBackendLocked(
+                            startedCapture,
+                            captureEpoch,
+                            "U hold ended before Party input could be unmuted");
+                    }
+                }
+                else
+                {
+                    // Set this before touching Party. Another thread can now fail closed without a
+                    // window where native input is open but the managed state still says muted.
+                    _microphoneMayBeOpen = true;
+                }
+            }
 
-                // Set this before touching Party. Another thread can now fail closed without a
-                // window where native input is open but the managed state still says muted.
-                _microphoneMayBeOpen = true;
+            if (startBecameStale)
+            {
+                if (startedCapture is not null)
+                    StopCaptureBackendSafely(startedCapture);
+                return;
             }
         }
 
@@ -1619,6 +1874,12 @@ internal sealed class PartyChatControlCanary : IDisposable
         if (setResult != Success || verifyResult != Success || observedMuted != desiredMuted)
         {
             var emergencyMuteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+            if (startedCapture is not null)
+            {
+                lock (_stateSync)
+                    DetachCaptureBackendLocked(startedCapture, captureEpoch, "Party mute transition failure");
+                StopCaptureBackendSafely(startedCapture);
+            }
             lock (_stateSync)
             {
                 if (work.ChatControl == _localChatControl)
@@ -1635,6 +1896,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
 
         var staleUnmute = false;
+        IPartyMicrophoneCaptureBackend? captureToStop = null;
         lock (_stateSync)
         {
             if (!IsWorkCurrentLocked(work))
@@ -1653,24 +1915,39 @@ internal sealed class PartyChatControlCanary : IDisposable
                 }
                 else if (_pttCycleActive)
                 {
-                    EnqueueLogLocked(
-                        "Stage 3 local microphone capture result for the completed U hold: " +
-                        (_pttCycleLocalTalkingObserved
-                            ? "PASS - Party GetLocalChatIndicator reached Talking."
-                            : "NOT OBSERVED - Party never reported Talking; speak for at least three seconds " +
-                              "during the next U hold and check the diagnostic snapshots."));
+                    LogCaptureHoldSummaryLocked("completed U hold");
                     _pttCycleActive = false;
                 }
+                if (!work.UnmuteInput && _activeCaptureBackend is not null)
+                {
+                    captureToStop = _activeCaptureBackend;
+                    DetachCaptureBackendLocked(
+                        captureToStop,
+                        _activeCaptureEpoch,
+                        "Party input muted after U release");
+                }
                 EnqueueLogLocked(work.UnmuteInput
-                    ? "Stage 3 push-to-talk microphone UNMUTED while U is held."
+                    ? _useCaptureBridge
+                        ? "Stage 3 push-to-talk microphone UNMUTED while U is held; " +
+                          "Windows microphone frames are now feeding the official Party capture sink."
+                        : "Stage 3 push-to-talk microphone UNMUTED while U is held."
                     : "Stage 3 push-to-talk microphone muted.");
             }
         }
+
+        if (captureToStop is not null)
+            StopCaptureBackendSafely(captureToStop);
 
         if (!staleUnmute)
             return;
 
         var staleMuteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+        if (startedCapture is not null)
+        {
+            lock (_stateSync)
+                DetachCaptureBackendLocked(startedCapture, captureEpoch, "stale U unmute reversed");
+            StopCaptureBackendSafely(startedCapture);
+        }
         lock (_stateSync)
         {
             if (staleMuteResult == Success)
@@ -1682,6 +1959,242 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 RequestEmergencyVoiceTeardownLocked(
                     $"stale push-to-talk unmute could not be reversed: mute=0x{staleMuteResult:X8}");
+            }
+        }
+    }
+
+    private void OnCaptureFrameReady(
+        IPartyMicrophoneCaptureBackend backend,
+        long captureEpoch,
+        PartyMicrophoneCaptureFrame frame)
+    {
+        if (frame.SampleCount != WasapiPartyMicrophoneCaptureBackend.PartySamplesPerFrame ||
+            frame.Buffer.Length != WasapiPartyMicrophoneCaptureBackend.PartyBytesPerFrame)
+        {
+            FailActiveCaptureBridge(
+                backend,
+                captureEpoch,
+                $"capture backend emitted an invalid frame: samples={frame.SampleCount}, " +
+                $"bytes={frame.Buffer.Length}");
+            return;
+        }
+
+        uint submitResult;
+        var failAfterSubmit = false;
+        lock (_apiCallSync)
+        {
+            nint captureStream;
+            lock (_stateSync)
+            {
+                if (!IsActiveCaptureLocked(backend, captureEpoch) ||
+                    !_inputUnmuted ||
+                    !_microphoneMayBeOpen ||
+                    !ShouldInputBeUnmutedLocked() ||
+                    _captureStream == nint.Zero)
+                {
+                    return;
+                }
+
+                if (_stateBatchActive)
+                {
+                    _captureFramesSkippedForStateBatch++;
+                    return;
+                }
+
+                captureStream = _captureStream;
+            }
+
+            submitResult = _api.SubmitAudioManipulationCaptureBuffer(
+                captureStream,
+                frame.Buffer,
+                frame.Buffer.Length);
+
+            lock (_stateSync)
+            {
+                if (!IsActiveCaptureLocked(backend, captureEpoch))
+                    return;
+
+                if (submitResult == Success)
+                {
+                    _captureFramesSubmitted++;
+                    _captureConsecutiveSubmitFailures = 0;
+                    _capturePeak = Math.Max(_capturePeak, frame.Peak);
+                    if (!_captureFirstFrameLogged)
+                    {
+                        _captureFirstFrameLogged = true;
+                        EnqueueLogLocked(
+                            "Stage 3 Party capture sink accepted the first 40 ms microphone frame " +
+                            $"({frame.Buffer.Length} bytes).");
+                    }
+                    if (!_captureSignalSubmitted && frame.Peak >= CaptureSignalThreshold)
+                    {
+                        _captureSignalSubmitted = true;
+                        EnqueueLogLocked(
+                            $"Stage 3 Party capture sink accepted microphone signal (peak {frame.Peak:P0}); " +
+                            "this PCM is now on the Party voice transport path.");
+                    }
+                }
+                else
+                {
+                    _captureSubmitFailures++;
+                    _captureConsecutiveSubmitFailures++;
+                    EnqueueLogLocked(
+                        $"Stage 3 PartyAudioManipulationSinkStreamSubmitBuffer returned " +
+                        $"0x{submitResult:X8} (consecutive={_captureConsecutiveSubmitFailures}).");
+                    failAfterSubmit =
+                        _captureConsecutiveSubmitFailures >= MaximumConsecutiveCaptureSubmitFailures;
+                }
+            }
+        }
+
+        if (failAfterSubmit)
+        {
+            FailActiveCaptureBridge(
+                backend,
+                captureEpoch,
+                $"Party capture sink rejected {MaximumConsecutiveCaptureSubmitFailures} consecutive frames; " +
+                $"last error=0x{submitResult:X8}");
+        }
+    }
+
+    private void OnCaptureBackendFaulted(
+        IPartyMicrophoneCaptureBackend backend,
+        long captureEpoch,
+        Exception exception) =>
+        FailActiveCaptureBridge(
+            backend,
+            captureEpoch,
+            $"Windows microphone capture failed: {exception.GetType().Name}: {Sanitize(exception.Message)}");
+
+    private void FailActiveCaptureBridge(
+        IPartyMicrophoneCaptureBackend backend,
+        long captureEpoch,
+        string reason)
+    {
+        var shouldSchedule = false;
+        lock (_apiCallSync)
+        {
+            nint chatControl;
+            var canMuteNow = false;
+            lock (_stateSync)
+            {
+                if (!IsActiveCaptureLocked(backend, captureEpoch))
+                    return;
+
+                _pushToTalkPressed = false;
+                chatControl = _localChatControl;
+                canMuteNow = chatControl != nint.Zero &&
+                             !_stateBatchActive &&
+                             _nativeCallsAllowed &&
+                             !_suspended;
+                DetachCaptureBackendLocked(backend, captureEpoch, reason);
+            }
+
+            var muteResult = canMuteNow
+                ? _api.SetAudioInputMuted(chatControl, muted: true)
+                : uint.MaxValue;
+            lock (_stateSync)
+            {
+                _inputUnmuted = false;
+                if (muteResult == Success)
+                    _microphoneMayBeOpen = false;
+                RequestEmergencyVoiceTeardownLocked(
+                    $"{reason}; emergencyMute=" +
+                    (canMuteNow ? $"0x{muteResult:X8}" : "deferred until the Party state batch ends"));
+                shouldSchedule = true;
+            }
+        }
+
+        StopCaptureBackendSafely(backend);
+        if (shouldSchedule)
+            TryScheduleWork();
+    }
+
+    private bool IsActiveCaptureLocked(
+        IPartyMicrophoneCaptureBackend backend,
+        long captureEpoch) =>
+        ReferenceEquals(_activeCaptureBackend, backend) &&
+        _activeCaptureEpoch == captureEpoch &&
+        captureEpoch != 0;
+
+    private void DetachCaptureBackendLocked(
+        IPartyMicrophoneCaptureBackend backend,
+        long captureEpoch,
+        string reason)
+    {
+        if (!IsActiveCaptureLocked(backend, captureEpoch))
+            return;
+
+        _activeCaptureBackend = null;
+        _activeCaptureEpoch = 0;
+        EnqueueLogLocked($"Stage 3 Party microphone submission gate closed ({reason}).");
+    }
+
+    private void StopActiveCaptureLocked(string reason)
+    {
+        if (_activeCaptureBackend is not { } backend)
+            return;
+
+        var captureEpoch = _activeCaptureEpoch;
+        DetachCaptureBackendLocked(backend, captureEpoch, reason);
+        // Closing the submission gate above is the synchronous safety boundary. Endpoint stop and
+        // disposal stay off _stateSync because a backend is allowed to finish a FrameReady/Faulted
+        // callback while it is stopping.
+        _ = Task.Run(() => StopCaptureBackendSafely(backend));
+    }
+
+    private void ResetCaptureHoldEvidenceLocked()
+    {
+        _captureFramesSubmitted = 0;
+        _captureFramesSkippedForStateBatch = 0;
+        _captureSubmitFailures = 0;
+        _captureConsecutiveSubmitFailures = 0;
+        _capturePeak = 0;
+        _captureSignalSubmitted = false;
+        _captureFirstFrameLogged = false;
+    }
+
+    private void LogCaptureHoldSummaryLocked(string reason)
+    {
+        if (!_useCaptureBridge)
+        {
+            EnqueueLogLocked(
+                "Stage 3 local microphone capture result for the completed U hold: " +
+                (_pttCycleLocalTalkingObserved
+                    ? "PASS - Party GetLocalChatIndicator reached Talking."
+                    : "NOT OBSERVED - Party never reported Talking; speak for at least three seconds " +
+                      "during the next U hold and check the diagnostic snapshots."));
+            return;
+        }
+
+        var verdict = _captureFramesSubmitted == 0
+            ? "FAIL_NO_PARTY_CAPTURE_SINK_FRAMES_ACCEPTED"
+            : !_captureSignalSubmitted
+                ? "NO_SPEECH_SIGNAL_OBSERVED"
+                : "PASS_PARTY_CAPTURE_SINK_ACCEPTED_MICROPHONE_SIGNAL";
+        EnqueueLogLocked(
+            $"Stage 3 Party capture bridge result ({reason}): verdict={verdict}, " +
+            $"submittedFrames={_captureFramesSubmitted}, " +
+            $"submittedAudioMs={_captureFramesSubmitted * WasapiPartyMicrophoneCaptureBackend.PartyFrameDurationMilliseconds}, " +
+            $"peak={_capturePeak:P0}, submitFailures={_captureSubmitFailures}, " +
+            $"framesSkippedDuringRelinkStateBatch={_captureFramesSkippedForStateBatch}, " +
+            $"PartyLocalTalkingObserved={_pttCycleLocalTalkingObserved}.");
+    }
+
+    private void StopCaptureBackendSafely(IPartyMicrophoneCaptureBackend backend)
+    {
+        try
+        {
+            backend.StopImmediately();
+            backend.Dispose();
+        }
+        catch (Exception exception)
+        {
+            lock (_stateSync)
+            {
+                EnqueueLogLocked(
+                    $"Stage 3 Party microphone cleanup request failed without reopening submission: " +
+                    $"{exception.GetType().Name}: {Sanitize(exception.Message)}.");
             }
         }
     }
@@ -1718,6 +2231,9 @@ internal sealed class PartyChatControlCanary : IDisposable
         uint inputStateErrorDetail;
         PartyAudioOutputState? outputState;
         uint outputStateErrorDetail;
+        int captureFramesSubmitted;
+        bool captureSignalSubmitted;
+        float capturePeak;
         lock (_stateSync)
         {
             if (!IsWorkCurrentLocked(work))
@@ -1730,6 +2246,9 @@ internal sealed class PartyChatControlCanary : IDisposable
             inputStateErrorDetail = _audioInputStateErrorDetail;
             outputState = _audioOutputState;
             outputStateErrorDetail = _audioOutputStateErrorDetail;
+            captureFramesSubmitted = _captureFramesSubmitted;
+            captureSignalSubmitted = _captureSignalSubmitted;
+            capturePeak = _capturePeak;
         }
 
         var inputMuted = CaptureDiagnostic(
@@ -1769,6 +2288,16 @@ internal sealed class PartyChatControlCanary : IDisposable
                 return (result, new PartyAudioDeviceDiagnostic(selectionType, selectionContext, deviceId));
             });
 
+        var localDiagnosis = DiagnoseLocalVoicePath(
+            inputState,
+            outputState,
+            pushToTalkPressed,
+            inputUnmuted,
+            inputMuted,
+            localIndicator,
+            _useCaptureBridge,
+            captureFramesSubmitted,
+            captureSignalSubmitted);
         var localFingerprint =
             $"inputState={FormatAudioState(inputState, inputStateErrorDetail)}, " +
             $"outputState={FormatAudioState(outputState, outputStateErrorDetail)}, " +
@@ -1777,7 +2306,9 @@ internal sealed class PartyChatControlCanary : IDisposable
             $"localIndicator={FormatDiagnostic(localIndicator, FormatEnum)}, " +
             $"inputDevice={FormatDiagnostic(inputDevice, FormatAudioDevice)}, " +
             $"outputDevice={FormatDiagnostic(outputDevice, FormatAudioDevice)}, " +
-            $"diagnosis={DiagnoseLocalVoicePath(inputState, outputState, pushToTalkPressed, inputUnmuted, inputMuted, localIndicator)}";
+            $"captureSink=enabled:{_useCaptureBridge},frames:{captureFramesSubmitted}," +
+            $"signal:{captureSignalSubmitted},peak:{capturePeak:P0}, " +
+            $"diagnosis={localDiagnosis}";
 
         lock (_stateSync)
         {
@@ -2010,7 +2541,12 @@ internal sealed class PartyChatControlCanary : IDisposable
                     _microphoneMayBeOpen = false;
                 }
                 _destroyCallBegan = true;
-                EnqueueLogLocked("Stage 2 DestroyChatControl queued; awaiting completed and destroyed events.");
+                EnqueueLogLocked(
+                    muteResult == Success
+                        ? "Stage 2 DestroyChatControl queued; awaiting completed and destroyed events."
+                        : $"Stage 2 DestroyChatControl queued after the final native mute returned " +
+                          $"0x{muteResult:X8}; the managed capture submission gate is closed and " +
+                          "ChatControl destruction is the remaining Party privacy boundary.");
             }
         }
     }
@@ -2049,18 +2585,23 @@ internal sealed class PartyChatControlCanary : IDisposable
         var anyPositiveRenderVolume = peerEvidence.Any(
             static pair => pair.Value.PositiveRenderVolumeObserved);
         var anyRemoteTalking = peerEvidence.Any(static pair => pair.Value.RemoteTalkingObserved);
+        var localSendEvidence = _useCaptureBridge
+            ? _captureFramesSubmitted > 0 && _captureSignalSubmitted
+            : _diagnosticLocalTalkingObserved;
         var verdict = !_voiceDiagnosticSnapshotObserved
             ? "INCONCLUSIVE_NO_DIAGNOSTIC_SNAPSHOT"
-            : _audioInputState is null
+            : !_useCaptureBridge && _audioInputState is null
                 ? "INCONCLUSIVE_INPUT_STATE_NOT_OBSERVED"
-                : _audioInputState != PartyAudioInputState.Initialized
+                : !_useCaptureBridge && _audioInputState != PartyAudioInputState.Initialized
                     ? $"FAIL_INPUT_STATE_{_audioInputState}"
                     : _audioOutputState is null
                         ? "INCONCLUSIVE_OUTPUT_STATE_NOT_OBSERVED"
                         : _audioOutputState != PartyAudioOutputState.Initialized
                             ? $"FAIL_OUTPUT_STATE_{_audioOutputState}"
-                            : !_diagnosticLocalTalkingObserved
-                                ? "FAIL_LOCAL_TALKING_NOT_OBSERVED"
+                            : !localSendEvidence
+                                ? _useCaptureBridge
+                                    ? "FAIL_CAPTURE_SINK_SIGNAL_NOT_SUBMITTED"
+                                    : "FAIL_LOCAL_TALKING_NOT_OBSERVED"
                                 : peerEvidence.Length == 0
                                     ? "INCONCLUSIVE_NO_PEER_DIAGNOSTIC_EVIDENCE"
                                     : !anyPermissions
@@ -2093,6 +2634,8 @@ internal sealed class PartyChatControlCanary : IDisposable
             $"partySelectedInput={(_diagnosticInputDevice is { } input ? FormatAudioDevice(input) : "NotRead")}, " +
             $"partySelectedOutput={(_diagnosticOutputDevice is { } output ? FormatAudioDevice(output) : "NotRead")}, " +
             $"localTalkingObserved={_diagnosticLocalTalkingObserved}, " +
+            $"captureSinkEnabled={_useCaptureBridge}, captureFramesSubmitted={_captureFramesSubmitted}, " +
+            $"captureSignalSubmitted={_captureSignalSubmitted}, capturePeak={_capturePeak:P0}, " +
             $"completePeer={(completePeer.Value is null ? "none" : Hex(completePeer.Key))}, " +
             $"peerEvidence={peerEvidenceText}. " +
             "PASS proves Party observed both directions and an enabled render path; physical audibility " +
@@ -2187,16 +2730,36 @@ internal sealed class PartyChatControlCanary : IDisposable
         bool pushToTalkPressed,
         bool inputUnmuted,
         DiagnosticQuery<bool> inputMuted,
-        DiagnosticQuery<PartyLocalChatControlChatIndicator> localIndicator)
+        DiagnosticQuery<PartyLocalChatControlChatIndicator> localIndicator,
+        bool captureBridgeEnabled,
+        int captureFramesSubmitted,
+        bool captureSignalSubmitted)
     {
-        if (inputState is null || outputState is null)
-            return "INCONCLUSIVE_WAITING_FOR_AUDIO_STATE_EVENTS";
-        if (inputState != PartyAudioInputState.Initialized)
-            return $"FAIL_LOCAL_INPUT_{inputState}";
+        if (outputState is null)
+            return "INCONCLUSIVE_WAITING_FOR_OUTPUT_STATE_EVENT";
         if (outputState != PartyAudioOutputState.Initialized)
             return $"FAIL_LOCAL_OUTPUT_{outputState}";
         if (!inputMuted.Succeeded || !localIndicator.Succeeded)
             return "INCONCLUSIVE_LOCAL_GETTER_ERROR";
+        if (captureBridgeEnabled)
+        {
+            if (pushToTalkPressed && (!inputUnmuted || inputMuted.Value))
+                return "FAIL_PTT_DID_NOT_OPEN_PARTY_CAPTURE_SINK_INPUT";
+            if (inputUnmuted && captureFramesSubmitted == 0)
+                return "WAITING_FOR_FIRST_PARTY_CAPTURE_SINK_FRAME";
+            if (inputUnmuted && captureSignalSubmitted)
+                return localIndicator.Value == PartyLocalChatControlChatIndicator.Talking
+                    ? "PASS_CAPTURE_SINK_SIGNAL_AND_PARTY_TALKING"
+                    : "PASS_CAPTURE_SINK_ACCEPTED_SIGNAL_WAITING_FOR_REMOTE_CONFIRMATION";
+            if (inputUnmuted)
+                return "WAITING_FOR_CAPTURE_SINK_SPEECH_SIGNAL";
+            return "READY_PARTY_CAPTURE_SINK_SAFELY_MUTED";
+        }
+
+        if (inputState is null)
+            return "INCONCLUSIVE_WAITING_FOR_INPUT_STATE_EVENT";
+        if (inputState != PartyAudioInputState.Initialized)
+            return $"FAIL_LOCAL_INPUT_{inputState}";
         if (localIndicator.Value == PartyLocalChatControlChatIndicator.NoAudioInput)
             return "FAIL_LOCAL_NO_AUDIO_INPUT";
         if (pushToTalkPressed && (!inputUnmuted || inputMuted.Value))
@@ -2267,6 +2830,19 @@ internal sealed class PartyChatControlCanary : IDisposable
         $"selection={FormatEnum(device.SelectionType)}, context={Quote(device.SelectionContext)}, " +
         $"selectedDeviceId={Quote(device.DeviceId)}";
 
+    private static bool IsExpectedCaptureFormat(PartyAudioFormatDescriptor format) =>
+        format.SamplesPerSecond == WasapiPartyMicrophoneCaptureBackend.PartySampleRate &&
+        format.ChannelMask == 0 &&
+        format.ChannelCount == 1 &&
+        format.BitsPerSample == 32 &&
+        format.SampleType == PartyAudioSampleType.Float &&
+        !format.Interleaved;
+
+    private static string FormatAudioFormat(PartyAudioFormatDescriptor format) =>
+        $"{format.SamplesPerSecond} Hz, channelMask=0x{format.ChannelMask:X}, " +
+        $"channels={format.ChannelCount}, bits={format.BitsPerSample}, " +
+        $"sampleType={format.SampleType}, interleaved={format.Interleaved}";
+
     private static string FormatVolume(float volume) =>
         volume.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
 
@@ -2289,6 +2865,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             if (hasOwnedChatControl && _localChatControl != nint.Zero)
             {
                 _pushToTalkPressed = false;
+                StopActiveCaptureLocked($"native action {operation} failed");
                 _teardownRequested = true;
                 _joinedObserved = false;
                 _networkLeaving = true;
@@ -2303,6 +2880,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private void RequestTeardownLocked(string reason)
     {
         _pushToTalkPressed = false;
+        StopActiveCaptureLocked($"Stage 2 teardown: {reason}");
         EnqueueLogLocked(
             $"Stage 2 canary validation failed: {reason}; cleanup requested with microphone mute enforced.");
         _sessionFaulted = true;
@@ -2314,6 +2892,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private void RequestEmergencyVoiceTeardownLocked(string reason)
     {
         _pushToTalkPressed = false;
+        StopActiveCaptureLocked($"Stage 3 emergency teardown: {reason}");
         _inputUnmuted = false;
         EnqueueVoiceDiagnosticSummaryLocked("Stage 3 fail-closed teardown");
         _remoteChatControls.Clear();
@@ -2335,6 +2914,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     {
         _sessionFaulted = true;
         _pushToTalkPressed = false;
+        StopActiveCaptureLocked($"fail-closed: {reason}");
         _phase = PartyChatControlCanaryPhase.Disabled;
         _generation++;
         if ((_inputUnmuted || _microphoneMayBeOpen) &&
@@ -2442,6 +3022,7 @@ internal sealed class PartyChatControlCanary : IDisposable
 
     private void BeginNewSessionLocked(nint network, nint localUser)
     {
+        StopActiveCaptureLocked("new Party session");
         _network = network;
         _localUser = localUser;
         _localDevice = nint.Zero;
@@ -2454,6 +3035,9 @@ internal sealed class PartyChatControlCanary : IDisposable
         _createdObserved = false;
         _inputCompleted = false;
         _outputCompleted = false;
+        _captureStreamConfigureCompleted = false;
+        _captureStreamAcquired = false;
+        _captureStream = nint.Zero;
         _connectCompleted = false;
         _joinedObserved = false;
         _disconnectQueued = false;
@@ -2472,12 +3056,14 @@ internal sealed class PartyChatControlCanary : IDisposable
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
         ResetVoiceDiagnosticStateLocked();
+        ResetCaptureHoldEvidenceLocked();
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
 
     private void ResetForNextManagerLocked()
     {
+        StopActiveCaptureLocked("Party manager reset");
         _manager = nint.Zero;
         _network = nint.Zero;
         _localUser = nint.Zero;
@@ -2492,6 +3078,9 @@ internal sealed class PartyChatControlCanary : IDisposable
         _createdObserved = false;
         _inputCompleted = false;
         _outputCompleted = false;
+        _captureStreamConfigureCompleted = false;
+        _captureStreamAcquired = false;
+        _captureStream = nint.Zero;
         _connectCompleted = false;
         _joinedObserved = false;
         _disconnectQueued = false;
@@ -2510,6 +3099,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
         ResetVoiceDiagnosticStateLocked();
+        ResetCaptureHoldEvidenceLocked();
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
@@ -2573,6 +3163,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         GrantVoicePermissions,
         ApplyPushToTalk,
         CaptureVoiceDiagnostics,
+        AcquireCaptureStream,
     }
 
     private readonly record struct CanaryWorkItem(

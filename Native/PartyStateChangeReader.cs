@@ -102,6 +102,8 @@ internal static class PartyStateChangeReader
             PartyStateChangeType.ConnectChatControlCompleted or
             PartyStateChangeType.DisconnectChatControlCompleted =>
                 ReadChatControlNetworkOperationCompleted(stateChange, type),
+            PartyStateChangeType.ConfigureAudioManipulationCaptureStreamCompleted =>
+                ReadConfigureAudioManipulationCaptureStreamCompleted(stateChange, type),
             _ => new PartyStateChangeSnapshot(type),
         };
     }
@@ -226,6 +228,17 @@ internal static class PartyStateChangeReader
             ErrorDetail = ReadUInt32(pointer, 8),
             Network = Marshal.ReadIntPtr(pointer, 16),
             ChatControl = Marshal.ReadIntPtr(pointer, 24),
+            AsyncIdentifier = Marshal.ReadIntPtr(pointer, 32),
+        };
+
+    private static PartyStateChangeSnapshot ReadConfigureAudioManipulationCaptureStreamCompleted(
+        nint pointer,
+        uint type) =>
+        new(type)
+        {
+            Result = ReadUInt32(pointer, 4),
+            ErrorDetail = ReadUInt32(pointer, 8),
+            ChatControl = Marshal.ReadIntPtr(pointer, 16),
             AsyncIdentifier = Marshal.ReadIntPtr(pointer, 32),
         };
 

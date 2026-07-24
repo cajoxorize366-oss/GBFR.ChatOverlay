@@ -61,12 +61,12 @@ public class Config : Configurable<Config>
     public double BackgroundOpacity { get; set; } = 0.55;
 
     [DisplayName("Experimental Voice (U Party / I Local Test)")]
-    [Description("PREVIEW: hold U for Party voice with another Mod client; hold I to hear the selected microphone locally through the selected playback device. The I path never sends audio over the network. Release, focus loss, input timeout and session exit force both paths off. Restart required.")]
+    [Description("PREVIEW: hold U to capture the selected Windows microphone and feed 24 kHz mono audio into PlayFab Party's official capture sink for another Mod client. Hold I for local-only microphone monitoring. Release, focus loss, input timeout and session exit force both paths off. Restart required.")]
     [DefaultValue(true)]
     public bool EnableVoiceInput { get; set; } = true;
 
     [DisplayName("Voice Microphone")]
-    [Description("Recording endpoint used by Party voice. Defaults to Default (Windows system default); active Windows microphones are listed as manual choices. Restart required.")]
+    [Description("Windows recording endpoint captured while U or I is held. U submits it through the existing PlayFab Party voice channel; I plays it only on this PC. Defaults to Default (Windows system default). Restart required.")]
     [Editor(
         "GBFR.ChatOverlay.ConfiguratorUI.VoiceMicrophonePropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
         "HandyControl.Controls.PropertyEditorBase, HandyControl")]

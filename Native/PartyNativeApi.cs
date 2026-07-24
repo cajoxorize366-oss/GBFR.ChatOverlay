@@ -23,6 +23,20 @@ internal enum PartyAudioDeviceSelectionType : uint
     Manual = 3,
 }
 
+internal enum PartyAudioSampleType : uint
+{
+    Integer = 0,
+    Float = 1,
+}
+
+internal readonly record struct PartyAudioFormatDescriptor(
+    uint SamplesPerSecond,
+    uint ChannelMask,
+    ushort ChannelCount,
+    ushort BitsPerSample,
+    PartyAudioSampleType SampleType,
+    bool Interleaved);
+
 internal enum PartyAudioInputState : uint
 {
     NoInput = 0,
@@ -138,6 +152,33 @@ internal interface IPartyChatControlApi
     uint ConnectChatControl(nint network, nint localChatControl, nint asyncIdentifier);
 
     uint DisconnectChatControl(nint network, nint localChatControl, nint asyncIdentifier);
+
+    uint ConfigureAudioManipulationCaptureStream(
+        nint localChatControl,
+        nint asyncIdentifier) =>
+        throw new NotSupportedException("Party audio manipulation capture is not bound by this API implementation.");
+
+    uint GetAudioManipulationCaptureStream(
+        nint localChatControl,
+        out nint captureStream)
+    {
+        captureStream = nint.Zero;
+        throw new NotSupportedException("Party audio manipulation capture is not bound by this API implementation.");
+    }
+
+    uint GetAudioManipulationSinkFormat(
+        nint captureStream,
+        out PartyAudioFormatDescriptor format)
+    {
+        format = default;
+        throw new NotSupportedException("Party audio manipulation capture is not bound by this API implementation.");
+    }
+
+    uint SubmitAudioManipulationCaptureBuffer(
+        nint captureStream,
+        byte[] buffer,
+        int count) =>
+        throw new NotSupportedException("Party audio manipulation capture is not bound by this API implementation.");
 }
 
 /// <summary>
@@ -167,6 +208,16 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     private readonly PartyChatControlSetAudioDeviceDelegate _chatControlSetAudioOutput;
     private readonly PartyNetworkConnectChatControlDelegate _networkConnectChatControl;
     private readonly PartyNetworkDisconnectChatControlDelegate _networkDisconnectChatControl;
+    private readonly PartyChatControlConfigureAudioManipulationCaptureStreamDelegate
+        _chatControlConfigureAudioManipulationCaptureStream;
+    private readonly PartyChatControlGetAudioManipulationCaptureStreamDelegate
+        _chatControlGetAudioManipulationCaptureStream;
+    private readonly PartyAudioManipulationSinkStreamGetFormatDelegate
+        _audioManipulationSinkStreamGetFormat;
+    private readonly PartyAudioManipulationSinkStreamSubmitBufferDelegate
+        _audioManipulationSinkStreamSubmitBuffer;
+    private readonly nint _captureAudioFormatMemory;
+    private readonly nint _captureStreamConfigurationMemory;
 
     public PartyNativeApi(nint verifiedPartyModule)
     {
@@ -228,6 +279,46 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         _networkDisconnectChatControl = Bind<PartyNetworkDisconnectChatControlDelegate>(
             verifiedPartyModule,
             "PartyNetworkDisconnectChatControl");
+        _chatControlConfigureAudioManipulationCaptureStream =
+            Bind<PartyChatControlConfigureAudioManipulationCaptureStreamDelegate>(
+                verifiedPartyModule,
+                "PartyChatControlConfigureAudioManipulationCaptureStream");
+        _chatControlGetAudioManipulationCaptureStream =
+            Bind<PartyChatControlGetAudioManipulationCaptureStreamDelegate>(
+                verifiedPartyModule,
+                "PartyChatControlGetAudioManipulationCaptureStream");
+        _audioManipulationSinkStreamGetFormat =
+            Bind<PartyAudioManipulationSinkStreamGetFormatDelegate>(
+                verifiedPartyModule,
+                "PartyAudioManipulationSinkStreamGetFormat");
+        _audioManipulationSinkStreamSubmitBuffer =
+            Bind<PartyAudioManipulationSinkStreamSubmitBufferDelegate>(
+                verifiedPartyModule,
+                "PartyAudioManipulationSinkStreamSubmitBuffer");
+
+        _captureAudioFormatMemory = Marshal.AllocHGlobal(Marshal.SizeOf<PartyAudioFormatNative>());
+        Marshal.StructureToPtr(
+            new PartyAudioFormatNative
+            {
+                SamplesPerSecond = 24_000,
+                ChannelMask = 0,
+                ChannelCount = 1,
+                BitsPerSample = 32,
+                SampleType = PartyAudioSampleType.Float,
+                Interleaved = 0,
+            },
+            _captureAudioFormatMemory,
+            fDeleteOld: false);
+        _captureStreamConfigurationMemory = Marshal.AllocHGlobal(
+            Marshal.SizeOf<PartyAudioManipulationSinkStreamConfigurationNative>());
+        Marshal.StructureToPtr(
+            new PartyAudioManipulationSinkStreamConfigurationNative
+            {
+                Format = _captureAudioFormatMemory,
+                MaxTotalAudioBufferSizeInMilliseconds = 200,
+            },
+            _captureStreamConfigurationMemory,
+            fDeleteOld: false);
     }
 
     public uint GetLocalDevice(nint manager, out nint localDevice) =>
@@ -382,6 +473,63 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
 
     public uint DisconnectChatControl(nint network, nint localChatControl, nint asyncIdentifier) =>
         _networkDisconnectChatControl(network, localChatControl, asyncIdentifier);
+
+    public uint ConfigureAudioManipulationCaptureStream(
+        nint localChatControl,
+        nint asyncIdentifier)
+    {
+        // The header does not explicitly document when the asynchronous operation stops referencing
+        // nested configuration pointers. This Mod cannot unload, so two tiny process-lifetime native
+        // allocations avoid relying on an undocumented copy/lifetime assumption.
+        return _chatControlConfigureAudioManipulationCaptureStream(
+            localChatControl,
+            _captureStreamConfigurationMemory,
+            asyncIdentifier);
+    }
+
+    public uint GetAudioManipulationCaptureStream(
+        nint localChatControl,
+        out nint captureStream) =>
+        _chatControlGetAudioManipulationCaptureStream(localChatControl, out captureStream);
+
+    public uint GetAudioManipulationSinkFormat(
+        nint captureStream,
+        out PartyAudioFormatDescriptor format)
+    {
+        var result = _audioManipulationSinkStreamGetFormat(captureStream, out var nativeFormat);
+        format = new PartyAudioFormatDescriptor(
+            nativeFormat.SamplesPerSecond,
+            nativeFormat.ChannelMask,
+            nativeFormat.ChannelCount,
+            nativeFormat.BitsPerSample,
+            nativeFormat.SampleType,
+            nativeFormat.Interleaved != 0);
+        return result;
+    }
+
+    public unsafe uint SubmitAudioManipulationCaptureBuffer(
+        nint captureStream,
+        byte[] buffer,
+        int count)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if ((uint)count > (uint)buffer.Length)
+            throw new ArgumentOutOfRangeException(nameof(count));
+        if (count == 0)
+            throw new ArgumentOutOfRangeException(nameof(count));
+
+        fixed (byte* bufferPointer = buffer)
+        {
+            var dataBuffer = new PartyDataBufferNative
+            {
+                Buffer = (nint)bufferPointer,
+                BufferByteCount = checked((uint)count),
+            };
+            return _audioManipulationSinkStreamSubmitBuffer(
+                captureStream,
+                (nint)(&dataBuffer));
+        }
+    }
 
     private static T Bind<T>(nint module, string exportName)
         where T : Delegate
@@ -539,4 +687,50 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         nint network,
         nint localChatControl,
         nint asyncIdentifier);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlConfigureAudioManipulationCaptureStreamDelegate(
+        nint localChatControl,
+        nint configuration,
+        nint asyncIdentifier);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetAudioManipulationCaptureStreamDelegate(
+        nint localChatControl,
+        out nint captureStream);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyAudioManipulationSinkStreamGetFormatDelegate(
+        nint captureStream,
+        out PartyAudioFormatNative format);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyAudioManipulationSinkStreamSubmitBufferDelegate(
+        nint captureStream,
+        nint buffer);
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct PartyAudioFormatNative
+    {
+        public uint SamplesPerSecond;
+        public uint ChannelMask;
+        public ushort ChannelCount;
+        public ushort BitsPerSample;
+        public PartyAudioSampleType SampleType;
+        public byte Interleaved;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct PartyAudioManipulationSinkStreamConfigurationNative
+    {
+        public nint Format;
+        public uint MaxTotalAudioBufferSizeInMilliseconds;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 8)]
+    private struct PartyDataBufferNative
+    {
+        public nint Buffer;
+        public uint BufferByteCount;
+    }
 }

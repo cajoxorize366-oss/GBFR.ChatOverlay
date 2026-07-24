@@ -49,7 +49,7 @@ The PlayFab Party lifecycle probe is enabled by default. The probe itself is obs
 Expected startup evidence:
 
 ```text
-Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. Microphone stays muted unless U is held.
+Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. U uses the official Party capture sink with the selected Windows microphone; input stays muted unless U is held.
 Party manager captured from PartyInitialize: 0x....
 ```
 
@@ -79,14 +79,16 @@ Stage 3 voice playback: following the Windows default communications device.
 On each client, the local path should include lines equivalent to:
 
 ```text
-Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. Microphone stays muted unless U is held.
+Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. U uses the official Party capture sink with the selected Windows microphone; input stays muted unless U is held.
 Stage 2 captured authenticated existing session: network=0x..., localUser=0x....
 Stage 2 confirmed Relink's existing gameplay endpoint before canary creation: endpoint=0x....
-Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before audio selection; microphone="..." (Manual), playback="..." (SystemDefault); microphone permissions remain None until a remote Mod ChatControl joins this network.
+Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before audio selection; microphone="..." (Manual), playback="..." (SystemDefault); the official Party capture sink was requested at 24 kHz mono float; microphone permissions remain None until a remote Mod ChatControl joins this network.
 Stage 2 CreateChatControlCompleted: result=0, ...
 Stage 2 ChatControlCreated (local canary): chatControl=0x....
 Stage 2 SetChatAudioInputCompleted: result=0, ... selectionType=3, device="...".
 Stage 2 SetChatAudioOutputCompleted: result=0, ... selectionType=1, device="...".
+Stage 3 ConfigureAudioManipulationCaptureStreamCompleted: result=0, error=0x00000000, chatControl=0x....
+Stage 3 official Party capture sink acquired: stream=0x..., format=24000 Hz, channelMask=0x0, channels=1, bits=32, sampleType=Float, interleaved=False. U microphone frames will use this sink and the existing authenticated PartyNetwork; no gameplay endpoint packets are used.
 Stage 2 ConnectChatControlCompleted: result=0, ...
 Stage 2 ChatControlJoinedNetwork (local canary): network=0x..., chatControl=0x....
 Stage 2 muted ChatControl canary joined the existing PartyNetwork. Input remains muted; Stage 3 microphone permissions wait for a remote Mod ChatControl on this same network.
@@ -114,9 +116,9 @@ Local microphone monitor playback stopped after ... ms; PlaybackStopped event ob
 Local microphone monitor cleanup complete after ... ms.
 ```
 
-Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. If `I` passes but Party later reports `NoAudioInput`, the physical Windows path is working and the remaining fault is inside Party selection/integration. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
+Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. In preview.8, U captures this Windows endpoint itself and feeds the official Party manipulation sink, so Party's old automatic-input `NoAudioInput` indicator is not the local pass/fail criterion once submitted sink frames are logged. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
 
-Prerequisites for `U`: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Voice (U Party / I Local Test)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has both successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual) and displayed device name.
+Prerequisites for `U`: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Voice (U Party / I Local Test)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual), `ConfigureAudioManipulationCaptureStreamCompleted: result=0`, and `official Party capture sink acquired` with the exact 24 kHz mono float format.
 
 Before touching `U`, both logs must contain a grant for the remote control discovered above:
 
@@ -129,11 +131,12 @@ The voice row at the top of the chat overlay should progress from `[VOICE] 等�
 Run this exact test in both directions:
 
 1. Client A holds `U`, speaks a short phrase, then releases `U`.
-2. After Party confirms unmute, A's overlay must show `>>> [VOICE] 正在语音 · 松开 U 静音 <<<` and log `Stage 3 push-to-talk microphone UNMUTED while U is held.`
-3. On release, A's overlay must return to `[VOICE] 已就绪 · U 队友通话 / I 本地监听` and log `Stage 3 push-to-talk microphone muted.`
-4. Client B must hear the phrase only during A's hold interval. B's log must also transition its matching `Stage 3 voice diagnostics PEER` line to `remoteIndicator=Talking (1)` and `diagnosis=PASS_REMOTE_AUDIO_RECEIVED_BY_PARTY`. This proves Party observed remote voice; physical audibility remains a separate manual observation.
-5. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
-6. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. After focus returns, the overlay must no longer show `正在语音`. Repeat a normal hold/release once to prove recovery.
+2. A must log `Stage 3 Party microphone capture started for U: ... PartySinkFormat=24000 Hz mono float32, frame=40 ms.` After Party confirms unmute, the overlay must show `>>> [VOICE] 正在语音 · 松开 U 静音 <<<` and the log must say that Windows microphone frames are feeding the official Party capture sink.
+3. While A speaks, it must log both `Stage 3 Party capture sink accepted the first 40 ms microphone frame (3840 bytes).` and `Stage 3 Party capture sink accepted microphone signal (peak ...); this PCM is now on the Party voice transport path.` These lines prove the selected microphone reached Party's send path, not that B received it.
+4. On release, A's overlay must return to `[VOICE] 已就绪 · U 队友通话 / I 本地监听`. The log must show `Stage 3 Party microphone submission gate closed (U released or was revoked).`, a `Stage 3 Party capture bridge result` with `verdict=PASS_PARTY_CAPTURE_SINK_ACCEPTED_MICROPHONE_SIGNAL`, and `Stage 3 push-to-talk microphone muted.` No later frame from that hold may be accepted.
+5. Client B must hear the phrase only during A's hold interval. B's matching `Stage 3 voice diagnostics PEER` line must transition to `remoteIndicator=Talking (1)` and `diagnosis=PASS_REMOTE_AUDIO_RECEIVED_BY_PARTY`. This is the required online-transport evidence; physical audibility additionally confirms B's output route.
+6. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
+7. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. After focus returns, the overlay must no longer show `正在语音`. Repeat a normal hold/release once to prove recovery.
 
 Speak continuously for at least three seconds during each direction so the low-noise diagnostic poll cannot miss the indicator transition. The expected LOCAL/PEER lines, terminal summary meanings, every official Party indicator state and the complete decision matrix are documented in [VOICE_TROUBLESHOOTING_MATRIX.md](VOICE_TROUBLESHOOTING_MATRIX.md). One labelled A/B log pair from that procedure should replace repeated one-setting-at-a-time tests.
 
@@ -151,6 +154,6 @@ Then preserve `ChatControlLeftNetwork (local canary)`, `DestroyChatControlComple
 
 If `Stage 2 manager cleanup reached before local ChatControl teardown completed` appears, preserve the full diagnostic fields. `PartyCleanup completed` still proves the manager's safety fallback ran, but the strict Stage 2 teardown-event check has not passed.
 
-The test fails if either client lacks the `0x0005` permission line, logs `Stage 3 voice test failed closed`, logs `Stage 2 canary disabled (fail-closed)`, reports a nonzero Party operation, or cannot complete the local cleanup chain. It also fails for one-way/no audio, audio while `U` is released, local monitor audio after `I` is released, audio continuing after focus loss/peer departure, a manager ownership conflict, a second local ChatControl, changed matchmaking, broken native text chat or rendering. The Mod must not call `PartyEndpointSendMessage`, initialize a second Party manager or create another gameplay endpoint. Disable `Experimental Voice (U Party / I Local Test)`, restart, and preserve both complete logs plus approximate key-down/key-up/leave times after any failure.
+The test fails if either client lacks the `0x0005` permission line or capture-sink acquisition line, never accepts U frames, logs `Stage 3 voice test failed closed`, logs `Stage 2 canary disabled (fail-closed)`, reports a nonzero Party operation, or cannot complete the local cleanup chain. It also fails for one-way/no audio, audio while `U` is released, local monitor audio after `I` is released, audio continuing after focus loss/peer departure, a manager ownership conflict, a second local ChatControl, changed matchmaking, broken native text chat or rendering. The Mod must not call `PartyEndpointSendMessage`, initialize a second Party manager or create another gameplay endpoint. Disable `Experimental Voice (U Party / I Local Test)`, restart, and preserve both complete logs plus approximate key-down/key-up/leave times after any failure.
 
 If either audio row is a plain text field, or opening Mod configuration reports that the audio-device UI is missing, verify that `GBFR.ChatOverlay.dll` and `GBFR.ChatOverlay.ConfiguratorUI.dll` came from the same ZIP. The second DLL is launcher-only; it must be present beside the main Mod DLL but is deliberately not referenced or loaded by the game-side assembly.

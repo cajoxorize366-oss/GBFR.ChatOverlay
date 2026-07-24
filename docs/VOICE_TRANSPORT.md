@@ -112,7 +112,7 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 - Implemented in `Native/PartyChatControlCanary.cs` and enabled by default. Two-client creation, connection, remote ChatControl discovery and pre-leave local teardown events have been confirmed on both host and guest.
 - Create one local ChatControl for the existing authenticated local user.
-- Keep input muted before selecting system-default input/output.
+- Keep input muted before selecting the configured input/output. Each side may independently use Party `SystemDefault` or `Manual` with a Windows Core Audio endpoint ID.
 - Connect it only to the already joined PartyNetwork.
 - Observe local completion plus remote `ChatControlCreated`/`ChatControlJoinedNetwork` events.
 - The Stage 2 portion grants no audio permissions; it establishes and validates join/leave ownership before Stage 3 is allowed to run.
@@ -121,13 +121,14 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 3: push to talk
 
-- The first external voice test is implemented and enabled by default in `0.3.0-preview.1`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
+- The external voice test is implemented and enabled by default in `0.3.0-preview.2`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
 - Negotiate Mod capability through a remote ChatControl joining the same existing PartyNetwork, not through gameplay endpoint packets.
 - Call `PartyChatControlSetPermissions(local, remote, 0x0005)` for each observed Mod peer. The only enabled bits are `SendMicrophoneAudio` (`0x0001`) and `ReceiveMicrophoneAudio` (`0x0004`); text-to-speech, text-chat and transcription permissions remain unset.
 - Keep the microphone synchronously muted and verified by default. DirectInput consumes `U` for the voice test; holding it unsets Party input mute and releasing it restores mute.
 - A 350 ms input heartbeat watchdog forces release after focus loss, lost key-up or stalled keyboard polling. Mod suspend, remote-capability loss, pre-leave cleanup and terminal failure also force a best-effort mute before ChatControl destruction.
 - Party calls are fenced while Relink owns a state-change batch. Permission and mute work runs only after the original `PartyFinishProcessingStateChanges` has returned.
-- Input/output device selection, controller push-to-talk, per-player volume/mute and final UI status remain future work. This preview uses Party's system-default input and output devices.
+- Reloaded-II exposes independent dynamic lists for active Windows capture and render endpoints. The saved value is the stable `IMMDevice` endpoint ID while the UI displays the friendly device name. A blank selection follows Party's Windows default communications device; a saved endpoint that is no longer active falls back to that default with an explicit startup log. Party `Manual` selection is accepted only when the completion event confirms the exact endpoint ID before the ChatControl can connect.
+- Controller push-to-talk, per-player volume/mute and final in-overlay voice status remain future work.
 
 ## Safety and service boundary
 

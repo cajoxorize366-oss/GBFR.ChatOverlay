@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using GBFR.ChatOverlay.Audio;
 
 namespace GBFR.ChatOverlay.Native;
 
@@ -26,7 +27,6 @@ internal sealed class PartyChatControlCanary : IDisposable
 {
     private const uint Success = 0;
     private const uint SucceededStateChange = 0;
-    private const uint SystemDefaultAudioDevice = 1;
     private const PartyChatPermissionOptions MicrophoneVoicePermissions =
         PartyChatPermissionOptions.SendMicrophoneAudio |
         PartyChatPermissionOptions.ReceiveMicrophoneAudio;
@@ -35,6 +35,8 @@ internal sealed class PartyChatControlCanary : IDisposable
     private readonly Action<string> _log;
     private readonly Action<Action> _schedule;
     private readonly bool _enableVoiceTest;
+    private readonly ResolvedAudioEndpointSelection _audioInputSelection;
+    private readonly ResolvedAudioEndpointSelection _audioOutputSelection;
     private readonly object _stateSync = new();
     private readonly object _apiCallSync = new();
     private readonly HashSet<nint> _remoteChatControls = [];
@@ -94,11 +96,17 @@ internal sealed class PartyChatControlCanary : IDisposable
         IPartyChatControlApi api,
         Action<string> log,
         Action<Action>? schedule = null,
-        bool enableVoiceTest = false)
+        bool enableVoiceTest = false,
+        ResolvedAudioEndpointSelection? audioInputSelection = null,
+        ResolvedAudioEndpointSelection? audioOutputSelection = null)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _enableVoiceTest = enableVoiceTest;
+        _audioInputSelection = audioInputSelection ??
+            ResolvedAudioEndpointSelection.SystemDefault();
+        _audioOutputSelection = audioOutputSelection ??
+            ResolvedAudioEndpointSelection.SystemDefault();
         _schedule = schedule ?? QueueOnThreadPool;
 
         _createTokenHandle = AllocateToken("create");
@@ -812,14 +820,25 @@ internal sealed class PartyChatControlCanary : IDisposable
             return;
 
         var label = input ? "SetChatAudioInputCompleted" : "SetChatAudioOutputCompleted";
+        var selection = input ? _audioInputSelection : _audioOutputSelection;
+        var expectedSelectionType = GetPartyAudioSelectionType(selection);
+        var expectedContext = selection.UseSystemDefault ? null : selection.DeviceId;
+        var contextMatches = expectedContext is null
+            ? string.IsNullOrEmpty(state.AudioDeviceSelectionContext)
+            : string.Equals(
+                state.AudioDeviceSelectionContext,
+                expectedContext,
+                StringComparison.Ordinal);
         EnqueueLogLocked(
             $"Stage 2 {label}: result={state.Result}, error=0x{state.ErrorDetail:X8}, " +
-            $"selectionType={state.Value}.");
+            $"selectionType={state.Value}, device=\"{selection.DisplayName}\".");
         if (state.Result != SucceededStateChange ||
             state.ChatControl != _localChatControl ||
-            state.Value != SystemDefaultAudioDevice)
+            state.Value != (uint)expectedSelectionType ||
+            !contextMatches)
         {
-            RequestTeardownLocked($"{label} did not confirm the owned system-default operation");
+            RequestTeardownLocked(
+                $"{label} did not confirm the owned {expectedSelectionType} device operation");
             return;
         }
 
@@ -1311,17 +1330,33 @@ internal sealed class PartyChatControlCanary : IDisposable
             return;
         }
 
-        result = _api.SetSystemDefaultAudioInput(chatControl, _inputToken);
+        var inputSelectionType = GetPartyAudioSelectionType(_audioInputSelection);
+        result = _api.SetAudioInput(
+            chatControl,
+            inputSelectionType,
+            _audioInputSelection.DeviceId,
+            _inputToken);
         if (result != Success)
         {
-            FailNativeAction("PartyChatControlSetAudioInput(system-default)", result, hasOwnedChatControl: true);
+            FailNativeAction(
+                $"PartyChatControlSetAudioInput({inputSelectionType})",
+                result,
+                hasOwnedChatControl: true);
             return;
         }
 
-        result = _api.SetSystemDefaultAudioOutput(chatControl, _outputToken);
+        var outputSelectionType = GetPartyAudioSelectionType(_audioOutputSelection);
+        result = _api.SetAudioOutput(
+            chatControl,
+            outputSelectionType,
+            _audioOutputSelection.DeviceId,
+            _outputToken);
         if (result != Success)
         {
-            FailNativeAction("PartyChatControlSetAudioOutput(system-default)", result, hasOwnedChatControl: true);
+            FailNativeAction(
+                $"PartyChatControlSetAudioOutput({outputSelectionType})",
+                result,
+                hasOwnedChatControl: true);
             return;
         }
 
@@ -1333,7 +1368,9 @@ internal sealed class PartyChatControlCanary : IDisposable
             EnqueueLogLocked(
                 $"Stage 2 canary creation queued on existing manager/network/device: manager={Hex(work.Manager)}, " +
                 $"network={Hex(work.Network)}, localUser={Hex(work.LocalUser)}, device={Hex(localDevice)}, " +
-                $"chatControl={Hex(chatControl)}. Input mute was set and verified before system-default I/O selection; " +
+                $"chatControl={Hex(chatControl)}. Input mute was set and verified before audio selection; " +
+                $"microphone=\"{_audioInputSelection.DisplayName}\" ({inputSelectionType}), " +
+                $"playback=\"{_audioOutputSelection.DisplayName}\" ({outputSelectionType}); " +
                 (_enableVoiceTest
                     ? "microphone permissions remain None until a remote Mod ChatControl joins this network."
                     : "PartyChatControlSetPermissions will not be called."));
@@ -1769,6 +1806,12 @@ internal sealed class PartyChatControlCanary : IDisposable
     }
 
     private void EnqueueLogLocked(string message) => _log(message);
+
+    private static PartyAudioDeviceSelectionType GetPartyAudioSelectionType(
+        ResolvedAudioEndpointSelection selection) =>
+        selection.UseSystemDefault
+            ? PartyAudioDeviceSelectionType.SystemDefault
+            : PartyAudioDeviceSelectionType.Manual;
 
     private static string Hex(nint value) => $"0x{(nuint)value:X}";
 

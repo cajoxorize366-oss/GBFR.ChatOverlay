@@ -11,7 +11,8 @@
 1. 已用主机/客机日志确认现有 Party manager、认证、网络和 endpoint 生命周期。
 2. 已确认双方 muted ChatControl 的创建、连接、远端发现和退出房间前清理事件。
 3. 当前测试包只向同一 PartyNetwork 中检测到的 Mod ChatControl 授予麦克风收发权限；输入默认静音，仅在按住 `U` 时开启。
-4. 设备选择、手柄按键、成员音量/静音和正式 UI 状态仍待后续实现。
+4. Reloaded-II 配置会动态列出当前 Windows 活跃的录音和播放端点，可分别选择麦克风与耳机/扬声器；配置保存稳定 endpoint ID，失效选择会在启动时记录日志并回退到 Windows 默认通信设备。
+5. 手柄按键、成员音量/静音和正式 UI 状态仍待后续实现。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 语音通道，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松键、输入心跳超时、暂停和退出会话都会强制静音；所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则自动 fail-closed。
 
@@ -34,6 +35,7 @@ dotnet test tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj
 
 - ImGui 负责聊天窗口、文字输入和交互状态。
 - Relink 桥接层负责调用游戏原生聊天发送函数并观察接收消息。
+- `GBFR.ChatOverlay.ConfiguratorUI.dll` 只在 Reloaded-II 启动器中提供麦克风/播放设备 ComboBox；游戏侧主 DLL 不引用 HandyControl 或 WPF。
 - Party 语音接入不得自行消费宿主的全局状态队列，也不得阻塞游戏渲染线程。
 - 游戏版本或签名不匹配时，桥接功能应保持禁用，而不是尝试调用未知地址。
 

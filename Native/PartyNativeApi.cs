@@ -10,6 +10,14 @@ internal enum PartyChatPermissionOptions : uint
     ReceiveMicrophoneAudio = 0x0004,
 }
 
+internal enum PartyAudioDeviceSelectionType : uint
+{
+    None = 0,
+    SystemDefault = 1,
+    PlatformUserDefault = 2,
+    Manual = 3,
+}
+
 internal interface IPartyChatControlApi
 {
     uint GetLocalDevice(nint manager, out nint localDevice);
@@ -33,9 +41,17 @@ internal interface IPartyChatControlApi
         nint targetChatControl,
         PartyChatPermissionOptions permissions);
 
-    uint SetSystemDefaultAudioInput(nint localChatControl, nint asyncIdentifier);
+    uint SetAudioInput(
+        nint localChatControl,
+        PartyAudioDeviceSelectionType selectionType,
+        string? selectionContext,
+        nint asyncIdentifier);
 
-    uint SetSystemDefaultAudioOutput(nint localChatControl, nint asyncIdentifier);
+    uint SetAudioOutput(
+        nint localChatControl,
+        PartyAudioDeviceSelectionType selectionType,
+        string? selectionContext,
+        nint asyncIdentifier);
 
     uint ConnectChatControl(nint network, nint localChatControl, nint asyncIdentifier);
 
@@ -50,8 +66,6 @@ internal interface IPartyChatControlApi
 /// </summary>
 internal sealed class PartyNativeApi : IPartyChatControlApi
 {
-    private const uint SystemDefaultAudioDevice = 1;
-
     private readonly PartyGetLocalDeviceDelegate _getLocalDevice;
     private readonly PartyDeviceGetChatControlsDelegate _deviceGetChatControls;
     private readonly PartyDeviceCreateChatControlDelegate _deviceCreateChatControl;
@@ -59,8 +73,8 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     private readonly PartyChatControlSetAudioInputMutedDelegate _chatControlSetAudioInputMuted;
     private readonly PartyChatControlGetAudioInputMutedDelegate _chatControlGetAudioInputMuted;
     private readonly PartyChatControlSetPermissionsDelegate _chatControlSetPermissions;
-    private readonly PartyChatControlSetAudioInputDelegate _chatControlSetAudioInput;
-    private readonly PartyChatControlSetAudioOutputDelegate _chatControlSetAudioOutput;
+    private readonly PartyChatControlSetAudioDeviceDelegate _chatControlSetAudioInput;
+    private readonly PartyChatControlSetAudioDeviceDelegate _chatControlSetAudioOutput;
     private readonly PartyNetworkConnectChatControlDelegate _networkConnectChatControl;
     private readonly PartyNetworkDisconnectChatControlDelegate _networkDisconnectChatControl;
 
@@ -90,10 +104,10 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         _chatControlSetPermissions = Bind<PartyChatControlSetPermissionsDelegate>(
             verifiedPartyModule,
             "PartyChatControlSetPermissions");
-        _chatControlSetAudioInput = Bind<PartyChatControlSetAudioInputDelegate>(
+        _chatControlSetAudioInput = Bind<PartyChatControlSetAudioDeviceDelegate>(
             verifiedPartyModule,
             "PartyChatControlSetAudioInput");
-        _chatControlSetAudioOutput = Bind<PartyChatControlSetAudioOutputDelegate>(
+        _chatControlSetAudioOutput = Bind<PartyChatControlSetAudioDeviceDelegate>(
             verifiedPartyModule,
             "PartyChatControlSetAudioOutput");
         _networkConnectChatControl = Bind<PartyNetworkConnectChatControlDelegate>(
@@ -145,18 +159,28 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         PartyChatPermissionOptions permissions) =>
         _chatControlSetPermissions(localChatControl, targetChatControl, (uint)permissions);
 
-    public uint SetSystemDefaultAudioInput(nint localChatControl, nint asyncIdentifier) =>
-        _chatControlSetAudioInput(
+    public uint SetAudioInput(
+        nint localChatControl,
+        PartyAudioDeviceSelectionType selectionType,
+        string? selectionContext,
+        nint asyncIdentifier) =>
+        SetAudioDevice(
+            _chatControlSetAudioInput,
             localChatControl,
-            SystemDefaultAudioDevice,
-            audioDeviceSelectionContext: nint.Zero,
+            selectionType,
+            selectionContext,
             asyncIdentifier);
 
-    public uint SetSystemDefaultAudioOutput(nint localChatControl, nint asyncIdentifier) =>
-        _chatControlSetAudioOutput(
+    public uint SetAudioOutput(
+        nint localChatControl,
+        PartyAudioDeviceSelectionType selectionType,
+        string? selectionContext,
+        nint asyncIdentifier) =>
+        SetAudioDevice(
+            _chatControlSetAudioOutput,
             localChatControl,
-            SystemDefaultAudioDevice,
-            audioDeviceSelectionContext: nint.Zero,
+            selectionType,
+            selectionContext,
             asyncIdentifier);
 
     public uint ConnectChatControl(nint network, nint localChatControl, nint asyncIdentifier) =>
@@ -170,6 +194,41 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     {
         var address = NativeLibrary.GetExport(module, exportName);
         return Marshal.GetDelegateForFunctionPointer<T>(address);
+    }
+
+    private static uint SetAudioDevice(
+        PartyChatControlSetAudioDeviceDelegate callback,
+        nint localChatControl,
+        PartyAudioDeviceSelectionType selectionType,
+        string? selectionContext,
+        nint asyncIdentifier)
+    {
+        if (selectionType == PartyAudioDeviceSelectionType.Manual)
+            ArgumentException.ThrowIfNullOrWhiteSpace(selectionContext);
+        else if (selectionType == PartyAudioDeviceSelectionType.SystemDefault)
+            selectionContext = null;
+        else
+            throw new ArgumentOutOfRangeException(
+                nameof(selectionType),
+                selectionType,
+                "Only SystemDefault and Manual audio selection are supported by this Mod.");
+
+        var nativeContext = nint.Zero;
+        try
+        {
+            if (selectionContext is not null)
+                nativeContext = Marshal.StringToCoTaskMemUTF8(selectionContext);
+            return callback(
+                localChatControl,
+                (uint)selectionType,
+                nativeContext,
+                asyncIdentifier);
+        }
+        finally
+        {
+            if (nativeContext != nint.Zero)
+                Marshal.FreeCoTaskMem(nativeContext);
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -210,14 +269,7 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         uint permissions);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate uint PartyChatControlSetAudioInputDelegate(
-        nint localChatControl,
-        uint audioDeviceSelectionType,
-        nint audioDeviceSelectionContext,
-        nint asyncIdentifier);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate uint PartyChatControlSetAudioOutputDelegate(
+    private delegate uint PartyChatControlSetAudioDeviceDelegate(
         nint localChatControl,
         uint audioDeviceSelectionType,
         nint audioDeviceSelectionContext,

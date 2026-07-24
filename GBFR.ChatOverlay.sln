@@ -5,6 +5,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GBFR.ChatOverlay", "GBFR.ChatOverlay.csproj", "{4764E394-54B3-4FB9-B04C-B520623FD179}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GBFR.ChatOverlay.ConfiguratorUI", "ConfiguratorUI\GBFR.ChatOverlay.ConfiguratorUI.csproj", "{28ED40A3-644D-45AD-9257-C0E615681C67}"
+EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{3F3CAFB8-9470-4E24-B56B-AC2369CB345E}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GBFR.ChatOverlay.Tests", "tests\GBFR.ChatOverlay.Tests\GBFR.ChatOverlay.Tests.csproj", "{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}"
@@ -22,6 +24,10 @@ Global
 		{4764E394-54B3-4FB9-B04C-B520623FD179}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4764E394-54B3-4FB9-B04C-B520623FD179}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4764E394-54B3-4FB9-B04C-B520623FD179}.Release|Any CPU.Build.0 = Release|Any CPU
+		{28ED40A3-644D-45AD-9257-C0E615681C67}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{28ED40A3-644D-45AD-9257-C0E615681C67}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{28ED40A3-644D-45AD-9257-C0E615681C67}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{28ED40A3-644D-45AD-9257-C0E615681C67}.Release|Any CPU.Build.0 = Release|Any CPU
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}.Release|Any CPU.ActiveCfg = Release|Any CPU

@@ -6,6 +6,8 @@ namespace GBFR.ChatOverlay.Template.Configuration;
 public class Configurator : IConfiguratorV3
 {
     private const string ModId = "gbfr.qol.chatoverlay";
+    private const string ConfiguratorUiAssemblyName = "GBFR.ChatOverlay.ConfiguratorUI";
+    private const string ConfiguratorUiFileName = ConfiguratorUiAssemblyName + ".dll";
     private static ConfiguratorMixin _configuratorMixin = new ConfiguratorMixin();
 
     /// <summary>
@@ -31,6 +33,7 @@ public class Configurator : IConfiguratorV3
 
     private IUpdatableConfigurable[] MakeConfigurations()
     {
+        LoadConfiguratorUiForLauncher();
         var configFolder = ResolveConfigurationDirectory(
             ConfigFolder,
             Context.ModConfigPath,
@@ -49,6 +52,48 @@ public class Configurator : IConfiguratorV3
         }
 
         return _configurations;
+    }
+
+    private void LoadConfiguratorUiForLauncher()
+    {
+        // Startup constructs this Configurator with only a config directory inside the game.
+        // Reloaded-II's launcher supplies the Mod folder/context; only that process may load WPF.
+        var launcherModFolder = !string.IsNullOrWhiteSpace(ModFolder)
+            ? ModFolder
+            : string.IsNullOrWhiteSpace(Context.ModConfigPath)
+                ? null
+                : Path.GetDirectoryName(Path.GetFullPath(Context.ModConfigPath));
+        if (string.IsNullOrWhiteSpace(launcherModFolder))
+            return;
+
+        if (System.Runtime.Loader.AssemblyLoadContext.Default.Assemblies.Any(assembly =>
+                string.Equals(
+                    assembly.GetName().Name,
+                    ConfiguratorUiAssemblyName,
+                    StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        var editorPath = Path.GetFullPath(Path.Combine(launcherModFolder, ConfiguratorUiFileName));
+        if (!File.Exists(editorPath))
+        {
+            throw new FileNotFoundException(
+                $"The GBFR audio-device configuration UI is missing from the Mod package: {editorPath}",
+                editorPath);
+        }
+
+        try
+        {
+            _ = System.Runtime.Loader.AssemblyLoadContext.Default.LoadFromAssemblyPath(editorPath);
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                "Failed to load the GBFR audio-device configuration UI. Keep both GBFR.ChatOverlay DLLs " +
+                "from the same ZIP beside each other and use Reloaded-II 1.30.2 or a compatible build.",
+                exception);
+        }
     }
 
     public Configurator() { }

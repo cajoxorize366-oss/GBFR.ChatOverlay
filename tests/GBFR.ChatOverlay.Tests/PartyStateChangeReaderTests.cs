@@ -96,6 +96,36 @@ public sealed class PartyStateChangeReaderTests
         }
     }
 
+    [Fact]
+    public void Read_SetChatAudioInputCompleted_CopiesManualEndpointContext()
+    {
+        var pointer = Marshal.AllocHGlobal(48);
+        var context = Marshal.StringToCoTaskMemUTF8("windows-endpoint-id");
+        try
+        {
+            Zero(pointer, 48);
+            Marshal.WriteInt32(pointer, 0, (int)PartyStateChangeType.SetChatAudioInputCompleted);
+            Marshal.WriteInt32(pointer, 4, 0);
+            Marshal.WriteInt32(pointer, 8, 0);
+            Marshal.WriteIntPtr(pointer, 16, (nint)0x1111);
+            Marshal.WriteInt32(pointer, 24, (int)PartyAudioDeviceSelectionType.Manual);
+            Marshal.WriteIntPtr(pointer, 32, context);
+            Marshal.WriteIntPtr(pointer, 40, (nint)0x2222);
+
+            var snapshot = PartyStateChangeReader.Read(pointer);
+
+            Assert.Equal((nint)0x1111, snapshot.ChatControl);
+            Assert.Equal((uint)PartyAudioDeviceSelectionType.Manual, snapshot.Value);
+            Assert.Equal("windows-endpoint-id", snapshot.AudioDeviceSelectionContext);
+            Assert.Equal((nint)0x2222, snapshot.AsyncIdentifier);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(context);
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
     private static void Zero(nint pointer, int length)
     {
         for (var offset = 0; offset < length; offset++)

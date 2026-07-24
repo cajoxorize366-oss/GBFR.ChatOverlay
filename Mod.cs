@@ -6,6 +6,7 @@ using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
+using GBFR.ChatOverlay.Audio;
 
 namespace GBFR.ChatOverlay;
 
@@ -66,12 +67,33 @@ public class Mod : ModBase // <= Do not Remove.
         {
             try
             {
+                Action<string> partyLog =
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+                var audioInputSelection = ResolvedAudioEndpointSelection.SystemDefault();
+                var audioOutputSelection = ResolvedAudioEndpointSelection.SystemDefault();
+                if (_configuration.EnableMutedPartyChatControlCanary)
+                {
+                    var audioCatalog = new WindowsAudioEndpointCatalog();
+                    audioInputSelection = AudioEndpointSelectionResolver.Resolve(
+                        _configuration.VoiceMicrophoneDeviceId,
+                        AudioEndpointFlow.Capture,
+                        audioCatalog,
+                        partyLog);
+                    audioOutputSelection = AudioEndpointSelectionResolver.Resolve(
+                        _configuration.VoicePlaybackDeviceId,
+                        AudioEndpointFlow.Render,
+                        audioCatalog,
+                        partyLog);
+                }
+
                 _partyLifecycleProbe = new PartyLifecycleProbe(
                     _hooks,
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                    partyLog,
                     enableLifecycleLogging: _configuration.EnablePartyLifecycleProbe,
                     enableMutedChatControlCanary: _configuration.EnableMutedPartyChatControlCanary,
-                    enableVoiceTest: _configuration.EnableVoiceInput);
+                    enableVoiceTest: _configuration.EnableVoiceInput,
+                    audioInputSelection: audioInputSelection,
+                    audioOutputSelection: audioOutputSelection);
                 _partyLifecycleProbe.Initialize();
             }
             catch (Exception exception)

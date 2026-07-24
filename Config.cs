@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel;
+using GBFR.ChatOverlay.Audio;
 using GBFR.ChatOverlay.Template.Configuration;
 using Reloaded.Mod.Interfaces.Structs;
 
@@ -63,6 +64,24 @@ public class Config : Configurable<Config>
     [Description("PREVIEW: grant microphone-only send/receive permissions to remote Mod ChatControls on the same PartyNetwork. Hold U to talk; release, focus loss, input timeout and session exit force mute. Both clients need this package. Restart required.")]
     [DefaultValue(true)]
     public bool EnableVoiceInput { get; set; } = true;
+
+    [DisplayName("Voice Microphone")]
+    [Description("Recording endpoint used by Party voice. The list is detected from active Windows microphones. Choose the default entry to follow Windows communication-device changes. Restart required.")]
+    [Editor(
+        "GBFR.ChatOverlay.ConfiguratorUI.VoiceMicrophonePropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
+        "HandyControl.Controls.PropertyEditorBase, HandyControl")]
+    [TypeConverter(typeof(VoiceMicrophoneDeviceIdConverter))]
+    [DefaultValue("")]
+    public string VoiceMicrophoneDeviceId { get; set; } = string.Empty;
+
+    [DisplayName("Voice Playback Device")]
+    [Description("Playback endpoint used for Party voice. The list is detected from active Windows speakers and headsets. Choose the default entry to follow Windows communication-device changes. Restart required.")]
+    [Editor(
+        "GBFR.ChatOverlay.ConfiguratorUI.VoicePlaybackPropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
+        "HandyControl.Controls.PropertyEditorBase, HandyControl")]
+    [TypeConverter(typeof(VoicePlaybackDeviceIdConverter))]
+    [DefaultValue("")]
+    public string VoicePlaybackDeviceId { get; set; } = string.Empty;
 }
 
 /// <summary>

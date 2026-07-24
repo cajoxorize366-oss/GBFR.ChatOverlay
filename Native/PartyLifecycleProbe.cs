@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using GBFR.ChatOverlay.Audio;
 using Reloaded.Hooks.Definitions;
 using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
 
@@ -21,6 +22,8 @@ public sealed class PartyLifecycleProbe
     private readonly bool _enableLifecycleLogging;
     private readonly bool _enableMutedChatControlCanary;
     private readonly bool _enableVoiceTest;
+    private readonly ResolvedAudioEndpointSelection _audioInputSelection;
+    private readonly ResolvedAudioEndpointSelection _audioOutputSelection;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentQueue<string> _pendingLogs = new();
 
@@ -44,13 +47,19 @@ public sealed class PartyLifecycleProbe
         Action<string> log,
         bool enableLifecycleLogging = true,
         bool enableMutedChatControlCanary = false,
-        bool enableVoiceTest = false)
+        bool enableVoiceTest = false,
+        ResolvedAudioEndpointSelection? audioInputSelection = null,
+        ResolvedAudioEndpointSelection? audioOutputSelection = null)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _enableLifecycleLogging = enableLifecycleLogging;
         _enableMutedChatControlCanary = enableMutedChatControlCanary;
         _enableVoiceTest = enableVoiceTest;
+        _audioInputSelection = audioInputSelection ??
+            ResolvedAudioEndpointSelection.SystemDefault();
+        _audioOutputSelection = audioOutputSelection ??
+            ResolvedAudioEndpointSelection.SystemDefault();
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -105,7 +114,9 @@ public sealed class PartyLifecycleProbe
                         _chatControlCanary = new PartyChatControlCanary(
                             new PartyNativeApi(module),
                             EnqueueLog,
-                            enableVoiceTest: _enableVoiceTest);
+                            enableVoiceTest: _enableVoiceTest,
+                            audioInputSelection: _audioInputSelection,
+                            audioOutputSelection: _audioOutputSelection);
                     }
                     catch (Exception exception)
                     {

@@ -32,6 +32,7 @@
     <None Remove="BuildLinked.ps1" />
     <None Remove="Reloaded.Trimming.targets" />
     <None Remove="Reloaded.Checks.targets" />
+    <Compile Remove="ConfiguratorUI/**/*.cs" />
     <Compile Remove="tests/**/*.cs" />
   </ItemGroup>
 
@@ -57,5 +58,27 @@
     <PackageReference Include="Reloaded.Mod.Interfaces" Version="2.4.0" ExcludeAssets="runtime" />
     <PackageReference Include="Reloaded.SharedLib.Hooks" Version="1.9.0" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="ConfiguratorUI/GBFR.ChatOverlay.ConfiguratorUI.csproj"
+                      ReferenceOutputAssembly="false"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <ConfiguratorUiTargetPath>$(MSBuildProjectDirectory)/ConfiguratorUI/bin/$(Configuration)/GBFR.ChatOverlay.ConfiguratorUI.dll</ConfiguratorUiTargetPath>
+  </PropertyGroup>
+
+  <Target Name="CopyConfiguratorUiToBuildOutput" AfterTargets="Build">
+    <Copy SourceFiles="$(ConfiguratorUiTargetPath)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyConfiguratorUiToPublishOutput" AfterTargets="Publish">
+    <Copy SourceFiles="$(ConfiguratorUiTargetPath)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

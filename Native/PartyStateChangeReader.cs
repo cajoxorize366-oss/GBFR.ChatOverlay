@@ -12,6 +12,8 @@ internal readonly record struct PartyStateChangeSnapshot(uint Type)
 
     public uint Value { get; init; }
 
+    public string? AudioDeviceSelectionContext { get; init; }
+
     public nint Network { get; init; }
 
     public nint LocalUser { get; init; }
@@ -189,6 +191,7 @@ internal static class PartyStateChangeReader
             ErrorDetail = ReadUInt32(pointer, 8),
             ChatControl = Marshal.ReadIntPtr(pointer, 16),
             Value = ReadUInt32(pointer, 24),
+            AudioDeviceSelectionContext = ReadUtf8String(pointer, 32),
             AsyncIdentifier = Marshal.ReadIntPtr(pointer, 40),
         };
 
@@ -204,4 +207,10 @@ internal static class PartyStateChangeReader
 
     private static uint ReadUInt32(nint pointer, int offset) =>
         unchecked((uint)Marshal.ReadInt32(pointer, offset));
+
+    private static string? ReadUtf8String(nint pointer, int offset)
+    {
+        var value = Marshal.ReadIntPtr(pointer, offset);
+        return value == nint.Zero ? null : Marshal.PtrToStringUTF8(value);
+    }
 }

@@ -1,3 +1,4 @@
+using System.IO;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Template.Configuration;
 

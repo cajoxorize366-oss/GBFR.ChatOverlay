@@ -67,7 +67,14 @@ The one-time `PartyStartProcessingStateChanges returned error 0x00001000; furthe
 
 ## Stage 2 ChatControl lifecycle
 
-The current validation build enables `Enable Muted Party ChatControl Canary` by default. Test only in a private two-client session with the same package installed on both sides. The canary selects the system-default input/output only after synchronously setting and verifying input mute. Voice permissions are not granted until the Stage 2 join sequence is complete and a remote Mod ChatControl has been observed on the same PartyNetwork.
+The current validation build enables `Enable Muted Party ChatControl Canary` by default. Test only in a private two-client session with the same package installed on both sides. Before launching the game, open the Mod configuration and choose `Voice Microphone` and `Voice Playback Device` independently. These two rows must be real ComboBox lists rather than endpoint-ID text fields. Each list must contain the active Windows endpoints plus `Follow Windows default communications device (recommended)`. Save and restart after changing either value. The canary applies those selections only after synchronously setting and verifying input mute. Voice permissions are not granted until the Stage 2 join sequence is complete and a remote Mod ChatControl has been observed on the same PartyNetwork.
+
+Each client must first log one result for each selected role. A manual choice logs its friendly name and stable endpoint ID; the default choice logs that it follows Windows. If a saved device was unplugged or disabled, the log must explicitly say it is not active and that the Mod is falling back:
+
+```text
+Stage 3 voice microphone: selected "..." with manual Windows endpoint ID ....
+Stage 3 voice playback: following the Windows default communications device.
+```
 
 On each client, the local path should include lines equivalent to:
 
@@ -75,11 +82,11 @@ On each client, the local path should include lines equivalent to:
 Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. Microphone stays muted unless U is held.
 Stage 2 captured authenticated existing session: network=0x..., localUser=0x....
 Stage 2 confirmed Relink's existing gameplay endpoint before canary creation: endpoint=0x....
-Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before system-default I/O selection; microphone permissions remain None until a remote Mod ChatControl joins this network.
+Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before audio selection; microphone="..." (Manual), playback="..." (SystemDefault); microphone permissions remain None until a remote Mod ChatControl joins this network.
 Stage 2 CreateChatControlCompleted: result=0, ...
 Stage 2 ChatControlCreated (local canary): chatControl=0x....
-Stage 2 SetChatAudioInputCompleted: result=0, ... selectionType=1.
-Stage 2 SetChatAudioOutputCompleted: result=0, ... selectionType=1.
+Stage 2 SetChatAudioInputCompleted: result=0, ... selectionType=3, device="...".
+Stage 2 SetChatAudioOutputCompleted: result=0, ... selectionType=1, device="...".
 Stage 2 ConnectChatControlCompleted: result=0, ...
 Stage 2 ChatControlJoinedNetwork (local canary): network=0x..., chatControl=0x....
 Stage 2 muted ChatControl canary joined the existing PartyNetwork. Input remains muted; Stage 3 microphone permissions wait for a remote Mod ChatControl on this same network.
@@ -94,7 +101,7 @@ Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x..
 
 ## Stage 3 two-client realtime voice test
 
-Prerequisites: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Party Voice Test (Hold U)` enabled, and select the intended microphone/speaker as the Windows system defaults before starting Relink. Use a private two-client room and label the saved logs as client A and client B.
+Prerequisites: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Party Voice Test (Hold U)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has both successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual) and displayed device name.
 
 Before touching `U`, both logs must contain a grant for the remote control discovered above:
 
@@ -125,3 +132,5 @@ Then preserve `ChatControlLeftNetwork (local canary)`, `DestroyChatControlComple
 If `Stage 2 manager cleanup reached before local ChatControl teardown completed` appears, preserve the full diagnostic fields. `PartyCleanup completed` still proves the manager's safety fallback ran, but the strict Stage 2 teardown-event check has not passed.
 
 The test fails if either client lacks the `0x0005` permission line, logs `Stage 3 voice test failed closed`, logs `Stage 2 canary disabled (fail-closed)`, reports a nonzero Party operation, or cannot complete the local cleanup chain. It also fails for one-way/no audio, audio while `U` is released, audio continuing after focus loss/peer departure, a manager ownership conflict, a second local ChatControl, changed matchmaking, broken native text chat or rendering. The Mod must not call `PartyEndpointSendMessage`, initialize a second Party manager or create another gameplay endpoint. Disable `Experimental Party Voice Test`, restart, and preserve both complete logs plus approximate key-down/key-up/leave times after any failure.
+
+If either audio row is a plain text field, or opening Mod configuration reports that the audio-device UI is missing, verify that `GBFR.ChatOverlay.dll` and `GBFR.ChatOverlay.ConfiguratorUI.dll` came from the same ZIP. The second DLL is launcher-only; it must be present beside the main Mod DLL but is deliberately not referenced or loaded by the game-side assembly.

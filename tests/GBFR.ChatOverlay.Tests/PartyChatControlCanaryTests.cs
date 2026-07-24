@@ -1,4 +1,5 @@
 using GBFR.ChatOverlay.Native;
+using GBFR.ChatOverlay.Audio;
 
 namespace GBFR.ChatOverlay.Tests;
 
@@ -102,6 +103,126 @@ public sealed class PartyChatControlCanaryTests
         canary.OnBatchFinished(Manager);
 
         Assert.Equal(PartyChatControlCanaryPhase.Completed, canary.Phase);
+    }
+
+    [Fact]
+    public void ManualAudioDevices_AreSelectedIndependentlyBeforeConnect()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(
+            api,
+            logs.Add,
+            action => action(),
+            audioInputSelection: new ResolvedAudioEndpointSelection(
+                UseSystemDefault: false,
+                DeviceId: "capture-endpoint-id",
+                DisplayName: "Desk Microphone",
+                FellBack: false),
+            audioOutputSelection: new ResolvedAudioEndpointSelection(
+                UseSystemDefault: false,
+                DeviceId: "render-endpoint-id",
+                DisplayName: "USB Headset",
+                FellBack: false));
+
+        canary.CaptureManager(Manager, "test");
+        ObserveReadySession(canary);
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(
+            new[]
+            {
+                "GetLocalDevice",
+                "GetLocalChatControlCount",
+                "CreateChatControl",
+                "SetAudioInputMuted:True",
+                "GetAudioInputMuted",
+                "SetAudioInput:Manual:capture-endpoint-id",
+                "SetAudioOutput:Manual:render-endpoint-id",
+            },
+            api.Calls);
+        Assert.Contains(
+            logs,
+            line => line.Contains("microphone=\"Desk Microphone\" (Manual)", StringComparison.Ordinal));
+        Assert.Contains(
+            logs,
+            line => line.Contains("playback=\"USB Headset\" (Manual)", StringComparison.Ordinal));
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.CreateChatControlCompleted)
+        {
+            Result = 0,
+            LocalDevice = LocalDevice,
+            LocalUser = LocalUser,
+            ChatControl = LocalChatControl,
+            AsyncIdentifier = canary.CreateAsyncIdentifier,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlCreated)
+        {
+            ChatControl = LocalChatControl,
+        });
+        canary.Observe(Manager, AudioCompleted(
+            PartyStateChangeType.SetChatAudioInputCompleted,
+            canary.AudioInputAsyncIdentifier,
+            PartyAudioDeviceSelectionType.Manual,
+            "capture-endpoint-id"));
+        canary.Observe(Manager, AudioCompleted(
+            PartyStateChangeType.SetChatAudioOutputCompleted,
+            canary.AudioOutputAsyncIdentifier,
+            PartyAudioDeviceSelectionType.Manual,
+            "render-endpoint-id"));
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal("ConnectChatControl", api.Calls[^1]);
+        Assert.Equal(PartyChatControlCanaryPhase.Connecting, canary.Phase);
+    }
+
+    [Fact]
+    public void ManualAudioCompletion_WithDifferentEndpointIdFailsClosed()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(
+            api,
+            logs.Add,
+            action => action(),
+            audioInputSelection: new ResolvedAudioEndpointSelection(
+                UseSystemDefault: false,
+                DeviceId: "capture-endpoint-id",
+                DisplayName: "Desk Microphone",
+                FellBack: false),
+            audioOutputSelection: new ResolvedAudioEndpointSelection(
+                UseSystemDefault: false,
+                DeviceId: "render-endpoint-id",
+                DisplayName: "USB Headset",
+                FellBack: false));
+
+        canary.CaptureManager(Manager, "test");
+        ObserveReadySession(canary);
+        canary.OnBatchFinished(Manager);
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.CreateChatControlCompleted)
+        {
+            Result = 0,
+            LocalDevice = LocalDevice,
+            LocalUser = LocalUser,
+            ChatControl = LocalChatControl,
+            AsyncIdentifier = canary.CreateAsyncIdentifier,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlCreated)
+        {
+            ChatControl = LocalChatControl,
+        });
+        canary.Observe(Manager, AudioCompleted(
+            PartyStateChangeType.SetChatAudioInputCompleted,
+            canary.AudioInputAsyncIdentifier,
+            PartyAudioDeviceSelectionType.Manual,
+            "different-capture-endpoint-id"));
+        canary.OnBatchFinished(Manager);
+
+        Assert.DoesNotContain("ConnectChatControl", api.Calls);
+        Assert.Equal("DestroyChatControl", api.Calls[^1]);
+        Assert.Equal(PartyChatControlCanaryPhase.Destroying, canary.Phase);
+        Assert.Contains(logs, line =>
+            line.Contains("did not confirm the owned Manual device operation", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -892,11 +1013,14 @@ public sealed class PartyChatControlCanaryTests
 
     private static PartyStateChangeSnapshot AudioCompleted(
         PartyStateChangeType type,
-        nint asyncIdentifier) =>
+        nint asyncIdentifier,
+        PartyAudioDeviceSelectionType selectionType = PartyAudioDeviceSelectionType.SystemDefault,
+        string? selectionContext = null) =>
         new((uint)type)
         {
             Result = 0,
-            Value = 1,
+            Value = (uint)selectionType,
+            AudioDeviceSelectionContext = selectionContext,
             ChatControl = LocalChatControl,
             AsyncIdentifier = asyncIdentifier,
         };
@@ -991,15 +1115,27 @@ public sealed class PartyChatControlCanaryTests
             return SetPermissionsResult;
         }
 
-        public uint SetSystemDefaultAudioInput(nint localChatControl, nint asyncIdentifier)
+        public uint SetAudioInput(
+            nint localChatControl,
+            PartyAudioDeviceSelectionType selectionType,
+            string? selectionContext,
+            nint asyncIdentifier)
         {
-            Calls.Add("SetSystemDefaultAudioInput");
+            Calls.Add(selectionType == PartyAudioDeviceSelectionType.SystemDefault
+                ? "SetSystemDefaultAudioInput"
+                : $"SetAudioInput:{selectionType}:{selectionContext}");
             return 0;
         }
 
-        public uint SetSystemDefaultAudioOutput(nint localChatControl, nint asyncIdentifier)
+        public uint SetAudioOutput(
+            nint localChatControl,
+            PartyAudioDeviceSelectionType selectionType,
+            string? selectionContext,
+            nint asyncIdentifier)
         {
-            Calls.Add("SetSystemDefaultAudioOutput");
+            Calls.Add(selectionType == PartyAudioDeviceSelectionType.SystemDefault
+                ? "SetSystemDefaultAudioOutput"
+                : $"SetAudioOutput:{selectionType}:{selectionContext}");
             return 0;
         }
 

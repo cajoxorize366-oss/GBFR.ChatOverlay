@@ -103,4 +103,38 @@ public sealed class PartyMicrophoneCaptureTests
 
         Assert.Equal(0, provider.Read(new float[4], 0, 4));
     }
+
+    [Fact]
+    public void FrameCadence_RequiresFullIntervalAndNeverCatchesUpAfterDelay()
+    {
+        var cadence = new PartyFrameCadence(
+            timestampFrequency: 1_000,
+            frameDurationMilliseconds: 40);
+
+        Assert.Equal(0, cadence.GetRemainingTicks(timestamp: 100));
+        cadence.MarkPublished(timestamp: 100);
+        Assert.Equal(40, cadence.GetRemainingTicks(timestamp: 100));
+        Assert.Equal(1, cadence.GetRemainingTicks(timestamp: 139));
+        Assert.Equal(0, cadence.GetRemainingTicks(timestamp: 140));
+
+        // A thread that wakes up late establishes a new 40 ms deadline. It must not emit several
+        // accumulated frames immediately in an attempt to catch up with the old deadline.
+        cadence.MarkPublished(timestamp: 500);
+        Assert.Equal(40, cadence.GetRemainingTicks(timestamp: 500));
+        Assert.Equal(0, cadence.GetRemainingTicks(timestamp: 540));
+    }
+
+    [Fact]
+    public void FrameCadence_RoundsUpForTimestampFrequenciesNotDivisibleByOneThousand()
+    {
+        var cadence = new PartyFrameCadence(
+            timestampFrequency: 1_001,
+            frameDurationMilliseconds: 40);
+
+        cadence.MarkPublished(timestamp: 100);
+
+        Assert.Equal(41, cadence.GetRemainingTicks(timestamp: 100));
+        Assert.Equal(1, cadence.GetRemainingTicks(timestamp: 140));
+        Assert.Equal(0, cadence.GetRemainingTicks(timestamp: 141));
+    }
 }

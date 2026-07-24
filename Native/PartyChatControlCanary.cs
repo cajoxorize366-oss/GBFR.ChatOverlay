@@ -28,6 +28,7 @@ internal sealed class PartyChatControlCanary : IDisposable
 {
     private const uint Success = 0;
     private const uint SucceededStateChange = 0;
+    private const uint AudioStreamInsufficientSpace = 0x000010D8;
     private const float CaptureSignalThreshold = 0.01f;
     private const int MaximumConsecutiveCaptureSubmitFailures = 3;
     private static readonly long VoiceDiagnosticIntervalTicks = Math.Max(1, Stopwatch.Frequency / 4);
@@ -106,6 +107,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private int _captureFramesSkippedForStateBatch;
     private int _captureSubmitFailures;
     private int _captureConsecutiveSubmitFailures;
+    private int _captureBackpressureFrames;
     private float _capturePeak;
     private bool _captureSignalSubmitted;
     private bool _captureFirstFrameLogged;
@@ -1979,7 +1981,8 @@ internal sealed class PartyChatControlCanary : IDisposable
             return;
         }
 
-        uint submitResult;
+        var submitResult = Success;
+        Exception? submitException = null;
         var failAfterSubmit = false;
         lock (_apiCallSync)
         {
@@ -2004,47 +2007,83 @@ internal sealed class PartyChatControlCanary : IDisposable
                 captureStream = _captureStream;
             }
 
-            submitResult = _api.SubmitAudioManipulationCaptureBuffer(
-                captureStream,
-                frame.Buffer,
-                frame.Buffer.Length);
-
-            lock (_stateSync)
+            try
             {
-                if (!IsActiveCaptureLocked(backend, captureEpoch))
-                    return;
+                submitResult = _api.SubmitAudioManipulationCaptureBuffer(
+                    captureStream,
+                    frame.Buffer,
+                    frame.Buffer.Length);
+            }
+            catch (Exception exception)
+            {
+                submitException = exception;
+            }
 
-                if (submitResult == Success)
+            if (submitException is null)
+            {
+                lock (_stateSync)
                 {
-                    _captureFramesSubmitted++;
-                    _captureConsecutiveSubmitFailures = 0;
-                    _capturePeak = Math.Max(_capturePeak, frame.Peak);
-                    if (!_captureFirstFrameLogged)
+                    if (!IsActiveCaptureLocked(backend, captureEpoch))
+                        return;
+
+                    if (submitResult == Success)
                     {
-                        _captureFirstFrameLogged = true;
-                        EnqueueLogLocked(
-                            "Stage 3 Party capture sink accepted the first 40 ms microphone frame " +
-                            $"({frame.Buffer.Length} bytes).");
+                        _captureFramesSubmitted++;
+                        _captureConsecutiveSubmitFailures = 0;
+                        _capturePeak = Math.Max(_capturePeak, frame.Peak);
+                        if (!_captureFirstFrameLogged)
+                        {
+                            _captureFirstFrameLogged = true;
+                            EnqueueLogLocked(
+                                "Stage 3 Party capture sink accepted the first 40 ms microphone frame " +
+                                $"({frame.Buffer.Length} bytes).");
+                        }
+                        if (!_captureSignalSubmitted && frame.Peak >= CaptureSignalThreshold)
+                        {
+                            _captureSignalSubmitted = true;
+                            EnqueueLogLocked(
+                                $"Stage 3 Party capture sink accepted microphone signal (peak {frame.Peak:P0}); " +
+                                "this PCM is now on the Party voice transport path.");
+                        }
                     }
-                    if (!_captureSignalSubmitted && frame.Peak >= CaptureSignalThreshold)
+                    else if (submitResult == AudioStreamInsufficientSpace)
                     {
-                        _captureSignalSubmitted = true;
-                        EnqueueLogLocked(
-                            $"Stage 3 Party capture sink accepted microphone signal (peak {frame.Peak:P0}); " +
-                            "this PCM is now on the Party voice transport path.");
+                        // Party consumes 40 ms from this queue every 40 ms. A full queue is transient
+                        // backpressure, not a broken handle or unsafe native state. Drop this frame to
+                        // preserve low latency and let the next paced frame try again.
+                        _captureSubmitFailures++;
+                        _captureBackpressureFrames++;
+                        _captureConsecutiveSubmitFailures = 0;
+                        if (ShouldLogBackpressureCount(_captureBackpressureFrames))
+                        {
+                            EnqueueLogLocked(
+                                "Stage 3 Party capture sink backpressure 0x000010D8: the current " +
+                                $"40 ms frame was dropped (droppedThisHold={_captureBackpressureFrames}). " +
+                                "Capture remains active and the next paced frame will retry.");
+                        }
                     }
-                }
-                else
-                {
-                    _captureSubmitFailures++;
-                    _captureConsecutiveSubmitFailures++;
-                    EnqueueLogLocked(
-                        $"Stage 3 PartyAudioManipulationSinkStreamSubmitBuffer returned " +
-                        $"0x{submitResult:X8} (consecutive={_captureConsecutiveSubmitFailures}).");
-                    failAfterSubmit =
-                        _captureConsecutiveSubmitFailures >= MaximumConsecutiveCaptureSubmitFailures;
+                    else
+                    {
+                        _captureSubmitFailures++;
+                        _captureConsecutiveSubmitFailures++;
+                        EnqueueLogLocked(
+                            $"Stage 3 PartyAudioManipulationSinkStreamSubmitBuffer returned " +
+                            $"0x{submitResult:X8} (consecutive={_captureConsecutiveSubmitFailures}).");
+                        failAfterSubmit =
+                            _captureConsecutiveSubmitFailures >= MaximumConsecutiveCaptureSubmitFailures;
+                    }
                 }
             }
+        }
+
+        if (submitException is not null)
+        {
+            FailActiveCaptureBridge(
+                backend,
+                captureEpoch,
+                "Party capture sink submission threw " +
+                $"{submitException.GetType().Name}: {Sanitize(submitException.Message)}");
+            return;
         }
 
         if (failAfterSubmit)
@@ -2090,17 +2129,31 @@ internal sealed class PartyChatControlCanary : IDisposable
                 DetachCaptureBackendLocked(backend, captureEpoch, reason);
             }
 
-            var muteResult = canMuteNow
-                ? _api.SetAudioInputMuted(chatControl, muted: true)
-                : uint.MaxValue;
+            var muteResult = uint.MaxValue;
+            Exception? muteException = null;
+            if (canMuteNow)
+            {
+                try
+                {
+                    muteResult = _api.SetAudioInputMuted(chatControl, muted: true);
+                }
+                catch (Exception exception)
+                {
+                    muteException = exception;
+                }
+            }
             lock (_stateSync)
             {
                 _inputUnmuted = false;
-                if (muteResult == Success)
+                if (muteException is null && muteResult == Success)
                     _microphoneMayBeOpen = false;
                 RequestEmergencyVoiceTeardownLocked(
                     $"{reason}; emergencyMute=" +
-                    (canMuteNow ? $"0x{muteResult:X8}" : "deferred until the Party state batch ends"));
+                    (!canMuteNow
+                        ? "deferred until the Party state batch ends"
+                        : muteException is not null
+                            ? $"threw {muteException.GetType().Name}: {Sanitize(muteException.Message)}"
+                            : $"0x{muteResult:X8}"));
                 shouldSchedule = true;
             }
         }
@@ -2149,6 +2202,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _captureFramesSkippedForStateBatch = 0;
         _captureSubmitFailures = 0;
         _captureConsecutiveSubmitFailures = 0;
+        _captureBackpressureFrames = 0;
         _capturePeak = 0;
         _captureSignalSubmitted = false;
         _captureFirstFrameLogged = false;
@@ -2177,6 +2231,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             $"submittedFrames={_captureFramesSubmitted}, " +
             $"submittedAudioMs={_captureFramesSubmitted * WasapiPartyMicrophoneCaptureBackend.PartyFrameDurationMilliseconds}, " +
             $"peak={_capturePeak:P0}, submitFailures={_captureSubmitFailures}, " +
+            $"backpressureDrops={_captureBackpressureFrames}, " +
             $"framesSkippedDuringRelinkStateBatch={_captureFramesSkippedForStateBatch}, " +
             $"PartyLocalTalkingObserved={_pttCycleLocalTalkingObserved}.");
     }
@@ -2198,6 +2253,9 @@ internal sealed class PartyChatControlCanary : IDisposable
             }
         }
     }
+
+    private static bool ShouldLogBackpressureCount(int count) =>
+        count > 0 && (count & (count - 1)) == 0;
 
     private void ExecuteVoiceDiagnosticsNonFatal(CanaryWorkItem work)
     {
@@ -2636,6 +2694,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             $"localTalkingObserved={_diagnosticLocalTalkingObserved}, " +
             $"captureSinkEnabled={_useCaptureBridge}, captureFramesSubmitted={_captureFramesSubmitted}, " +
             $"captureSignalSubmitted={_captureSignalSubmitted}, capturePeak={_capturePeak:P0}, " +
+            $"captureBackpressureDrops={_captureBackpressureFrames}, " +
             $"completePeer={(completePeer.Value is null ? "none" : Hex(completePeer.Key))}, " +
             $"peerEvidence={peerEvidenceText}. " +
             "PASS proves Party observed both directions and an enabled render path; physical audibility " +

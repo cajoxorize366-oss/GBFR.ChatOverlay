@@ -1,6 +1,6 @@
 # One-run Party voice troubleshooting matrix
 
-This is the required test for `0.3.0-preview.8`. It combines Microsoft PlayFab Party's official audio troubleshooting flow with direct evidence from Party's official audio-manipulation capture sink. It is designed to extract the useful evidence from one two-client session. Do not repeat isolated device-switch experiments before collecting this run.
+This is the required test for `0.3.0-preview.9`. It combines Microsoft PlayFab Party's official audio troubleshooting flow with direct evidence from Party's official audio-manipulation capture sink. It is designed to extract the useful evidence from one two-client session. Do not repeat isolated device-switch experiments before collecting this run.
 
 ## What the package now measures
 
@@ -38,7 +38,7 @@ Stage 3 Party audio output state: Initialized (1); errorDetail=0x00000000.
 Stage 3 Party microphone capture started for U: ... PartySinkFormat=24000 Hz mono float32, frame=40 ms.
 Stage 3 Party capture sink accepted the first 40 ms microphone frame (3840 bytes).
 Stage 3 Party capture sink accepted microphone signal (peak ...); this PCM is now on the Party voice transport path.
-Stage 3 Party capture bridge result (completed U hold): verdict=PASS_PARTY_CAPTURE_SINK_ACCEPTED_MICROPHONE_SIGNAL, submittedFrames=..., submittedAudioMs=..., peak=..., submitFailures=0, ...
+Stage 3 Party capture bridge result (completed U hold): verdict=PASS_PARTY_CAPTURE_SINK_ACCEPTED_MICROPHONE_SIGNAL, submittedFrames=..., submittedAudioMs=..., peak=..., submitFailures=0, backpressureDrops=0, ...
 ```
 
 The receiving client must independently contain:
@@ -62,7 +62,8 @@ The summary pass means that, during this session, Party accepted local microphon
 | `Party microphone capture started` but no first accepted frame | Windows capture/conversion or SubmitBuffer | Preserve the source format and any capture fault/submit error. Party never accepted a complete 40 ms frame. |
 | First frames accepted but bridge verdict is `NO_SPEECH_SIGNAL_OBSERVED` | Local microphone signal | The sink is live but the measured PCM stayed below the signal threshold. Check the selected endpoint, Windows meter and gain. |
 | `PASS_PARTY_CAPTURE_SINK_ACCEPTED_MICROPHONE_SIGNAL` | Local Party send path | The selected Windows mic was converted and Party synchronously accepted signal-bearing PCM. This alone does not prove network receipt. |
-| Three consecutive `SubmitBuffer` failures | Party capture sink | The bridge closes its gate, mutes and tears down fail-closed. Preserve all three HRESULTs and the session lifecycle immediately before them. |
+| `Party capture sink backpressure 0x000010D8` | Recoverable Party sink queue pressure | The current 40 ms frame was dropped because Party's bounded queue had no space. Capture must remain active and a later paced frame must succeed. Use `backpressureDrops` in the hold summary; repeated fail-closed teardown for this code indicates an old build. |
+| Three consecutive non-`0x10D8` `SubmitBuffer` failures | Party capture sink/API state | The bridge closes its gate, mutes and tears down fail-closed. Preserve all three HRESULTs and the session lifecycle immediately before them. |
 | U held but `nativeInputUnmuted=False` or `inputMuted=True` | Push-to-talk/native mute | Party did not open the ChatControl even though WASAPI may have started. No captured frame is allowed through the submission gate. |
 | Legacy LOCAL indicator `NoAudioInput` while capture-sink frames are accepted | Party automatic input, bypassed by manipulation | Do not fail the local path on this field. Use sink acceptance locally and the peer's remote `Talking` to judge the real bridge. |
 | Local `Talking` while the sink signal is accepted | Supplemental Party evidence | Helpful confirmation, but not required because the receiver's indicator is the authoritative online check. |

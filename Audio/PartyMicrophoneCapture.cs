@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -63,6 +64,7 @@ internal sealed class WasapiPartyMicrophoneCaptureBackend : IPartyMicrophoneCapt
     private readonly Action<string> _log;
     private readonly object _sync = new();
     private readonly ManualResetEventSlim _recordingStopped = new(initialState: false);
+    private readonly ManualResetEventSlim _stopSignal = new(initialState: false);
     private readonly AutoResetEvent _samplesAvailable = new(initialState: false);
 
     private MMDeviceEnumerator? _enumerator;
@@ -154,6 +156,7 @@ internal sealed class WasapiPartyMicrophoneCaptureBackend : IPartyMicrophoneCapt
             return;
 
         Volatile.Read(ref _monoSamples)?.Clear();
+        _stopSignal.Set();
         _samplesAvailable.Set();
         if (Interlocked.CompareExchange(ref _cleanupStarted, 1, 0) != 0)
             return;
@@ -208,6 +211,9 @@ internal sealed class WasapiPartyMicrophoneCaptureBackend : IPartyMicrophoneCapt
         var resampled = new float[PartySamplesPerFrame * 4];
         var frame = new float[PartySamplesPerFrame];
         var frameSamples = 0;
+        var cadence = new PartyFrameCadence(
+            Stopwatch.Frequency,
+            PartyFrameDurationMilliseconds);
 
         try
         {
@@ -237,7 +243,13 @@ internal sealed class WasapiPartyMicrophoneCaptureBackend : IPartyMicrophoneCapt
                         if (frameSamples != PartySamplesPerFrame)
                             continue;
 
+                        if (!WaitForFrameCadence(cadence))
+                            return;
                         PublishFrame(frame);
+                        // Base the next deadline on the completed callback. If the callback or the
+                        // thread was delayed, this deliberately starts a fresh 40 ms interval
+                        // instead of replaying missed deadlines in a burst.
+                        cadence.MarkPublished(Stopwatch.GetTimestamp());
                         frameSamples = 0;
                     }
                 }
@@ -247,6 +259,22 @@ internal sealed class WasapiPartyMicrophoneCaptureBackend : IPartyMicrophoneCapt
         {
             SignalFault(exception);
         }
+    }
+
+    private bool WaitForFrameCadence(PartyFrameCadence cadence)
+    {
+        while (Volatile.Read(ref _stopRequested) == 0)
+        {
+            var remainingTicks = cadence.GetRemainingTicks(Stopwatch.GetTimestamp());
+            if (remainingTicks <= 0)
+                return true;
+
+            var wait = TimeSpan.FromSeconds((double)remainingTicks / Stopwatch.Frequency);
+            if (_stopSignal.Wait(wait))
+                return false;
+        }
+
+        return false;
     }
 
     private void PublishFrame(float[] samples)
@@ -398,6 +426,40 @@ internal sealed class WasapiPartyMicrophoneCaptureBackend : IPartyMicrophoneCapt
             throw new InvalidOperationException("A manual microphone selection has no device ID.");
         return enumerator.GetDevice(selection.DeviceId);
     }
+}
+
+/// <summary>
+/// Maintains a minimum monotonic interval between Party sink submissions. A late publication
+/// establishes a new deadline, so buffered microphone data can never trigger catch-up bursts.
+/// </summary>
+internal sealed class PartyFrameCadence
+{
+    private readonly long _intervalTicks;
+    private long _nextPublishTimestamp;
+
+    public PartyFrameCadence(long timestampFrequency, int frameDurationMilliseconds)
+    {
+        if (timestampFrequency <= 0)
+            throw new ArgumentOutOfRangeException(nameof(timestampFrequency));
+        if (frameDurationMilliseconds <= 0)
+            throw new ArgumentOutOfRangeException(nameof(frameDurationMilliseconds));
+
+        _intervalTicks = Math.Max(
+            1,
+            checked((timestampFrequency * frameDurationMilliseconds + 999) / 1_000));
+    }
+
+    public long GetRemainingTicks(long timestamp)
+    {
+        if (_nextPublishTimestamp == 0 || timestamp >= _nextPublishTimestamp)
+            return 0;
+        return _nextPublishTimestamp - timestamp;
+    }
+
+    public void MarkPublished(long timestamp) =>
+        _nextPublishTimestamp = timestamp > long.MaxValue - _intervalTicks
+            ? long.MaxValue
+            : timestamp + _intervalTicks;
 }
 
 internal sealed class WaveToMonoSampleDecoder

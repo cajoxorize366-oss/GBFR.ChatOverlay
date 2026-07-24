@@ -113,6 +113,60 @@ public sealed class PartyCaptureBridgeCanaryTests
     }
 
     [Fact]
+    public void QueueFullBackpressure_DropsFramesWithoutTeardown_AndLaterSubmissionRecovers()
+    {
+        var api = new FakePartyApi();
+        for (var index = 0; index < 6; index++)
+            api.SubmitResults.Enqueue(0x000010D8);
+        api.SubmitResults.Enqueue(0);
+        var backend = new FakeCaptureBackend();
+        var logs = new List<string>();
+        using var canary = CreateCanary(api, backend, logs.Add);
+        AdvanceToVoiceReady(canary);
+        canary.SetPushToTalkPressed(true);
+
+        for (var index = 0; index < 6; index++)
+            backend.EmitFrame(0.2f);
+
+        Assert.False(backend.Stopped);
+        Assert.DoesNotContain(api.Calls, call => call.StartsWith("DestroyChatControl", StringComparison.Ordinal));
+        Assert.Equal(
+            3,
+            logs.Count(line => line.Contains("capture sink backpressure", StringComparison.Ordinal)));
+
+        backend.EmitFrame(0.2f);
+        canary.SetPushToTalkPressed(false);
+
+        Assert.True(SpinWait.SpinUntil(() => backend.Stopped, TimeSpan.FromSeconds(1)));
+        Assert.DoesNotContain(api.Calls, call => call.StartsWith("DestroyChatControl", StringComparison.Ordinal));
+        Assert.Contains(logs, line =>
+            line.Contains("PASS_PARTY_CAPTURE_SINK_ACCEPTED_MICROPHONE_SIGNAL", StringComparison.Ordinal) &&
+            line.Contains("backpressureDrops=6", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SubmitAndEmergencyMuteExceptions_StillStopCaptureAndQueueTeardown()
+    {
+        var api = new FakePartyApi();
+        var backend = new FakeCaptureBackend();
+        var logs = new List<string>();
+        using var canary = CreateCanary(api, backend, logs.Add);
+        AdvanceToVoiceReady(canary);
+        canary.SetPushToTalkPressed(true);
+        api.SubmitException = new InvalidOperationException("submit exploded");
+        api.ThrowOnNextMuteTrue = new InvalidOperationException("mute exploded");
+
+        backend.EmitFrame(0.2f);
+
+        Assert.True(SpinWait.SpinUntil(() => backend.Stopped, TimeSpan.FromSeconds(1)));
+        Assert.Contains(api.Calls, call => call.StartsWith("DestroyChatControl", StringComparison.Ordinal));
+        Assert.Contains(logs, line =>
+            line.Contains("submission threw InvalidOperationException: submit exploded", StringComparison.Ordinal));
+        Assert.Contains(logs, line =>
+            line.Contains("emergencyMute=threw InvalidOperationException: mute exploded", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void CaptureCompletionStateReader_UsesOfficialPartyOffsets()
     {
         var memory = Marshal.AllocHGlobal(40);
@@ -302,6 +356,8 @@ public sealed class PartyCaptureBridgeCanaryTests
         public List<string> Calls { get; } = [];
         public List<int> SubmittedBuffers { get; } = [];
         public Queue<uint> SubmitResults { get; } = new();
+        public Exception? SubmitException { get; set; }
+        public Exception? ThrowOnNextMuteTrue { get; set; }
 
         public uint GetLocalDevice(nint manager, out nint localDevice)
         {
@@ -337,6 +393,11 @@ public sealed class PartyCaptureBridgeCanaryTests
         public uint SetAudioInputMuted(nint localChatControl, bool muted)
         {
             Calls.Add($"SetAudioInputMuted:{muted}");
+            if (muted && ThrowOnNextMuteTrue is { } exception)
+            {
+                ThrowOnNextMuteTrue = null;
+                throw exception;
+            }
             _muted = muted;
             return 0;
         }
@@ -505,6 +566,11 @@ public sealed class PartyCaptureBridgeCanaryTests
         {
             Calls.Add("SubmitCaptureBuffer");
             SubmittedBuffers.Add(count);
+            if (SubmitException is { } exception)
+            {
+                SubmitException = null;
+                throw exception;
+            }
             return SubmitResults.Count == 0 ? 0 : SubmitResults.Dequeue();
         }
     }

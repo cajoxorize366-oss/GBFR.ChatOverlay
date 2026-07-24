@@ -116,9 +116,11 @@ Run this exact test in both directions:
 1. Client A holds `U`, speaks a short phrase, then releases `U`.
 2. After Party confirms unmute, A's overlay must show `>>> [VOICE] 正在语音 · 松开 U 静音 <<<` and log `Stage 3 push-to-talk microphone UNMUTED while U is held.`
 3. On release, A's overlay must return to `[VOICE] 已就绪 · 按住 U 说话` and log `Stage 3 push-to-talk microphone muted.`
-4. Client B must hear the phrase only during A's hold interval. Party does not expose a useful “audio was heard” state-change here, so the receiving result is a manual observation rather than a log line.
+4. Client B must hear the phrase only during A's hold interval. B's log must also transition its matching `Stage 3 voice diagnostics PEER` line to `remoteIndicator=Talking (1)` and `diagnosis=PASS_REMOTE_AUDIO_RECEIVED_BY_PARTY`. This proves Party observed remote voice; physical audibility remains a separate manual observation.
 5. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
 6. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. After focus returns, the overlay must no longer show `正在语音`. Repeat a normal hold/release once to prove recovery.
+
+Speak continuously for at least three seconds during each direction so the low-noise diagnostic poll cannot miss the indicator transition. The expected LOCAL/PEER lines, terminal summary meanings, every official Party indicator state and the complete decision matrix are documented in [VOICE_TROUBLESHOOTING_MATRIX.md](VOICE_TROUBLESHOOTING_MATRIX.md). One labelled A/B log pair from that procedure should replace repeated one-setting-at-a-time tests.
 
 `U` is consumed by the Mod while this preview is available, so it should not reach Relink. The microphone must remain silent before the permission log, while `U` is released, after focus loss, and after the last remote Mod ChatControl leaves.
 

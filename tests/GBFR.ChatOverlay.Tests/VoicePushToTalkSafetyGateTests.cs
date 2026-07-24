@@ -93,6 +93,36 @@ public sealed class VoicePushToTalkSafetyGateTests
     }
 
     [Fact]
+    public void Report_RequestsLowRateDiagnosticsWhilePushToTalkRemainsHeld()
+    {
+        var reports = new List<bool>();
+        var samples = 0;
+        long now = 0;
+        using var gate = new VoicePushToTalkSafetyGate(
+            reports.Add,
+            log: null,
+            TimeSpan.FromSeconds(1),
+            () => now,
+            startWatchdog: false,
+            requestDiagnosticSample: () => samples++,
+            diagnosticSamplePeriod: TimeSpan.FromMilliseconds(500));
+
+        gate.Report(true);
+        now = Stopwatch.Frequency / 4;
+        gate.Report(true);
+        now = Stopwatch.Frequency / 2;
+        gate.Report(true);
+        now = Stopwatch.Frequency;
+        gate.Report(true);
+        gate.Report(false);
+        now += Stopwatch.Frequency;
+        gate.Report(false);
+
+        Assert.Equal(new[] { true, false }, reports);
+        Assert.Equal(3, samples);
+    }
+
+    [Fact]
     public async Task Suspend_CannotBeOvertakenByAnInFlightPressedCallback()
     {
         var reports = new List<bool>();

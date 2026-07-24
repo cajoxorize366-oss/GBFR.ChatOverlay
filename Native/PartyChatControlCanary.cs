@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using GBFR.ChatOverlay.Audio;
 
@@ -27,6 +28,7 @@ internal sealed class PartyChatControlCanary : IDisposable
 {
     private const uint Success = 0;
     private const uint SucceededStateChange = 0;
+    private static readonly long VoiceDiagnosticIntervalTicks = Math.Max(1, Stopwatch.Frequency / 4);
     private const PartyChatPermissionOptions MicrophoneVoicePermissions =
         PartyChatPermissionOptions.SendMicrophoneAudio |
         PartyChatPermissionOptions.ReceiveMicrophoneAudio;
@@ -41,6 +43,8 @@ internal sealed class PartyChatControlCanary : IDisposable
     private readonly object _apiCallSync = new();
     private readonly HashSet<nint> _remoteChatControls = [];
     private readonly HashSet<nint> _permissionedRemoteChatControls = [];
+    private readonly Dictionary<nint, string> _lastPeerVoiceDiagnosticFingerprints = [];
+    private readonly Dictionary<nint, PeerVoiceDiagnosticEvidence> _peerVoiceDiagnosticEvidence = [];
     private readonly GCHandle _createTokenHandle;
     private readonly GCHandle _inputTokenHandle;
     private readonly GCHandle _outputTokenHandle;
@@ -86,6 +90,20 @@ internal sealed class PartyChatControlCanary : IDisposable
     // Conservative native-state marker. This is set before an unmute call so a concurrent
     // fail-closed path never relies solely on the managed mirror being updated afterwards.
     private bool _microphoneMayBeOpen;
+    private PartyAudioInputState? _audioInputState;
+    private uint _audioInputStateErrorDetail;
+    private PartyAudioOutputState? _audioOutputState;
+    private uint _audioOutputStateErrorDetail;
+    private bool _voiceDiagnosticRequested;
+    private long _nextVoiceDiagnosticTimestamp;
+    private string? _lastLocalVoiceDiagnosticFingerprint;
+    private bool _voiceDiagnosticSnapshotObserved;
+    private bool _diagnosticLocalTalkingObserved;
+    private PartyAudioDeviceDiagnostic? _diagnosticInputDevice;
+    private PartyAudioDeviceDiagnostic? _diagnosticOutputDevice;
+    private bool _pttCycleActive;
+    private bool _pttCycleLocalTalkingObserved;
+    private bool _voiceDiagnosticSummaryLogged;
     private bool _stateBatchActive;
     private nint _stateBatchManager;
     private int _workScheduled;
@@ -218,6 +236,12 @@ internal sealed class PartyChatControlCanary : IDisposable
                 case PartyStateChangeType.SetChatAudioOutputCompleted:
                     ObserveAudioCompletedLocked(state, input: false);
                     break;
+                case PartyStateChangeType.LocalChatAudioInputChanged:
+                    ObserveAudioStateChangedLocked(state, input: true);
+                    break;
+                case PartyStateChangeType.LocalChatAudioOutputChanged:
+                    ObserveAudioStateChangedLocked(state, input: false);
+                    break;
                 case PartyStateChangeType.ConnectChatControlCompleted:
                     ObserveConnectCompletedLocked(state);
                     break;
@@ -306,6 +330,8 @@ internal sealed class PartyChatControlCanary : IDisposable
             if (manager == nint.Zero || manager != _manager || _suspended)
                 return;
 
+            RequestPeriodicVoiceDiagnosticsLocked();
+
             if (_destroyedObserved &&
                 (!_destroyCallBegan || _destroyCompleted) &&
                 _localChatControl != nint.Zero)
@@ -315,8 +341,11 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _pushToTalkPressed = false;
                 _inputUnmuted = false;
                 _microphoneMayBeOpen = false;
+                EnqueueVoiceDiagnosticSummaryLocked("local ChatControl destroyed");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
+                _lastPeerVoiceDiagnosticFingerprints.Clear();
+                _peerVoiceDiagnosticEvidence.Clear();
                 _destroyQueued = false;
                 _destroyCallBegan = false;
                 _destroyCompleted = false;
@@ -337,7 +366,30 @@ internal sealed class PartyChatControlCanary : IDisposable
         {
             if (_disposed != 0)
                 return;
-            _pushToTalkPressed = _enableVoiceTest && pressed;
+            var normalizedPressed = _enableVoiceTest && pressed;
+            var changed = normalizedPressed != _pushToTalkPressed;
+            _pushToTalkPressed = normalizedPressed;
+            if (changed && _enableVoiceTest && _localChatControl != nint.Zero)
+                _voiceDiagnosticRequested = true;
+        }
+
+        TryScheduleWork();
+    }
+
+    public void RequestVoiceDiagnosticSample()
+    {
+        lock (_stateSync)
+        {
+            if (_disposed != 0 ||
+                !_enableVoiceTest ||
+                _suspended ||
+                !_nativeCallsAllowed ||
+                _localChatControl == nint.Zero)
+            {
+                return;
+            }
+
+            _voiceDiagnosticRequested = true;
         }
 
         TryScheduleWork();
@@ -362,14 +414,32 @@ internal sealed class PartyChatControlCanary : IDisposable
                 if (_network == nint.Zero || network == nint.Zero || network != _network)
                     return;
 
+                if (_stateBatchActive)
+                {
+                    _pushToTalkPressed = false;
+                    _sessionFaulted = true;
+                    _nativeCallsAllowed = false;
+                    _phase = PartyChatControlCanaryPhase.Disabled;
+                    _generation++;
+                    EnqueueVoiceDiagnosticSummaryLocked("network leave during Party state batch");
+                    EnqueueLogLocked(
+                        "Stage 2 observed PartyNetworkLeaveNetwork while a Party state-change batch was active. " +
+                        "The canary issued no overlapping Party calls; Relink's original network leave owns " +
+                        "mute/disconnect/destruction and canary calls remain disabled until manager cleanup.");
+                    return;
+                }
+
                 _preLeaveObserved = true;
                 _networkLeaving = true;
                 _endpointReady = false;
                 _authenticated = false;
                 _teardownRequested = _localChatControl != nint.Zero;
                 _pushToTalkPressed = false;
+                EnqueueVoiceDiagnosticSummaryLocked("Relink network leave");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
+                _lastPeerVoiceDiagnosticFingerprints.Clear();
+                _peerVoiceDiagnosticEvidence.Clear();
 
                 if (_localChatControl == nint.Zero)
                 {
@@ -546,6 +616,8 @@ internal sealed class PartyChatControlCanary : IDisposable
                         "Party owns final teardown.");
                 }
 
+                EnqueueVoiceDiagnosticSummaryLocked("Party manager cleanup");
+
                 _nativeCallsAllowed = false;
                 _teardownRequested = false;
                 _pushToTalkPressed = false;
@@ -553,6 +625,8 @@ internal sealed class PartyChatControlCanary : IDisposable
                     _inputUnmuted = false;
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
+                _lastPeerVoiceDiagnosticFingerprints.Clear();
+                _peerVoiceDiagnosticEvidence.Clear();
                 _stateBatchActive = false;
                 _stateBatchManager = nint.Zero;
                 EnqueueLogLocked(
@@ -591,8 +665,11 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _suspended = true;
                 _nativeCallsAllowed = false;
                 _pushToTalkPressed = false;
+                EnqueueVoiceDiagnosticSummaryLocked("Mod suspension");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
+                _lastPeerVoiceDiagnosticFingerprints.Clear();
+                _peerVoiceDiagnosticEvidence.Clear();
                 _stateBatchActive = false;
                 _stateBatchManager = nint.Zero;
                 _generation++;
@@ -678,8 +755,11 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _nativeCallsAllowed = false;
                 _teardownRequested = false;
                 _pushToTalkPressed = false;
+                EnqueueVoiceDiagnosticSummaryLocked("Mod disposal");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
+                _lastPeerVoiceDiagnosticFingerprints.Clear();
+                _peerVoiceDiagnosticEvidence.Clear();
                 _stateBatchActive = false;
                 _stateBatchManager = nint.Zero;
                 _generation++;
@@ -857,6 +937,38 @@ internal sealed class PartyChatControlCanary : IDisposable
             _outputCompleted = true;
     }
 
+    private void ObserveAudioStateChangedLocked(PartyStateChangeSnapshot state, bool input)
+    {
+        if (state.ChatControl == nint.Zero || state.ChatControl != _localChatControl)
+            return;
+
+        if (input)
+        {
+            if (state.AudioInputState is not { } inputState)
+                return;
+
+            _audioInputState = inputState;
+            _audioInputStateErrorDetail = state.ErrorDetail;
+            EnqueueLogLocked(
+                $"Stage 3 Party audio input state: {FormatEnum(inputState)}; " +
+                $"errorDetail=0x{state.ErrorDetail:X8}. Expected healthy state: Initialized (1).");
+        }
+        else
+        {
+            if (state.AudioOutputState is not { } outputState)
+                return;
+
+            _audioOutputState = outputState;
+            _audioOutputStateErrorDetail = state.ErrorDetail;
+            EnqueueLogLocked(
+                $"Stage 3 Party audio output state: {FormatEnum(outputState)}; " +
+                $"errorDetail=0x{state.ErrorDetail:X8}. Expected healthy state: Initialized (1).");
+        }
+
+        if (_enableVoiceTest)
+            _voiceDiagnosticRequested = true;
+    }
+
     private void ObserveConnectCompletedLocked(PartyStateChangeSnapshot state)
     {
         if (state.AsyncIdentifier != _connectToken)
@@ -891,7 +1003,11 @@ internal sealed class PartyChatControlCanary : IDisposable
         else
         {
             if (_enableVoiceTest && state.Network == _network)
-                _remoteChatControls.Add(state.ChatControl);
+            {
+                var firstRemote = _remoteChatControls.Count == 0;
+                if (_remoteChatControls.Add(state.ChatControl) && firstRemote)
+                    ResetVoiceDiagnosticEvidenceLocked();
+            }
             EnqueueLogLocked(
                 $"Stage 2 ChatControlJoinedNetwork (remote/other): network={Hex(state.Network)}, " +
                 $"chatControl={Hex(state.ChatControl)}.");
@@ -929,8 +1045,11 @@ internal sealed class PartyChatControlCanary : IDisposable
         if (state.ChatControl == _localChatControl)
         {
             _pushToTalkPressed = false;
+            EnqueueVoiceDiagnosticSummaryLocked("local ChatControl left network");
             _remoteChatControls.Clear();
             _permissionedRemoteChatControls.Clear();
+            _lastPeerVoiceDiagnosticFingerprints.Clear();
+            _peerVoiceDiagnosticEvidence.Clear();
             _leftObserved = true;
             _joinedObserved = false;
             _teardownRequested = true;
@@ -944,11 +1063,15 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 _remoteChatControls.Remove(state.ChatControl);
                 _permissionedRemoteChatControls.Remove(state.ChatControl);
+                _lastPeerVoiceDiagnosticFingerprints.Remove(state.ChatControl);
                 if (_permissionedRemoteChatControls.Count == 0 &&
                     _phase == PartyChatControlCanaryPhase.VoiceReady)
                 {
                     _phase = PartyChatControlCanaryPhase.JoinedMuted;
                 }
+                if (_remoteChatControls.Count == 0)
+                    EnqueueVoiceDiagnosticSummaryLocked("last remote ChatControl left network");
+                _peerVoiceDiagnosticEvidence.Remove(state.ChatControl);
             }
             EnqueueLogLocked(
                 $"Stage 2 ChatControlLeftNetwork (remote/other): reason={state.Reason}, " +
@@ -986,11 +1109,15 @@ internal sealed class PartyChatControlCanary : IDisposable
         {
             _remoteChatControls.Remove(state.ChatControl);
             _permissionedRemoteChatControls.Remove(state.ChatControl);
+            _lastPeerVoiceDiagnosticFingerprints.Remove(state.ChatControl);
             if (_permissionedRemoteChatControls.Count == 0 &&
                 _phase == PartyChatControlCanaryPhase.VoiceReady)
             {
                 _phase = PartyChatControlCanaryPhase.JoinedMuted;
             }
+            if (_remoteChatControls.Count == 0)
+                EnqueueVoiceDiagnosticSummaryLocked("last remote ChatControl destroyed");
+            _peerVoiceDiagnosticEvidence.Remove(state.ChatControl);
             EnqueueLogLocked(
                 $"Stage 2 ChatControlDestroyed (remote/other): reason={state.Reason}, " +
                 $"chatControl={Hex(state.ChatControl)}.");
@@ -1009,8 +1136,11 @@ internal sealed class PartyChatControlCanary : IDisposable
         _endpointReady = false;
         _authenticated = false;
         _pushToTalkPressed = false;
+        EnqueueVoiceDiagnosticSummaryLocked("Party network cleanup state");
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
+        _lastPeerVoiceDiagnosticFingerprints.Clear();
+        _peerVoiceDiagnosticEvidence.Clear();
         _teardownRequested = _localChatControl != nint.Zero;
     }
 
@@ -1024,8 +1154,11 @@ internal sealed class PartyChatControlCanary : IDisposable
         _authenticated = false;
         _networkLeaving = true;
         _pushToTalkPressed = false;
+        EnqueueVoiceDiagnosticSummaryLocked("local Party user removed");
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
+        _lastPeerVoiceDiagnosticFingerprints.Clear();
+        _peerVoiceDiagnosticEvidence.Clear();
         _teardownRequested = _localChatControl != nint.Zero;
     }
 
@@ -1098,6 +1231,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                     break;
                 case CanaryWorkKind.GrantVoicePermissions:
                 case CanaryWorkKind.ApplyPushToTalk:
+                case CanaryWorkKind.CaptureVoiceDiagnostics:
                     break;
             }
         }
@@ -1181,6 +1315,12 @@ internal sealed class PartyChatControlCanary : IDisposable
                     CanaryWorkKind.ApplyPushToTalk,
                     unmuteInput: shouldUnmute);
             }
+
+            if (_voiceDiagnosticRequested && _remoteChatControls.Count != 0)
+            {
+                _voiceDiagnosticRequested = false;
+                return CaptureWorkLocked(CanaryWorkKind.CaptureVoiceDiagnostics);
+            }
         }
 
         return default;
@@ -1229,6 +1369,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                         break;
                     case CanaryWorkKind.ApplyPushToTalk:
                         ExecutePushToTalk(work);
+                        break;
+                    case CanaryWorkKind.CaptureVoiceDiagnostics:
+                        ExecuteVoiceDiagnosticsNonFatal(work);
                         break;
                 }
             }
@@ -1320,6 +1463,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             _pushToTalkPressed = false;
             _remoteChatControls.Clear();
             _permissionedRemoteChatControls.Clear();
+            ResetVoiceDiagnosticEvidenceLocked();
         }
 
         result = _api.SetAudioInputMuted(chatControl, muted: true);
@@ -1433,6 +1577,8 @@ internal sealed class PartyChatControlCanary : IDisposable
 
             _permissionedRemoteChatControls.Add(work.TargetChatControl);
             _phase = PartyChatControlCanaryPhase.VoiceReady;
+            _voiceDiagnosticRequested = true;
+            _nextVoiceDiagnosticTimestamp = Stopwatch.GetTimestamp() + VoiceDiagnosticIntervalTicks;
             EnqueueLogLocked(
                 $"Stage 3 voice test permissions granted for remote ChatControl={Hex(work.TargetChatControl)} " +
                 $"on network={Hex(work.Network)}: SendMicrophoneAudio|ReceiveMicrophoneAudio (0x0005). " +
@@ -1490,6 +1636,22 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 _inputUnmuted = work.UnmuteInput;
                 _microphoneMayBeOpen = work.UnmuteInput;
+                _voiceDiagnosticRequested = true;
+                if (work.UnmuteInput)
+                {
+                    _pttCycleActive = true;
+                    _pttCycleLocalTalkingObserved = false;
+                }
+                else if (_pttCycleActive)
+                {
+                    EnqueueLogLocked(
+                        "Stage 3 local microphone capture result for the completed U hold: " +
+                        (_pttCycleLocalTalkingObserved
+                            ? "PASS - Party GetLocalChatIndicator reached Talking."
+                            : "NOT OBSERVED - Party never reported Talking; speak for at least three seconds " +
+                              "during the next U hold and check the diagnostic snapshots."));
+                    _pttCycleActive = false;
+                }
                 EnqueueLogLocked(work.UnmuteInput
                     ? "Stage 3 push-to-talk microphone UNMUTED while U is held."
                     : "Stage 3 push-to-talk microphone muted.");
@@ -1515,6 +1677,219 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
     }
 
+    private void ExecuteVoiceDiagnosticsNonFatal(CanaryWorkItem work)
+    {
+        try
+        {
+            ExecuteVoiceDiagnostics(work);
+        }
+        catch (Exception exception)
+        {
+            // These getters are an evidence-only troubleshooting layer. A diagnostic failure must
+            // never alter permissions, mute state, connection ownership or teardown behavior.
+            lock (_stateSync)
+            {
+                if (IsWorkCurrentLocked(work))
+                {
+                    EnqueueLogLocked(
+                        $"Stage 3 voice diagnostics were inconclusive because the read-only sampler " +
+                        $"threw {exception.GetType().Name}: {Sanitize(exception.Message)}. " +
+                        "Voice state was left unchanged.");
+                }
+            }
+        }
+    }
+
+    private void ExecuteVoiceDiagnostics(CanaryWorkItem work)
+    {
+        nint[] remoteChatControls;
+        bool pushToTalkPressed;
+        bool inputUnmuted;
+        PartyAudioInputState? inputState;
+        uint inputStateErrorDetail;
+        PartyAudioOutputState? outputState;
+        uint outputStateErrorDetail;
+        lock (_stateSync)
+        {
+            if (!IsWorkCurrentLocked(work))
+                return;
+
+            remoteChatControls = _remoteChatControls.ToArray();
+            pushToTalkPressed = _pushToTalkPressed;
+            inputUnmuted = _inputUnmuted && _microphoneMayBeOpen;
+            inputState = _audioInputState;
+            inputStateErrorDetail = _audioInputStateErrorDetail;
+            outputState = _audioOutputState;
+            outputStateErrorDetail = _audioOutputStateErrorDetail;
+        }
+
+        var inputMuted = CaptureDiagnostic(
+            "PartyChatControlGetAudioInputMuted",
+            () =>
+            {
+                var result = _api.GetAudioInputMuted(work.ChatControl, out var value);
+                return (result, value);
+            });
+        var localIndicator = CaptureDiagnostic(
+            "PartyChatControlGetLocalChatIndicator",
+            () =>
+            {
+                var result = _api.GetLocalChatIndicator(work.ChatControl, out var value);
+                return (result, value);
+            });
+        var inputDevice = CaptureDiagnostic(
+            "PartyChatControlGetAudioInput",
+            () =>
+            {
+                var result = _api.GetAudioInput(
+                    work.ChatControl,
+                    out var selectionType,
+                    out var selectionContext,
+                    out var deviceId);
+                return (result, new PartyAudioDeviceDiagnostic(selectionType, selectionContext, deviceId));
+            });
+        var outputDevice = CaptureDiagnostic(
+            "PartyChatControlGetAudioOutput",
+            () =>
+            {
+                var result = _api.GetAudioOutput(
+                    work.ChatControl,
+                    out var selectionType,
+                    out var selectionContext,
+                    out var deviceId);
+                return (result, new PartyAudioDeviceDiagnostic(selectionType, selectionContext, deviceId));
+            });
+
+        var localFingerprint =
+            $"inputState={FormatAudioState(inputState, inputStateErrorDetail)}, " +
+            $"outputState={FormatAudioState(outputState, outputStateErrorDetail)}, " +
+            $"pttKeyHeld={pushToTalkPressed}, nativeInputUnmuted={inputUnmuted}, " +
+            $"inputMuted={FormatDiagnostic(inputMuted, static value => value.ToString())}, " +
+            $"localIndicator={FormatDiagnostic(localIndicator, FormatEnum)}, " +
+            $"inputDevice={FormatDiagnostic(inputDevice, FormatAudioDevice)}, " +
+            $"outputDevice={FormatDiagnostic(outputDevice, FormatAudioDevice)}, " +
+            $"diagnosis={DiagnoseLocalVoicePath(inputState, outputState, pushToTalkPressed, inputUnmuted, inputMuted, localIndicator)}";
+
+        lock (_stateSync)
+        {
+            if (!IsWorkCurrentLocked(work))
+                return;
+
+            _voiceDiagnosticSnapshotObserved = true;
+            if (inputDevice.Succeeded)
+                _diagnosticInputDevice = inputDevice.Value;
+            if (outputDevice.Succeeded)
+                _diagnosticOutputDevice = outputDevice.Value;
+            if (localIndicator.Succeeded &&
+                inputUnmuted &&
+                localIndicator.Value == PartyLocalChatControlChatIndicator.Talking)
+            {
+                _diagnosticLocalTalkingObserved = true;
+                if (_pttCycleActive)
+                    _pttCycleLocalTalkingObserved = true;
+            }
+
+            if (!string.Equals(
+                    _lastLocalVoiceDiagnosticFingerprint,
+                    localFingerprint,
+                    StringComparison.Ordinal))
+            {
+                _lastLocalVoiceDiagnosticFingerprint = localFingerprint;
+                EnqueueLogLocked($"Stage 3 voice diagnostics LOCAL: {localFingerprint}.");
+            }
+        }
+
+        foreach (var remoteChatControl in remoteChatControls)
+        {
+            var permissions = CaptureDiagnostic(
+                "PartyChatControlGetPermissions",
+                () =>
+                {
+                    var result = _api.GetPermissions(
+                        work.ChatControl,
+                        remoteChatControl,
+                        out var value);
+                    return (result, value);
+                });
+            var remoteIndicator = CaptureDiagnostic(
+                "PartyChatControlGetChatIndicator",
+                () =>
+                {
+                    var result = _api.GetChatIndicator(
+                        work.ChatControl,
+                        remoteChatControl,
+                        out var value);
+                    return (result, value);
+                });
+            var incomingMuted = CaptureDiagnostic(
+                "PartyChatControlGetIncomingAudioMuted",
+                () =>
+                {
+                    var result = _api.GetIncomingAudioMuted(
+                        work.ChatControl,
+                        remoteChatControl,
+                        out var value);
+                    return (result, value);
+                });
+            var renderVolume = CaptureDiagnostic(
+                "PartyChatControlGetAudioRenderVolume",
+                () =>
+                {
+                    var result = _api.GetAudioRenderVolume(
+                        work.ChatControl,
+                        remoteChatControl,
+                        out var value);
+                    return (result, value);
+                });
+
+            var peerFingerprint =
+                $"permissions={FormatDiagnostic(permissions, FormatPermissions)}, " +
+                $"remoteIndicator={FormatDiagnostic(remoteIndicator, FormatEnum)}, " +
+                $"incomingMuted={FormatDiagnostic(incomingMuted, static value => value.ToString())}, " +
+                $"renderVolume={FormatDiagnostic(renderVolume, FormatVolume)}, " +
+                $"diagnosis={DiagnoseRemoteVoicePath(permissions, remoteIndicator, incomingMuted, renderVolume)}";
+
+            lock (_stateSync)
+            {
+                if (!IsWorkCurrentLocked(work) || !_remoteChatControls.Contains(remoteChatControl))
+                    continue;
+
+                if (!_peerVoiceDiagnosticEvidence.TryGetValue(
+                        remoteChatControl,
+                        out var evidence))
+                {
+                    evidence = new PeerVoiceDiagnosticEvidence();
+                    _peerVoiceDiagnosticEvidence.Add(remoteChatControl, evidence);
+                }
+                if (permissions.Succeeded && HasMicrophoneVoicePermissions(permissions.Value))
+                    evidence.PermissionsReadyObserved = true;
+                if (remoteIndicator.Succeeded &&
+                    remoteIndicator.Value == PartyChatControlChatIndicator.Talking)
+                {
+                    evidence.RemoteTalkingObserved = true;
+                }
+                if (incomingMuted.Succeeded && !incomingMuted.Value)
+                    evidence.IncomingUnmutedObserved = true;
+                if (renderVolume.Succeeded &&
+                    float.IsFinite(renderVolume.Value) &&
+                    renderVolume.Value > 0.0f)
+                {
+                    evidence.PositiveRenderVolumeObserved = true;
+                }
+
+                if (!_lastPeerVoiceDiagnosticFingerprints.TryGetValue(
+                        remoteChatControl,
+                        out var previousFingerprint) ||
+                    !string.Equals(previousFingerprint, peerFingerprint, StringComparison.Ordinal))
+                {
+                    _lastPeerVoiceDiagnosticFingerprints[remoteChatControl] = peerFingerprint;
+                    EnqueueLogLocked(
+                        $"Stage 3 voice diagnostics PEER {Hex(remoteChatControl)}: {peerFingerprint}.");
+                }
+            }
+        }
+    }
+
     private void ExecuteDisconnect(CanaryWorkItem work)
     {
         var muteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
@@ -1534,8 +1909,11 @@ internal sealed class PartyChatControlCanary : IDisposable
 
                 _disconnectQueued = false;
                 _pushToTalkPressed = false;
+                EnqueueVoiceDiagnosticSummaryLocked("voice disconnect mute failure");
                 _remoteChatControls.Clear();
                 _permissionedRemoteChatControls.Clear();
+                _lastPeerVoiceDiagnosticFingerprints.Clear();
+                _peerVoiceDiagnosticEvidence.Clear();
                 _sessionFaulted = true;
                 _joinedObserved = false;
                 _networkLeaving = true;
@@ -1628,6 +2006,271 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
     }
 
+    private void RequestPeriodicVoiceDiagnosticsLocked()
+    {
+        if (!_enableVoiceTest ||
+            _phase != PartyChatControlCanaryPhase.VoiceReady ||
+            !_joinedObserved ||
+            _networkLeaving ||
+            _localChatControl == nint.Zero ||
+            _remoteChatControls.Count == 0)
+        {
+            return;
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        if (now < _nextVoiceDiagnosticTimestamp)
+            return;
+
+        _nextVoiceDiagnosticTimestamp = now + VoiceDiagnosticIntervalTicks;
+        _voiceDiagnosticRequested = true;
+    }
+
+    private void EnqueueVoiceDiagnosticSummaryLocked(string reason)
+    {
+        if (!_enableVoiceTest || _voiceDiagnosticSummaryLogged)
+            return;
+
+        _voiceDiagnosticSummaryLogged = true;
+        var peerEvidence = _peerVoiceDiagnosticEvidence.ToArray();
+        var completePeer = peerEvidence.FirstOrDefault(
+            static pair => pair.Value.CompleteRemotePathObserved);
+        var anyPermissions = peerEvidence.Any(static pair => pair.Value.PermissionsReadyObserved);
+        var anyIncomingUnmuted = peerEvidence.Any(static pair => pair.Value.IncomingUnmutedObserved);
+        var anyPositiveRenderVolume = peerEvidence.Any(
+            static pair => pair.Value.PositiveRenderVolumeObserved);
+        var anyRemoteTalking = peerEvidence.Any(static pair => pair.Value.RemoteTalkingObserved);
+        var verdict = !_voiceDiagnosticSnapshotObserved
+            ? "INCONCLUSIVE_NO_DIAGNOSTIC_SNAPSHOT"
+            : _audioInputState is null
+                ? "INCONCLUSIVE_INPUT_STATE_NOT_OBSERVED"
+                : _audioInputState != PartyAudioInputState.Initialized
+                    ? $"FAIL_INPUT_STATE_{_audioInputState}"
+                    : _audioOutputState is null
+                        ? "INCONCLUSIVE_OUTPUT_STATE_NOT_OBSERVED"
+                        : _audioOutputState != PartyAudioOutputState.Initialized
+                            ? $"FAIL_OUTPUT_STATE_{_audioOutputState}"
+                            : !_diagnosticLocalTalkingObserved
+                                ? "FAIL_LOCAL_TALKING_NOT_OBSERVED"
+                                : peerEvidence.Length == 0
+                                    ? "INCONCLUSIVE_NO_PEER_DIAGNOSTIC_EVIDENCE"
+                                    : !anyPermissions
+                                        ? "FAIL_MICROPHONE_PERMISSIONS_NOT_READ_BACK"
+                                        : !anyIncomingUnmuted
+                                            ? "FAIL_INCOMING_AUDIO_REMAINED_MUTED_OR_UNREADABLE"
+                                            : !anyPositiveRenderVolume
+                                                ? "FAIL_RENDER_VOLUME_NOT_POSITIVE_OR_UNREADABLE"
+                                                : !anyRemoteTalking
+                                                    ? "FAIL_REMOTE_TALKING_NOT_OBSERVED"
+                                                    : completePeer.Value is null
+                                                        ? "FAIL_NO_SINGLE_PEER_COMPLETED_REMOTE_PATH"
+                                                        : "PASS_PARTY_BIDIRECTIONAL_SIGNAL_PATH";
+
+        var peerEvidenceText = peerEvidence.Length == 0
+            ? "none"
+            : string.Join(
+                ", ",
+                peerEvidence.Select(static pair =>
+                    $"{Hex(pair.Key)}[permissions={pair.Value.PermissionsReadyObserved}," +
+                    $"incomingUnmuted={pair.Value.IncomingUnmutedObserved}," +
+                    $"positiveVolume={pair.Value.PositiveRenderVolumeObserved}," +
+                    $"remoteTalking={pair.Value.RemoteTalkingObserved}," +
+                    $"complete={pair.Value.CompleteRemotePathObserved}]"));
+
+        EnqueueLogLocked(
+            $"Stage 3 voice diagnostic SUMMARY ({reason}): verdict={verdict}; " +
+            $"inputState={FormatAudioStateWithoutLookup(_audioInputState, _audioInputStateErrorDetail)}, " +
+            $"outputState={FormatAudioStateWithoutLookup(_audioOutputState, _audioOutputStateErrorDetail)}, " +
+            $"partySelectedInput={(_diagnosticInputDevice is { } input ? FormatAudioDevice(input) : "NotRead")}, " +
+            $"partySelectedOutput={(_diagnosticOutputDevice is { } output ? FormatAudioDevice(output) : "NotRead")}, " +
+            $"localTalkingObserved={_diagnosticLocalTalkingObserved}, " +
+            $"completePeer={(completePeer.Value is null ? "none" : Hex(completePeer.Key))}, " +
+            $"peerEvidence={peerEvidenceText}. " +
+            "PASS proves Party observed both directions and an enabled render path; physical audibility " +
+            "still depends on the selected Windows endpoint and its mixer.");
+    }
+
+    private void ResetVoiceDiagnosticEvidenceLocked()
+    {
+        _voiceDiagnosticRequested = false;
+        _nextVoiceDiagnosticTimestamp = 0;
+        _lastLocalVoiceDiagnosticFingerprint = null;
+        _lastPeerVoiceDiagnosticFingerprints.Clear();
+        _peerVoiceDiagnosticEvidence.Clear();
+        _voiceDiagnosticSnapshotObserved = false;
+        _diagnosticLocalTalkingObserved = false;
+        _diagnosticInputDevice = null;
+        _diagnosticOutputDevice = null;
+        _pttCycleActive = false;
+        _pttCycleLocalTalkingObserved = false;
+        _voiceDiagnosticSummaryLogged = false;
+    }
+
+    private void ResetVoiceDiagnosticStateLocked()
+    {
+        _audioInputState = null;
+        _audioInputStateErrorDetail = 0;
+        _audioOutputState = null;
+        _audioOutputStateErrorDetail = 0;
+        ResetVoiceDiagnosticEvidenceLocked();
+    }
+
+    private static DiagnosticQuery<T> CaptureDiagnostic<T>(
+        string operation,
+        Func<(uint Result, T Value)> query)
+    {
+        try
+        {
+            var (result, value) = query();
+            return new DiagnosticQuery<T>(operation, result, value, ExceptionMessage: null);
+        }
+        catch (Exception exception)
+        {
+            return new DiagnosticQuery<T>(
+                operation,
+                uint.MaxValue,
+                default!,
+                $"{exception.GetType().Name}: {Sanitize(exception.Message)}");
+        }
+    }
+
+    private string FormatDiagnostic<T>(DiagnosticQuery<T> query, Func<T, string> formatValue)
+    {
+        if (query.Succeeded)
+            return formatValue(query.Value);
+        if (query.ExceptionMessage is not null)
+            return $"{query.Operation} THREW {query.ExceptionMessage}";
+
+        return $"{query.Operation} ERROR 0x{query.Result:X8} ({DescribePartyError(query.Result)})";
+    }
+
+    private string FormatAudioState<TEnum>(TEnum? state, uint errorDetail)
+        where TEnum : struct, Enum
+    {
+        var stateText = state is { } value ? FormatEnum(value) : "NotObserved";
+        return errorDetail == Success
+            ? $"{stateText}, errorDetail=0x{errorDetail:X8}"
+            : $"{stateText}, errorDetail=0x{errorDetail:X8} ({DescribePartyError(errorDetail)})";
+    }
+
+    private static string FormatAudioStateWithoutLookup<TEnum>(TEnum? state, uint errorDetail)
+        where TEnum : struct, Enum =>
+        $"{(state is { } value ? FormatEnum(value) : "NotObserved")}, errorDetail=0x{errorDetail:X8}";
+
+    private string DescribePartyError(uint error)
+    {
+        try
+        {
+            var result = _api.GetErrorMessage(error, out var message);
+            return result == Success && !string.IsNullOrWhiteSpace(message)
+                ? Sanitize(message)
+                : $"PartyGetErrorMessage unavailable: 0x{result:X8}";
+        }
+        catch (Exception exception)
+        {
+            return $"PartyGetErrorMessage threw {exception.GetType().Name}: {Sanitize(exception.Message)}";
+        }
+    }
+
+    private static string DiagnoseLocalVoicePath(
+        PartyAudioInputState? inputState,
+        PartyAudioOutputState? outputState,
+        bool pushToTalkPressed,
+        bool inputUnmuted,
+        DiagnosticQuery<bool> inputMuted,
+        DiagnosticQuery<PartyLocalChatControlChatIndicator> localIndicator)
+    {
+        if (inputState is null || outputState is null)
+            return "INCONCLUSIVE_WAITING_FOR_AUDIO_STATE_EVENTS";
+        if (inputState != PartyAudioInputState.Initialized)
+            return $"FAIL_LOCAL_INPUT_{inputState}";
+        if (outputState != PartyAudioOutputState.Initialized)
+            return $"FAIL_LOCAL_OUTPUT_{outputState}";
+        if (!inputMuted.Succeeded || !localIndicator.Succeeded)
+            return "INCONCLUSIVE_LOCAL_GETTER_ERROR";
+        if (localIndicator.Value == PartyLocalChatControlChatIndicator.NoAudioInput)
+            return "FAIL_LOCAL_NO_AUDIO_INPUT";
+        if (pushToTalkPressed && (!inputUnmuted || inputMuted.Value))
+            return "FAIL_PTT_DID_NOT_OPEN_PARTY_INPUT";
+        if (inputUnmuted &&
+            localIndicator.Value == PartyLocalChatControlChatIndicator.AudioInputMuted)
+        {
+            return "FAIL_LOCAL_INDICATOR_STILL_MUTED";
+        }
+        if (!inputUnmuted &&
+            localIndicator.Value == PartyLocalChatControlChatIndicator.Talking)
+        {
+            return "FAIL_LOCAL_TALKING_WHILE_INPUT_EXPECTED_MUTED";
+        }
+        if (localIndicator.Value == PartyLocalChatControlChatIndicator.Talking)
+            return "PASS_LOCAL_MICROPHONE_SIGNAL_CAPTURED";
+        if (inputUnmuted)
+            return "WAITING_FOR_LOCAL_SPEECH_SIGNAL";
+
+        return "READY_INPUT_SAFELY_MUTED";
+    }
+
+    private static string DiagnoseRemoteVoicePath(
+        DiagnosticQuery<PartyChatPermissionOptions> permissions,
+        DiagnosticQuery<PartyChatControlChatIndicator> remoteIndicator,
+        DiagnosticQuery<bool> incomingMuted,
+        DiagnosticQuery<float> renderVolume)
+    {
+        if (!permissions.Succeeded ||
+            !remoteIndicator.Succeeded ||
+            !incomingMuted.Succeeded ||
+            !renderVolume.Succeeded)
+        {
+            return "INCONCLUSIVE_REMOTE_GETTER_ERROR";
+        }
+        if (!HasMicrophoneVoicePermissions(permissions.Value))
+            return "FAIL_PERMISSION_READBACK_MISSING_SEND_OR_RECEIVE_MICROPHONE_AUDIO";
+        var indicatorDiagnosis = remoteIndicator.Value switch
+        {
+            PartyChatControlChatIndicator.IncomingVoiceDisabled => "FAIL_INCOMING_VOICE_DISABLED",
+            PartyChatControlChatIndicator.IncomingCommunicationsMuted =>
+                "FAIL_INCOMING_COMMUNICATIONS_MUTED",
+            PartyChatControlChatIndicator.NoRemoteInput => "FAIL_REMOTE_HAS_NO_AUDIO_INPUT",
+            PartyChatControlChatIndicator.RemoteAudioInputMuted => "REMOTE_MICROPHONE_IS_MUTED",
+            _ => null,
+        };
+        if (indicatorDiagnosis is not null)
+            return indicatorDiagnosis;
+        if (incomingMuted.Value)
+            return "FAIL_REMOTE_AUDIO_MUTED_LOCALLY";
+        if (!float.IsFinite(renderVolume.Value) || renderVolume.Value <= 0.0f)
+            return "FAIL_REMOTE_RENDER_VOLUME_NOT_POSITIVE";
+
+        return remoteIndicator.Value == PartyChatControlChatIndicator.Talking
+            ? "PASS_REMOTE_AUDIO_RECEIVED_BY_PARTY"
+            : "READY_NO_REMOTE_SPEECH_DETECTED";
+    }
+
+    private static bool HasMicrophoneVoicePermissions(PartyChatPermissionOptions permissions) =>
+        (permissions & MicrophoneVoicePermissions) == MicrophoneVoicePermissions;
+
+    private static string FormatPermissions(PartyChatPermissionOptions permissions) =>
+        $"0x{(uint)permissions:X4} " +
+        $"(sendMicrophone={permissions.HasFlag(PartyChatPermissionOptions.SendMicrophoneAudio)}, " +
+        $"receiveMicrophone={permissions.HasFlag(PartyChatPermissionOptions.ReceiveMicrophoneAudio)})";
+
+    private static string FormatAudioDevice(PartyAudioDeviceDiagnostic device) =>
+        $"selection={FormatEnum(device.SelectionType)}, context={Quote(device.SelectionContext)}, " +
+        $"selectedDeviceId={Quote(device.DeviceId)}";
+
+    private static string FormatVolume(float volume) =>
+        volume.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string FormatEnum<TEnum>(TEnum value)
+        where TEnum : struct, Enum =>
+        $"{value} ({Convert.ToUInt32(value, System.Globalization.CultureInfo.InvariantCulture)})";
+
+    private static string Quote(string? value) =>
+        value is null ? "<null>" : $"\"{Sanitize(value)}\"";
+
+    private static string Sanitize(string value) =>
+        value.Replace('\r', ' ').Replace('\n', ' ');
+
     private void FailNativeAction(string operation, uint error, bool hasOwnedChatControl)
     {
         lock (_stateSync)
@@ -1663,8 +2306,11 @@ internal sealed class PartyChatControlCanary : IDisposable
     {
         _pushToTalkPressed = false;
         _inputUnmuted = false;
+        EnqueueVoiceDiagnosticSummaryLocked("Stage 3 fail-closed teardown");
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
+        _lastPeerVoiceDiagnosticFingerprints.Clear();
+        _peerVoiceDiagnosticEvidence.Clear();
         _sessionFaulted = true;
         _teardownRequested = _localChatControl != nint.Zero;
         _joinedObserved = false;
@@ -1814,6 +2460,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _stateBatchManager = nint.Zero;
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
+        ResetVoiceDiagnosticStateLocked();
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
@@ -1851,6 +2498,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _stateBatchManager = nint.Zero;
         _remoteChatControls.Clear();
         _permissionedRemoteChatControls.Clear();
+        ResetVoiceDiagnosticStateLocked();
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
@@ -1873,6 +2521,37 @@ internal sealed class PartyChatControlCanary : IDisposable
 
     private sealed record CanaryAsyncToken(string Operation);
 
+    private sealed class PeerVoiceDiagnosticEvidence
+    {
+        public bool PermissionsReadyObserved { get; set; }
+
+        public bool IncomingUnmutedObserved { get; set; }
+
+        public bool PositiveRenderVolumeObserved { get; set; }
+
+        public bool RemoteTalkingObserved { get; set; }
+
+        public bool CompleteRemotePathObserved =>
+            PermissionsReadyObserved &&
+            IncomingUnmutedObserved &&
+            PositiveRenderVolumeObserved &&
+            RemoteTalkingObserved;
+    }
+
+    private readonly record struct PartyAudioDeviceDiagnostic(
+        PartyAudioDeviceSelectionType SelectionType,
+        string? SelectionContext,
+        string? DeviceId);
+
+    private readonly record struct DiagnosticQuery<T>(
+        string Operation,
+        uint Result,
+        T Value,
+        string? ExceptionMessage)
+    {
+        public bool Succeeded => Result == Success && ExceptionMessage is null;
+    }
+
     private enum CanaryWorkKind
     {
         None,
@@ -1882,6 +2561,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         Destroy,
         GrantVoicePermissions,
         ApplyPushToTalk,
+        CaptureVoiceDiagnostics,
     }
 
     private readonly record struct CanaryWorkItem(

@@ -11,26 +11,35 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
 {
     private static readonly TimeSpan DefaultHeartbeatTimeout = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan DefaultWatchdogPeriod = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan DefaultDiagnosticSamplePeriod = TimeSpan.FromMilliseconds(500);
 
     private readonly Action<bool> _setPressed;
+    private readonly Action? _requestDiagnosticSample;
     private readonly Action<string>? _log;
     private readonly Func<long> _getTimestamp;
     private readonly long _heartbeatTimeoutTicks;
+    private readonly long _diagnosticSamplePeriodTicks;
     private readonly object _sync = new();
     private readonly Timer? _watchdog;
 
     private long _lastHeartbeat;
+    private long _nextDiagnosticSample;
     private bool _reportedPressed;
     private bool _acceptReports = true;
     private bool _disposed;
 
-    public VoicePushToTalkSafetyGate(Action<bool> setPressed, Action<string>? log = null)
+    public VoicePushToTalkSafetyGate(
+        Action<bool> setPressed,
+        Action<string>? log = null,
+        Action? requestDiagnosticSample = null)
         : this(
             setPressed,
             log,
             DefaultHeartbeatTimeout,
             Stopwatch.GetTimestamp,
-            startWatchdog: true)
+            startWatchdog: true,
+            requestDiagnosticSample: requestDiagnosticSample,
+            diagnosticSamplePeriod: DefaultDiagnosticSamplePeriod)
     {
     }
 
@@ -39,9 +48,12 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         Action<string>? log,
         TimeSpan heartbeatTimeout,
         Func<long> getTimestamp,
-        bool startWatchdog)
+        bool startWatchdog,
+        Action? requestDiagnosticSample = null,
+        TimeSpan? diagnosticSamplePeriod = null)
     {
         _setPressed = setPressed ?? throw new ArgumentNullException(nameof(setPressed));
+        _requestDiagnosticSample = requestDiagnosticSample;
         _log = log;
         _getTimestamp = getTimestamp ?? throw new ArgumentNullException(nameof(getTimestamp));
         if (heartbeatTimeout <= TimeSpan.Zero)
@@ -50,6 +62,12 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         _heartbeatTimeoutTicks = Math.Max(
             1,
             checked((long)(heartbeatTimeout.TotalSeconds * Stopwatch.Frequency)));
+        var samplePeriod = diagnosticSamplePeriod ?? DefaultDiagnosticSamplePeriod;
+        if (samplePeriod <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(diagnosticSamplePeriod));
+        _diagnosticSamplePeriodTicks = Math.Max(
+            1,
+            checked((long)(samplePeriod.TotalSeconds * Stopwatch.Frequency)));
         _lastHeartbeat = _getTimestamp();
         if (startWatchdog)
         {
@@ -68,11 +86,22 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
             if (_disposed || !_acceptReports)
                 return;
 
-            _lastHeartbeat = _getTimestamp();
+            var now = _getTimestamp();
+            _lastHeartbeat = now;
             var notify = pressed != _reportedPressed;
             _reportedPressed = pressed;
             if (notify)
+            {
                 SafeSetPressed(pressed);
+                _nextDiagnosticSample = pressed ? now + _diagnosticSamplePeriodTicks : 0;
+                if (pressed)
+                    SafeRequestDiagnosticSample();
+            }
+            else if (pressed && now >= _nextDiagnosticSample)
+            {
+                _nextDiagnosticSample = now + _diagnosticSamplePeriodTicks;
+                SafeRequestDiagnosticSample();
+            }
         }
     }
 
@@ -85,6 +114,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
 
             var notify = _reportedPressed;
             _reportedPressed = false;
+            _nextDiagnosticSample = 0;
             _lastHeartbeat = _getTimestamp();
             if (notify)
                 SafeSetPressed(false);
@@ -101,6 +131,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
             _acceptReports = false;
             var notify = _reportedPressed;
             _reportedPressed = false;
+            _nextDiagnosticSample = 0;
             _lastHeartbeat = _getTimestamp();
             if (notify)
                 SafeSetPressed(false);
@@ -115,6 +146,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
                 return;
 
             _reportedPressed = false;
+            _nextDiagnosticSample = 0;
             _lastHeartbeat = _getTimestamp();
             _acceptReports = true;
         }
@@ -132,6 +164,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
             if (timedOut)
             {
                 _reportedPressed = false;
+                _nextDiagnosticSample = 0;
                 SafeSetPressed(false);
             }
         }
@@ -151,6 +184,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
             _acceptReports = false;
             var notify = _reportedPressed;
             _reportedPressed = false;
+            _nextDiagnosticSample = 0;
             if (notify)
                 SafeSetPressed(false);
         }
@@ -167,6 +201,18 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         catch (Exception exception)
         {
             SafeLog($"Stage 3 push-to-talk state callback failed: {exception.Message}");
+        }
+    }
+
+    private void SafeRequestDiagnosticSample()
+    {
+        try
+        {
+            _requestDiagnosticSample?.Invoke();
+        }
+        catch (Exception exception)
+        {
+            SafeLog($"Stage 3 voice diagnostic callback failed: {exception.Message}");
         }
     }
 

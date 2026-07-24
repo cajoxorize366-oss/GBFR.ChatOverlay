@@ -7,7 +7,12 @@ internal enum PartyChatPermissionOptions : uint
 {
     None = 0x0000,
     SendMicrophoneAudio = 0x0001,
+    SendTextToSpeechAudio = 0x0002,
+    SendAudio = SendMicrophoneAudio | SendTextToSpeechAudio,
     ReceiveMicrophoneAudio = 0x0004,
+    ReceiveTextToSpeechAudio = 0x0008,
+    ReceiveAudio = ReceiveMicrophoneAudio | ReceiveTextToSpeechAudio,
+    ReceiveText = 0x0010,
 }
 
 internal enum PartyAudioDeviceSelectionType : uint
@@ -16,6 +21,45 @@ internal enum PartyAudioDeviceSelectionType : uint
     SystemDefault = 1,
     PlatformUserDefault = 2,
     Manual = 3,
+}
+
+internal enum PartyAudioInputState : uint
+{
+    NoInput = 0,
+    Initialized = 1,
+    NotFound = 2,
+    UserConsentDenied = 3,
+    UnsupportedFormat = 4,
+    AlreadyInUse = 5,
+    UnknownError = 6,
+}
+
+internal enum PartyAudioOutputState : uint
+{
+    NoOutput = 0,
+    Initialized = 1,
+    NotFound = 2,
+    UnsupportedFormat = 3,
+    AlreadyInUse = 4,
+    UnknownError = 5,
+}
+
+internal enum PartyLocalChatControlChatIndicator : uint
+{
+    Silent = 0,
+    Talking = 1,
+    AudioInputMuted = 2,
+    NoAudioInput = 3,
+}
+
+internal enum PartyChatControlChatIndicator : uint
+{
+    Silent = 0,
+    Talking = 1,
+    IncomingVoiceDisabled = 2,
+    IncomingCommunicationsMuted = 3,
+    NoRemoteInput = 4,
+    RemoteAudioInputMuted = 5,
 }
 
 internal interface IPartyChatControlApi
@@ -35,6 +79,44 @@ internal interface IPartyChatControlApi
     uint SetAudioInputMuted(nint localChatControl, bool muted);
 
     uint GetAudioInputMuted(nint localChatControl, out bool muted);
+
+    uint GetPermissions(
+        nint localChatControl,
+        nint targetChatControl,
+        out PartyChatPermissionOptions permissions);
+
+    uint GetAudioInput(
+        nint localChatControl,
+        out PartyAudioDeviceSelectionType selectionType,
+        out string? selectionContext,
+        out string? deviceId);
+
+    uint GetAudioOutput(
+        nint localChatControl,
+        out PartyAudioDeviceSelectionType selectionType,
+        out string? selectionContext,
+        out string? deviceId);
+
+    uint GetAudioRenderVolume(
+        nint localChatControl,
+        nint targetChatControl,
+        out float volume);
+
+    uint GetIncomingAudioMuted(
+        nint localChatControl,
+        nint targetChatControl,
+        out bool muted);
+
+    uint GetLocalChatIndicator(
+        nint localChatControl,
+        out PartyLocalChatControlChatIndicator indicator);
+
+    uint GetChatIndicator(
+        nint localChatControl,
+        nint targetChatControl,
+        out PartyChatControlChatIndicator indicator);
+
+    uint GetErrorMessage(uint error, out string? errorMessage);
 
     uint SetPermissions(
         nint localChatControl,
@@ -72,6 +154,14 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     private readonly PartyDeviceDestroyChatControlDelegate _deviceDestroyChatControl;
     private readonly PartyChatControlSetAudioInputMutedDelegate _chatControlSetAudioInputMuted;
     private readonly PartyChatControlGetAudioInputMutedDelegate _chatControlGetAudioInputMuted;
+    private readonly PartyChatControlGetPermissionsDelegate _chatControlGetPermissions;
+    private readonly PartyChatControlGetAudioDeviceDelegate _chatControlGetAudioInput;
+    private readonly PartyChatControlGetAudioDeviceDelegate _chatControlGetAudioOutput;
+    private readonly PartyChatControlGetAudioRenderVolumeDelegate _chatControlGetAudioRenderVolume;
+    private readonly PartyChatControlGetIncomingAudioMutedDelegate _chatControlGetIncomingAudioMuted;
+    private readonly PartyChatControlGetLocalChatIndicatorDelegate _chatControlGetLocalChatIndicator;
+    private readonly PartyChatControlGetChatIndicatorDelegate _chatControlGetChatIndicator;
+    private readonly PartyGetErrorMessageDelegate _getErrorMessage;
     private readonly PartyChatControlSetPermissionsDelegate _chatControlSetPermissions;
     private readonly PartyChatControlSetAudioDeviceDelegate _chatControlSetAudioInput;
     private readonly PartyChatControlSetAudioDeviceDelegate _chatControlSetAudioOutput;
@@ -101,6 +191,28 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         _chatControlGetAudioInputMuted = Bind<PartyChatControlGetAudioInputMutedDelegate>(
             verifiedPartyModule,
             "PartyChatControlGetAudioInputMuted");
+        _chatControlGetPermissions = Bind<PartyChatControlGetPermissionsDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetPermissions");
+        _chatControlGetAudioInput = Bind<PartyChatControlGetAudioDeviceDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetAudioInput");
+        _chatControlGetAudioOutput = Bind<PartyChatControlGetAudioDeviceDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetAudioOutput");
+        _chatControlGetAudioRenderVolume = Bind<PartyChatControlGetAudioRenderVolumeDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetAudioRenderVolume");
+        _chatControlGetIncomingAudioMuted = Bind<PartyChatControlGetIncomingAudioMutedDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetIncomingAudioMuted");
+        _chatControlGetLocalChatIndicator = Bind<PartyChatControlGetLocalChatIndicatorDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetLocalChatIndicator");
+        _chatControlGetChatIndicator = Bind<PartyChatControlGetChatIndicatorDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetChatIndicator");
+        _getErrorMessage = Bind<PartyGetErrorMessageDelegate>(verifiedPartyModule, "PartyGetErrorMessage");
         _chatControlSetPermissions = Bind<PartyChatControlSetPermissionsDelegate>(
             verifiedPartyModule,
             "PartyChatControlSetPermissions");
@@ -150,6 +262,88 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     {
         var result = _chatControlGetAudioInputMuted(localChatControl, out var nativeMuted);
         muted = nativeMuted != 0;
+        return result;
+    }
+
+    public uint GetPermissions(
+        nint localChatControl,
+        nint targetChatControl,
+        out PartyChatPermissionOptions permissions)
+    {
+        var result = _chatControlGetPermissions(localChatControl, targetChatControl, out var nativePermissions);
+        permissions = (PartyChatPermissionOptions)nativePermissions;
+        return result;
+    }
+
+    public uint GetAudioInput(
+        nint localChatControl,
+        out PartyAudioDeviceSelectionType selectionType,
+        out string? selectionContext,
+        out string? deviceId) =>
+        GetAudioDevice(
+            _chatControlGetAudioInput,
+            localChatControl,
+            out selectionType,
+            out selectionContext,
+            out deviceId);
+
+    public uint GetAudioOutput(
+        nint localChatControl,
+        out PartyAudioDeviceSelectionType selectionType,
+        out string? selectionContext,
+        out string? deviceId) =>
+        GetAudioDevice(
+            _chatControlGetAudioOutput,
+            localChatControl,
+            out selectionType,
+            out selectionContext,
+            out deviceId);
+
+    public uint GetAudioRenderVolume(
+        nint localChatControl,
+        nint targetChatControl,
+        out float volume) =>
+        _chatControlGetAudioRenderVolume(localChatControl, targetChatControl, out volume);
+
+    public uint GetIncomingAudioMuted(
+        nint localChatControl,
+        nint targetChatControl,
+        out bool muted)
+    {
+        var result = _chatControlGetIncomingAudioMuted(
+            localChatControl,
+            targetChatControl,
+            out var nativeMuted);
+        muted = nativeMuted != 0;
+        return result;
+    }
+
+    public uint GetLocalChatIndicator(
+        nint localChatControl,
+        out PartyLocalChatControlChatIndicator indicator)
+    {
+        var result = _chatControlGetLocalChatIndicator(localChatControl, out var nativeIndicator);
+        indicator = (PartyLocalChatControlChatIndicator)nativeIndicator;
+        return result;
+    }
+
+    public uint GetChatIndicator(
+        nint localChatControl,
+        nint targetChatControl,
+        out PartyChatControlChatIndicator indicator)
+    {
+        var result = _chatControlGetChatIndicator(
+            localChatControl,
+            targetChatControl,
+            out var nativeIndicator);
+        indicator = (PartyChatControlChatIndicator)nativeIndicator;
+        return result;
+    }
+
+    public uint GetErrorMessage(uint error, out string? errorMessage)
+    {
+        var result = _getErrorMessage(error, out var nativeMessage);
+        errorMessage = nativeMessage == nint.Zero ? null : Marshal.PtrToStringUTF8(nativeMessage);
         return result;
     }
 
@@ -231,6 +425,26 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         }
     }
 
+    private static uint GetAudioDevice(
+        PartyChatControlGetAudioDeviceDelegate callback,
+        nint localChatControl,
+        out PartyAudioDeviceSelectionType selectionType,
+        out string? selectionContext,
+        out string? deviceId)
+    {
+        var result = callback(
+            localChatControl,
+            out var nativeSelectionType,
+            out var nativeSelectionContext,
+            out var nativeDeviceId);
+        selectionType = (PartyAudioDeviceSelectionType)nativeSelectionType;
+        selectionContext = nativeSelectionContext == nint.Zero
+            ? null
+            : Marshal.PtrToStringUTF8(nativeSelectionContext);
+        deviceId = nativeDeviceId == nint.Zero ? null : Marshal.PtrToStringUTF8(nativeDeviceId);
+        return result;
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyGetLocalDeviceDelegate(nint manager, out nint localDevice);
 
@@ -261,6 +475,45 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     private delegate uint PartyChatControlGetAudioInputMutedDelegate(
         nint localChatControl,
         out byte muted);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetPermissionsDelegate(
+        nint localChatControl,
+        nint targetChatControl,
+        out uint permissions);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetAudioDeviceDelegate(
+        nint localChatControl,
+        out uint audioDeviceSelectionType,
+        out nint audioDeviceSelectionContext,
+        out nint deviceId);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetAudioRenderVolumeDelegate(
+        nint localChatControl,
+        nint targetChatControl,
+        out float volume);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetIncomingAudioMutedDelegate(
+        nint localChatControl,
+        nint targetChatControl,
+        out byte muted);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetLocalChatIndicatorDelegate(
+        nint localChatControl,
+        out uint indicator);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetChatIndicatorDelegate(
+        nint localChatControl,
+        nint targetChatControl,
+        out uint indicator);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyGetErrorMessageDelegate(uint error, out nint errorMessage);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyChatControlSetPermissionsDelegate(

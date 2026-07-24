@@ -121,7 +121,7 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 3: push to talk
 
-- The external voice test is implemented and enabled by default in `0.3.0-preview.4`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
+- The external voice test is implemented and enabled by default in `0.3.0-preview.5`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
 - Negotiate Mod capability through a remote ChatControl joining the same existing PartyNetwork, not through gameplay endpoint packets.
 - Call `PartyChatControlSetPermissions(local, remote, 0x0005)` for each observed Mod peer. The only enabled bits are `SendMicrophoneAudio` (`0x0001`) and `ReceiveMicrophoneAudio` (`0x0004`); text-to-speech, text-chat and transcription permissions remain unset.
 - Keep the microphone synchronously muted and verified by default. DirectInput consumes `U` for the voice test; holding it unsets Party input mute and releasing it restores mute.
@@ -129,6 +129,7 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 - Party calls are fenced while Relink owns a state-change batch. Permission and mute work runs only after the original `PartyFinishProcessingStateChanges` has returned.
 - Reloaded-II exposes independent dynamic lists for active Windows capture and render endpoints. Both lists default to an explicit `Default (Windows system default)` entry, which maps to Party's Windows default communications device. Manual choices save the stable `IMMDevice` endpoint ID while the UI displays the friendly device name. Legacy blank values migrate to `Default`; a saved endpoint that is no longer active falls back to that default with an explicit startup log. Party `Manual` selection is accepted only when the completion event confirms the exact endpoint ID before the ChatControl can connect.
 - The chat overlay has a persistent voice status row for session wait, ChatControl initialization, remote wait, ready, speaking, disconnect and fail-closed states. `Speaking` is derived from the lock-protected canary state only after `SetAudioInputMuted(false)` succeeds and `GetAudioInputMuted` verifies `false`; a raw `U` key-down is not sufficient.
+- The preview.5 troubleshooting sampler implements Microsoft's documented decision tree without changing voice state: it captures input/output initialization and translated errors, reads Party's selected device identifiers, polls local and per-peer chat indicators, verifies live permissions/incoming mute/render volume, and emits change-only snapshots plus a terminal summary. A pass requires one specific remote ChatControl to complete the whole receive evidence chain; evidence from different peers cannot be combined. See `VOICE_TROUBLESHOOTING_MATRIX.md`.
 - Controller push-to-talk and per-player volume/mute remain future work.
 
 ## Safety and service boundary
@@ -146,6 +147,8 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 - [Microsoft: PartyLocalChatControl::SetPermissions](https://learn.microsoft.com/en-us/xbox/playfab/multiplayer/networking/reference/classes/partylocalchatcontrol/methods/partylocalchatcontrol_setpermissions)
 - [Microsoft: PartyLocalChatControl::SetAudioInput](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partylocalchatcontrol/methods/partylocalchatcontrol_setaudioinput)
 - [Microsoft: PartyLocalChatControl::SetAudioInputMuted](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partylocalchatcontrol/methods/partylocalchatcontrol_setaudioinputmuted)
+- [Microsoft: troubleshoot Party audio and chat](https://learn.microsoft.com/en-us/xbox/playfab/community/voice-communications/concepts-audio-troubleshooting)
+- [Microsoft: PartyLocalChatControl::GetChatIndicator](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partylocalchatcontrol/methods/partylocalchatcontrol_getchatindicator)
 - [Valve: ISteamUser voice API](https://partner.steamgames.com/doc/api/isteamuser)
 - [Valve: ISteamNetworkingMessages](https://partner.steamgames.com/doc/api/ISteamNetworkingMessages)
 - [Official NuGet: Microsoft.PlayFab.PlayFabParty.Cpp.Windows 1.10.12](https://www.nuget.org/packages/Microsoft.PlayFab.PlayFabParty.Cpp.Windows/1.10.12)

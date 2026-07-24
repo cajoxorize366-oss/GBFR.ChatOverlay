@@ -40,6 +40,7 @@ public sealed unsafe class DirectInputKeyboardHook
         Func<bool> shouldCapture,
         Func<bool> isVoicePushToTalkEnabled,
         Action<bool> setVoicePushToTalkPressed,
+        Action requestVoiceDiagnosticSample,
         Action<string> log)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
@@ -50,7 +51,8 @@ public sealed unsafe class DirectInputKeyboardHook
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _voicePushToTalkGate = new VoicePushToTalkSafetyGate(
             setVoicePushToTalkPressed ?? throw new ArgumentNullException(nameof(setVoicePushToTalkPressed)),
-            _log);
+            _log,
+            requestVoiceDiagnosticSample ?? throw new ArgumentNullException(nameof(requestVoiceDiagnosticSample)));
     }
 
     public void Initialize()

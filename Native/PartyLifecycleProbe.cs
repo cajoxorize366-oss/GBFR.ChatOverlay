@@ -41,6 +41,7 @@ public sealed class PartyLifecycleProbe
     private int _inspectionFailureLogged;
     private int _startFailureLogged;
     private int _finishFailureLogged;
+    private int _diagnosticRequestFailureLogged;
 
     public PartyLifecycleProbe(
         ReloadedHooksApi hooks,
@@ -230,6 +231,23 @@ public sealed class PartyLifecycleProbe
         catch (Exception exception)
         {
             LogInspectionFailureOnce(exception);
+        }
+    }
+
+    public void RequestVoiceDiagnosticSample()
+    {
+        try
+        {
+            _chatControlCanary?.RequestVoiceDiagnosticSample();
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _diagnosticRequestFailureLogged, 1) == 0)
+            {
+                EnqueueLog(
+                    $"Stage 3 voice diagnostic request failed without changing voice state; " +
+                    $"further request failures are suppressed: {exception.Message}");
+            }
         }
     }
 

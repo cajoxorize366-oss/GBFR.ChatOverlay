@@ -179,6 +179,7 @@ public class Mod : ModBase // <= Do not Remove.
             () => _configuration.EnableVoiceInput &&
                   _partyLifecycleProbe?.IsVoiceTestAvailable == true,
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
+            () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {

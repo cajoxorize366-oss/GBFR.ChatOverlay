@@ -14,6 +14,10 @@ internal readonly record struct PartyStateChangeSnapshot(uint Type)
 
     public string? AudioDeviceSelectionContext { get; init; }
 
+    public PartyAudioInputState? AudioInputState { get; init; }
+
+    public PartyAudioOutputState? AudioOutputState { get; init; }
+
     public nint Network { get; init; }
 
     public nint LocalUser { get; init; }
@@ -77,6 +81,10 @@ internal static class PartyStateChangeReader
             PartyStateChangeType.SetChatAudioInputCompleted or
             PartyStateChangeType.SetChatAudioOutputCompleted =>
                 ReadSetChatAudioDeviceCompleted(stateChange, type),
+            PartyStateChangeType.LocalChatAudioInputChanged =>
+                ReadLocalChatAudioInputChanged(stateChange, type),
+            PartyStateChangeType.LocalChatAudioOutputChanged =>
+                ReadLocalChatAudioOutputChanged(stateChange, type),
             PartyStateChangeType.ChatControlJoinedNetwork =>
                 new PartyStateChangeSnapshot(type)
                 {
@@ -193,6 +201,22 @@ internal static class PartyStateChangeReader
             Value = ReadUInt32(pointer, 24),
             AudioDeviceSelectionContext = ReadUtf8String(pointer, 32),
             AsyncIdentifier = Marshal.ReadIntPtr(pointer, 40),
+        };
+
+    private static PartyStateChangeSnapshot ReadLocalChatAudioInputChanged(nint pointer, uint type) =>
+        new(type)
+        {
+            ChatControl = Marshal.ReadIntPtr(pointer, 8),
+            AudioInputState = (PartyAudioInputState)ReadUInt32(pointer, 16),
+            ErrorDetail = ReadUInt32(pointer, 20),
+        };
+
+    private static PartyStateChangeSnapshot ReadLocalChatAudioOutputChanged(nint pointer, uint type) =>
+        new(type)
+        {
+            ChatControl = Marshal.ReadIntPtr(pointer, 8),
+            AudioOutputState = (PartyAudioOutputState)ReadUInt32(pointer, 16),
+            ErrorDetail = ReadUInt32(pointer, 20),
         };
 
     private static PartyStateChangeSnapshot ReadChatControlNetworkOperationCompleted(nint pointer, uint type) =>

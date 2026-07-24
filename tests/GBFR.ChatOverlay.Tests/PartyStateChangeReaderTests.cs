@@ -126,6 +126,50 @@ public sealed class PartyStateChangeReaderTests
         }
     }
 
+    [Theory]
+    [InlineData(
+        PartyStateChangeType.LocalChatAudioInputChanged,
+        (uint)PartyAudioInputState.UserConsentDenied,
+        true)]
+    [InlineData(
+        PartyStateChangeType.LocalChatAudioOutputChanged,
+        (uint)PartyAudioOutputState.AlreadyInUse,
+        false)]
+    public void Read_LocalChatAudioChanged_UsesOfficialPack8StateAndErrorOffsets(
+        PartyStateChangeType type,
+        uint state,
+        bool input)
+    {
+        var pointer = Marshal.AllocHGlobal(24);
+        try
+        {
+            Zero(pointer, 24);
+            Marshal.WriteInt32(pointer, 0, (int)type);
+            Marshal.WriteIntPtr(pointer, 8, (nint)0x1234);
+            Marshal.WriteInt32(pointer, 16, unchecked((int)state));
+            Marshal.WriteInt32(pointer, 20, unchecked((int)0xAABBCCDD));
+
+            var snapshot = PartyStateChangeReader.Read(pointer);
+
+            Assert.Equal((nint)0x1234, snapshot.ChatControl);
+            Assert.Equal(0xAABBCCDDu, snapshot.ErrorDetail);
+            if (input)
+            {
+                Assert.Equal(PartyAudioInputState.UserConsentDenied, snapshot.AudioInputState);
+                Assert.Null(snapshot.AudioOutputState);
+            }
+            else
+            {
+                Assert.Null(snapshot.AudioInputState);
+                Assert.Equal(PartyAudioOutputState.AlreadyInUse, snapshot.AudioOutputState);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
     private static void Zero(nint pointer, int length)
     {
         for (var offset = 0; offset < length; offset++)

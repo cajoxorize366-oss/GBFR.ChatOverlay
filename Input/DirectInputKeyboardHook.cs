@@ -22,9 +22,12 @@ public sealed unsafe class DirectInputKeyboardHook
     private readonly Func<bool> _tryActivate;
     private readonly Func<bool> _shouldCapture;
     private readonly Func<bool> _isVoicePushToTalkEnabled;
+    private readonly Func<bool> _isLocalMicrophoneMonitorEnabled;
     private readonly Action<string> _log;
     private readonly DirectInputKeyboardStateFilter _stateFilter = new();
     private readonly VoicePushToTalkSafetyGate _voicePushToTalkGate;
+    private readonly VoicePushToTalkSafetyGate _localMicrophoneMonitorGate;
+    private readonly VoiceInputModeCoordinator _voiceInputModeCoordinator;
     private readonly object _hookSync = new();
 
     private IHook<DirectInput8CreateDelegate>? _directInputCreateHook;
@@ -41,6 +44,8 @@ public sealed unsafe class DirectInputKeyboardHook
         Func<bool> isVoicePushToTalkEnabled,
         Action<bool> setVoicePushToTalkPressed,
         Action requestVoiceDiagnosticSample,
+        Func<bool> isLocalMicrophoneMonitorEnabled,
+        Action<bool> setLocalMicrophoneMonitorPressed,
         Action<string> log)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
@@ -48,11 +53,21 @@ public sealed unsafe class DirectInputKeyboardHook
         _shouldCapture = shouldCapture ?? throw new ArgumentNullException(nameof(shouldCapture));
         _isVoicePushToTalkEnabled = isVoicePushToTalkEnabled ??
             throw new ArgumentNullException(nameof(isVoicePushToTalkEnabled));
+        _isLocalMicrophoneMonitorEnabled = isLocalMicrophoneMonitorEnabled ??
+            throw new ArgumentNullException(nameof(isLocalMicrophoneMonitorEnabled));
         _log = log ?? throw new ArgumentNullException(nameof(log));
-        _voicePushToTalkGate = new VoicePushToTalkSafetyGate(
+        _voiceInputModeCoordinator = new VoiceInputModeCoordinator(
             setVoicePushToTalkPressed ?? throw new ArgumentNullException(nameof(setVoicePushToTalkPressed)),
+            setLocalMicrophoneMonitorPressed ??
+                throw new ArgumentNullException(nameof(setLocalMicrophoneMonitorPressed)));
+        _voicePushToTalkGate = new VoicePushToTalkSafetyGate(
+            _voiceInputModeCoordinator.ReportRemotePushToTalk,
             _log,
             requestVoiceDiagnosticSample ?? throw new ArgumentNullException(nameof(requestVoiceDiagnosticSample)));
+        _localMicrophoneMonitorGate = new VoicePushToTalkSafetyGate(
+            _voiceInputModeCoordinator.ReportLocalMonitor,
+            _log,
+            operationName: "local microphone monitor");
     }
 
     public void Initialize()
@@ -75,11 +90,13 @@ public sealed unsafe class DirectInputKeyboardHook
         _createDeviceHook?.Disable();
         _directInputCreateHook?.Disable();
         _voicePushToTalkGate.Suspend();
+        _localMicrophoneMonitorGate.Suspend();
     }
 
     public void Resume()
     {
         _voicePushToTalkGate.Resume();
+        _localMicrophoneMonitorGate.Resume();
         _directInputCreateHook?.Enable();
         _createDeviceHook?.Enable();
         _getDeviceStateHook?.Enable();
@@ -166,15 +183,18 @@ public sealed unsafe class DirectInputKeyboardHook
                 _tryActivate,
                 _shouldCapture,
                 _isVoicePushToTalkEnabled,
-                _voicePushToTalkGate.Report);
+                _voicePushToTalkGate.Report,
+                _isLocalMicrophoneMonitorEnabled,
+                _localMicrophoneMonitorGate.Report);
         }
         catch (Exception exception)
         {
             _voicePushToTalkGate.ForceMute();
+            _localMicrophoneMonitorGate.ForceMute();
             if (Interlocked.Exchange(ref _filterFailureLogged, 1) == 0)
             {
                 _log(
-                    $"DirectInput keyboard filtering failed; push-to-talk was forced muted and " +
+                    $"DirectInput keyboard filtering failed; push-to-talk was forced muted, local monitoring stopped, and " +
                     $"further errors are suppressed: {exception.Message}");
             }
         }

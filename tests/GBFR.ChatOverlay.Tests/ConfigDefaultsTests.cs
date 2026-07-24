@@ -25,6 +25,12 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
+    public void MicrophoneSelfMonitor_UsesConservativeDefaultVolume()
+    {
+        Assert.Equal(0.35, new Config().MicrophoneSelfMonitorVolume);
+    }
+
+    [Fact]
     public void Configurator_UsesExplicitConfigurationDirectory()
     {
         var configured = Path.Combine(Path.GetTempPath(), "gbfr-explicit-config");

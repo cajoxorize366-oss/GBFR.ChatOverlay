@@ -167,4 +167,25 @@ public sealed class VoicePushToTalkSafetyGateTests
         lock (reportsSync)
             Assert.Equal(new[] { true, false }, reports);
     }
+
+    [Fact]
+    public void Watchdog_UsesLocalMonitorNameForIndependentIPath()
+    {
+        var logs = new List<string>();
+        long now = 0;
+        using var gate = new VoicePushToTalkSafetyGate(
+            _ => { },
+            logs.Add,
+            TimeSpan.FromSeconds(1),
+            () => now,
+            startWatchdog: false,
+            operationName: "local microphone monitor");
+
+        gate.Report(true);
+        now = Stopwatch.Frequency;
+        gate.CheckForTimeout();
+
+        Assert.Contains(logs, line =>
+            line.Contains("local microphone monitor heartbeat timed out", StringComparison.Ordinal));
+    }
 }

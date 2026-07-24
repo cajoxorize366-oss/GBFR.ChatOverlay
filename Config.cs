@@ -60,8 +60,8 @@ public class Config : Configurable<Config>
     [SliderControlParams(minimum: 0.0, maximum: 1.0)]
     public double BackgroundOpacity { get; set; } = 0.55;
 
-    [DisplayName("Experimental Party Voice Test (Hold U)")]
-    [Description("PREVIEW: grant microphone-only send/receive permissions to remote Mod ChatControls on the same PartyNetwork. Hold U to talk; release, focus loss, input timeout and session exit force mute. Both clients need this package. Restart required.")]
+    [DisplayName("Experimental Voice (U Party / I Local Test)")]
+    [Description("PREVIEW: hold U for Party voice with another Mod client; hold I to hear the selected microphone locally through the selected playback device. The I path never sends audio over the network. Release, focus loss, input timeout and session exit force both paths off. Restart required.")]
     [DefaultValue(true)]
     public bool EnableVoiceInput { get; set; } = true;
 
@@ -82,6 +82,12 @@ public class Config : Configurable<Config>
     [TypeConverter(typeof(VoicePlaybackDeviceIdConverter))]
     [DefaultValue(AudioEndpointSelectionValues.SystemDefault)]
     public string VoicePlaybackDeviceId { get; set; } = AudioEndpointSelectionValues.SystemDefault;
+
+    [DisplayName("Microphone Self-Monitor Volume")]
+    [Description("Local playback volume used only while holding I. Start with headphones to avoid acoustic feedback. Capped at 50%. Restart required.")]
+    [DefaultValue(0.35)]
+    [SliderControlParams(minimum: 0.0, maximum: 0.5)]
+    public double MicrophoneSelfMonitorVolume { get; set; } = 0.35;
 }
 
 /// <summary>

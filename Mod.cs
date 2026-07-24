@@ -51,6 +51,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
     private readonly PartyLifecycleProbe? _partyLifecycleProbe;
+    private readonly LocalMicrophoneMonitor? _localMicrophoneMonitor;
 
     public Mod(ModContext context)
     {
@@ -61,36 +62,39 @@ public class Mod : ModBase // <= Do not Remove.
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
 
+        Action<string> moduleLog =
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+        var audioInputSelection = ResolvedAudioEndpointSelection.SystemDefault();
+        var audioOutputSelection = ResolvedAudioEndpointSelection.SystemDefault();
+        if (_configuration.EnableMutedPartyChatControlCanary || _configuration.EnableVoiceInput)
+        {
+            var audioCatalog = new WindowsAudioEndpointCatalog();
+            audioInputSelection = AudioEndpointSelectionResolver.Resolve(
+                _configuration.VoiceMicrophoneDeviceId,
+                AudioEndpointFlow.Capture,
+                audioCatalog,
+                moduleLog);
+            audioOutputSelection = AudioEndpointSelectionResolver.Resolve(
+                _configuration.VoicePlaybackDeviceId,
+                AudioEndpointFlow.Render,
+                audioCatalog,
+                moduleLog);
+        }
+
         if (_hooks is not null &&
             (_configuration.EnablePartyLifecycleProbe ||
-             _configuration.EnableMutedPartyChatControlCanary))
+             _configuration.EnableMutedPartyChatControlCanary ||
+             _configuration.EnableVoiceInput))
         {
             try
             {
-                Action<string> partyLog =
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
-                var audioInputSelection = ResolvedAudioEndpointSelection.SystemDefault();
-                var audioOutputSelection = ResolvedAudioEndpointSelection.SystemDefault();
-                if (_configuration.EnableMutedPartyChatControlCanary)
-                {
-                    var audioCatalog = new WindowsAudioEndpointCatalog();
-                    audioInputSelection = AudioEndpointSelectionResolver.Resolve(
-                        _configuration.VoiceMicrophoneDeviceId,
-                        AudioEndpointFlow.Capture,
-                        audioCatalog,
-                        partyLog);
-                    audioOutputSelection = AudioEndpointSelectionResolver.Resolve(
-                        _configuration.VoicePlaybackDeviceId,
-                        AudioEndpointFlow.Render,
-                        audioCatalog,
-                        partyLog);
-                }
-
                 _partyLifecycleProbe = new PartyLifecycleProbe(
                     _hooks,
-                    partyLog,
+                    moduleLog,
                     enableLifecycleLogging: _configuration.EnablePartyLifecycleProbe,
-                    enableMutedChatControlCanary: _configuration.EnableMutedPartyChatControlCanary,
+                    enableMutedChatControlCanary:
+                        _configuration.EnableMutedPartyChatControlCanary ||
+                        _configuration.EnableVoiceInput,
                     enableVoiceTest: _configuration.EnableVoiceInput,
                     audioInputSelection: audioInputSelection,
                     audioOutputSelection: audioOutputSelection);
@@ -102,18 +106,36 @@ public class Mod : ModBase // <= Do not Remove.
             }
         }
 
+        if (_hooks is not null && _configuration.EnableVoiceInput)
+        {
+            try
+            {
+                _localMicrophoneMonitor = new LocalMicrophoneMonitor(
+                    new WasapiLocalAudioMonitorBackendFactory(),
+                    audioInputSelection,
+                    audioOutputSelection,
+                    (float)_configuration.MicrophoneSelfMonitorVolume,
+                    moduleLog);
+            }
+            catch (Exception exception)
+            {
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Local microphone monitor unavailable: {exception}");
+            }
+        }
+
         var historyCapacity = Math.Clamp(_configuration.HistoryCapacity, 10, 5_000);
         var history = new ChatHistory(historyCapacity);
         history.Add(
             "System",
             "GBFR Chat Overlay loaded. Press Y to open chat.",
             ChatMessageKind.System);
-        if (_partyLifecycleProbe?.IsVoiceTestAvailable == true)
+        if (_localMicrophoneMonitor is not null)
         {
             history.Add(
                 "System",
-                "EXPERIMENTAL PARTY VOICE TEST: both clients need this package. Hold U to talk; " +
-                "the microphone is muted at every other time.",
+                "VOICE PREVIEW: hold I to hear the selected microphone on this PC. Hold U for " +
+                "Party voice when another Mod client is ready. Use headphones for the I test.",
                 ChatMessageKind.System);
         }
 
@@ -177,9 +199,12 @@ public class Mod : ModBase // <= Do not Remove.
             _overlay.TryRequestOpen,
             _overlay.ShouldCaptureKeyboard,
             () => _configuration.EnableVoiceInput &&
-                  _partyLifecycleProbe?.IsVoiceTestAvailable == true,
+                  _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
+            () => _configuration.EnableVoiceInput &&
+                  _localMicrophoneMonitor?.IsAvailable == true,
+            pressed => _localMicrophoneMonitor?.SetPressed(pressed),
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
@@ -197,6 +222,8 @@ public class Mod : ModBase // <= Do not Remove.
     public override void ConfigurationUpdated(Config configuration)
     {
         _configuration = configuration;
+        if (!configuration.EnableVoiceInput)
+            _localMicrophoneMonitor?.SetPressed(false);
         _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
     }
 
@@ -205,6 +232,7 @@ public class Mod : ModBase // <= Do not Remove.
     public override void Suspend()
     {
         _directInputKeyboard?.Suspend();
+        _localMicrophoneMonitor?.Suspend();
         _partyLifecycleProbe?.Suspend();
         _nativeChatBridge?.Suspend();
         _overlay?.Suspend();
@@ -213,6 +241,7 @@ public class Mod : ModBase // <= Do not Remove.
     public override void Resume()
     {
         _overlay?.Resume();
+        _localMicrophoneMonitor?.Resume();
         _partyLifecycleProbe?.Resume();
         _nativeChatBridge?.Resume();
         _directInputKeyboard?.Resume();
@@ -235,6 +264,17 @@ public class Mod : ModBase // <= Do not Remove.
     {
         if (!_configuration.EnableVoiceInput)
             return PartyVoiceUiStatus.Disabled;
+
+        var localMonitorState = _localMicrophoneMonitor?.State;
+        if (localMonitorState == LocalMicrophoneMonitorState.Starting ||
+            localMonitorState == LocalMicrophoneMonitorState.Monitoring)
+        {
+            return new PartyVoiceUiStatus(PartyVoiceUiState.LocalSelfTesting);
+        }
+        if (localMonitorState == LocalMicrophoneMonitorState.SignalDetected)
+            return new PartyVoiceUiStatus(PartyVoiceUiState.LocalSelfTestSignalDetected);
+        if (localMonitorState == LocalMicrophoneMonitorState.Faulted)
+            return new PartyVoiceUiStatus(PartyVoiceUiState.LocalSelfTestFailed);
 
         return _partyLifecycleProbe?.VoiceUiStatus ?? PartyVoiceUiStatus.Unavailable;
     }

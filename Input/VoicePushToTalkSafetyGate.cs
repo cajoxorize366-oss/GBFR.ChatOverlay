@@ -16,6 +16,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
     private readonly Action<bool> _setPressed;
     private readonly Action? _requestDiagnosticSample;
     private readonly Action<string>? _log;
+    private readonly string _operationName;
     private readonly Func<long> _getTimestamp;
     private readonly long _heartbeatTimeoutTicks;
     private readonly long _diagnosticSamplePeriodTicks;
@@ -31,7 +32,8 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
     public VoicePushToTalkSafetyGate(
         Action<bool> setPressed,
         Action<string>? log = null,
-        Action? requestDiagnosticSample = null)
+        Action? requestDiagnosticSample = null,
+        string operationName = "push-to-talk")
         : this(
             setPressed,
             log,
@@ -39,7 +41,8 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
             Stopwatch.GetTimestamp,
             startWatchdog: true,
             requestDiagnosticSample: requestDiagnosticSample,
-            diagnosticSamplePeriod: DefaultDiagnosticSamplePeriod)
+            diagnosticSamplePeriod: DefaultDiagnosticSamplePeriod,
+            operationName: operationName)
     {
     }
 
@@ -50,11 +53,15 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         Func<long> getTimestamp,
         bool startWatchdog,
         Action? requestDiagnosticSample = null,
-        TimeSpan? diagnosticSamplePeriod = null)
+        TimeSpan? diagnosticSamplePeriod = null,
+        string operationName = "push-to-talk")
     {
         _setPressed = setPressed ?? throw new ArgumentNullException(nameof(setPressed));
         _requestDiagnosticSample = requestDiagnosticSample;
         _log = log;
+        _operationName = string.IsNullOrWhiteSpace(operationName)
+            ? throw new ArgumentException("Operation name cannot be empty.", nameof(operationName))
+            : operationName;
         _getTimestamp = getTimestamp ?? throw new ArgumentNullException(nameof(getTimestamp));
         if (heartbeatTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(heartbeatTimeout));
@@ -170,7 +177,11 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         }
 
         if (timedOut)
-            SafeLog("Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.");
+        {
+            SafeLog(_operationName == "push-to-talk"
+                ? "Stage 3 push-to-talk heartbeat timed out; microphone mute was forced."
+                : $"Stage 3 {_operationName} heartbeat timed out; it was forced off.");
+        }
     }
 
     public void Dispose()
@@ -200,7 +211,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         }
         catch (Exception exception)
         {
-            SafeLog($"Stage 3 push-to-talk state callback failed: {exception.Message}");
+            SafeLog($"Stage 3 {_operationName} state callback failed: {exception.Message}");
         }
     }
 

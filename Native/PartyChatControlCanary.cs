@@ -159,6 +159,15 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
     }
 
+    internal bool IsRemotePushToTalkReady
+    {
+        get
+        {
+            lock (_stateSync)
+                return IsRemoteVoiceReadyLocked();
+        }
+    }
+
     internal nint CreateAsyncIdentifier => _createToken;
 
     internal nint AudioInputAsyncIdentifier => _inputToken;
@@ -366,7 +375,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         {
             if (_disposed != 0)
                 return;
-            var normalizedPressed = _enableVoiceTest && pressed;
+            var normalizedPressed = _enableVoiceTest && pressed && IsRemoteVoiceReadyLocked();
             var changed = normalizedPressed != _pushToTalkPressed;
             _pushToTalkPressed = normalizedPressed;
             if (changed && _enableVoiceTest && _localChatControl != nint.Zero)
@@ -2379,14 +2388,16 @@ internal sealed class PartyChatControlCanary : IDisposable
                work.UnmuteInput == ShouldInputBeUnmutedLocked();
     }
 
-    private bool ShouldInputBeUnmutedLocked() =>
+    private bool IsRemoteVoiceReadyLocked() =>
         _enableVoiceTest &&
-        _pushToTalkPressed &&
         !_sessionFaulted &&
         !_networkLeaving &&
         _joinedObserved &&
         _phase == PartyChatControlCanaryPhase.VoiceReady &&
         _permissionedRemoteChatControls.Count != 0;
+
+    private bool ShouldInputBeUnmutedLocked() =>
+        _pushToTalkPressed && IsRemoteVoiceReadyLocked();
 
     private PartyVoiceUiStatus GetVoiceUiStatusLocked()
     {

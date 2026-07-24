@@ -101,7 +101,17 @@ Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x..
 
 ## Stage 3 two-client realtime voice test
 
-Prerequisites: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Party Voice Test (Hold U)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has both successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual) and displayed device name.
+Before arranging a second tester, wear headphones and run the local preflight from the main menu: hold `I`, speak, and release. The overlay should show `本地监听中`, then `本地自检通过` after a signal is detected. You should hear the selected microphone through the selected playback device only while `I` is held. Expected logs are:
+
+```text
+Local microphone monitor started: input="...", output="...", volume=35%. Audio remains on this PC and is not sent through Party.
+Local microphone monitor detected input signal (peak ...%).
+Local microphone monitor result: PASS — microphone signal was detected and sent to the selected local playback path.
+```
+
+No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. If `I` passes but Party later reports `NoAudioInput`, the physical Windows path is working and the remaining fault is inside Party selection/integration. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
+
+Prerequisites for `U`: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Voice (U Party / I Local Test)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has both successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual) and displayed device name.
 
 Before touching `U`, both logs must contain a grant for the remote control discovered above:
 
@@ -109,20 +119,20 @@ Before touching `U`, both logs must contain a grant for the remote control disco
 Stage 3 voice test permissions granted for remote ChatControl=0x... on network=0x...: SendMicrophoneAudio|ReceiveMicrophoneAudio (0x0005). Input remains muted until U is held.
 ```
 
-The voice row at the top of the chat overlay should progress from `[VOICE] 等待进入联机房间` to `[VOICE] 等待队友语音通道`, then `[VOICE] 已就绪 · 按住 U 说话` after the permission line. A key-down alone must not display the speaking state before Party confirms the native unmute.
+The voice row at the top of the chat overlay should progress from `[VOICE] 等待进入联机房间 · 可按住 I 本地监听` to `[VOICE] 等待队友语音通道 · 按住 I 本地监听`, then `[VOICE] 已就绪 · U 队友通话 / I 本地监听` after the permission line. A key-down alone must not display the speaking state before Party confirms the native unmute.
 
 Run this exact test in both directions:
 
 1. Client A holds `U`, speaks a short phrase, then releases `U`.
 2. After Party confirms unmute, A's overlay must show `>>> [VOICE] 正在语音 · 松开 U 静音 <<<` and log `Stage 3 push-to-talk microphone UNMUTED while U is held.`
-3. On release, A's overlay must return to `[VOICE] 已就绪 · 按住 U 说话` and log `Stage 3 push-to-talk microphone muted.`
+3. On release, A's overlay must return to `[VOICE] 已就绪 · U 队友通话 / I 本地监听` and log `Stage 3 push-to-talk microphone muted.`
 4. Client B must hear the phrase only during A's hold interval. B's log must also transition its matching `Stage 3 voice diagnostics PEER` line to `remoteIndicator=Talking (1)` and `diagnosis=PASS_REMOTE_AUDIO_RECEIVED_BY_PARTY`. This proves Party observed remote voice; physical audibility remains a separate manual observation.
 5. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
 6. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. After focus returns, the overlay must no longer show `正在语音`. Repeat a normal hold/release once to prove recovery.
 
 Speak continuously for at least three seconds during each direction so the low-noise diagnostic poll cannot miss the indicator transition. The expected LOCAL/PEER lines, terminal summary meanings, every official Party indicator state and the complete decision matrix are documented in [VOICE_TROUBLESHOOTING_MATRIX.md](VOICE_TROUBLESHOOTING_MATRIX.md). One labelled A/B log pair from that procedure should replace repeated one-setting-at-a-time tests.
 
-`U` is consumed by the Mod while this preview is available, so it should not reach Relink. The microphone must remain silent before the permission log, while `U` is released, after focus loss, and after the last remote Mod ChatControl leaves.
+`I` is consumed whenever local monitoring is available, and `U` is consumed only after the remote Mod voice path is ready. `I` and `U` cannot be active together; `U` wins, and an interrupted held `I` must be released before it can start again. The Party microphone must remain silent before the permission log, while `U` is released, after focus loss, and after the last remote Mod ChatControl leaves.
 
 ## Session-exit and cleanup test
 
@@ -136,6 +146,6 @@ Then preserve `ChatControlLeftNetwork (local canary)`, `DestroyChatControlComple
 
 If `Stage 2 manager cleanup reached before local ChatControl teardown completed` appears, preserve the full diagnostic fields. `PartyCleanup completed` still proves the manager's safety fallback ran, but the strict Stage 2 teardown-event check has not passed.
 
-The test fails if either client lacks the `0x0005` permission line, logs `Stage 3 voice test failed closed`, logs `Stage 2 canary disabled (fail-closed)`, reports a nonzero Party operation, or cannot complete the local cleanup chain. It also fails for one-way/no audio, audio while `U` is released, audio continuing after focus loss/peer departure, a manager ownership conflict, a second local ChatControl, changed matchmaking, broken native text chat or rendering. The Mod must not call `PartyEndpointSendMessage`, initialize a second Party manager or create another gameplay endpoint. Disable `Experimental Party Voice Test`, restart, and preserve both complete logs plus approximate key-down/key-up/leave times after any failure.
+The test fails if either client lacks the `0x0005` permission line, logs `Stage 3 voice test failed closed`, logs `Stage 2 canary disabled (fail-closed)`, reports a nonzero Party operation, or cannot complete the local cleanup chain. It also fails for one-way/no audio, audio while `U` is released, local monitor audio after `I` is released, audio continuing after focus loss/peer departure, a manager ownership conflict, a second local ChatControl, changed matchmaking, broken native text chat or rendering. The Mod must not call `PartyEndpointSendMessage`, initialize a second Party manager or create another gameplay endpoint. Disable `Experimental Voice (U Party / I Local Test)`, restart, and preserve both complete logs plus approximate key-down/key-up/leave times after any failure.
 
 If either audio row is a plain text field, or opening Mod configuration reports that the audio-device UI is missing, verify that `GBFR.ChatOverlay.dll` and `GBFR.ChatOverlay.ConfiguratorUI.dll` came from the same ZIP. The second DLL is launcher-only; it must be present beside the main Mod DLL but is deliberately not referenced or loaded by the game-side assembly.

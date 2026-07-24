@@ -1,6 +1,6 @@
 # One-run Party voice troubleshooting matrix
 
-This is the required test for `0.3.0-preview.5`. It follows Microsoft PlayFab Party's official audio troubleshooting flow and is designed to extract the useful evidence from one two-client session. Do not repeat isolated device-switch experiments before collecting this run.
+This is the required test for `0.3.0-preview.6`. It follows Microsoft PlayFab Party's official audio troubleshooting flow and is designed to extract the useful evidence from one two-client session. Do not repeat isolated device-switch experiments before collecting this run.
 
 ## What the package now measures
 
@@ -18,12 +18,13 @@ Each client records:
 
 1. Install the exact same ZIP on client A and client B. Record the ZIP SHA-256. Do not mix the main and Configurator DLLs from different packages.
 2. On both clients, choose the intended `Voice Microphone` and `Voice Playback Device`, save, and restart. `Default` follows the Windows default communications device; a named entry uses Party `Manual` selection with that endpoint ID.
-3. Create a private room and wait until both overlays say `[VOICE] 已就绪 · 按住 U 说话`.
-4. A holds `U`, speaks continuously for at least three seconds, then releases it. B listens.
-5. B holds `U`, speaks continuously for at least three seconds, then releases it. A listens.
-6. Once, hold `U` and switch focus away from the game. Confirm the 350 ms watchdog forces mute, then return and complete one normal hold/release.
-7. Leave the room normally so both logs receive the diagnostic summary and cleanup chain.
-8. Preserve both complete Reloaded-II logs, labelled A/B, plus the approximate A-talk, B-talk, focus-loss and leave times. This single pair of logs should be sufficient for the next diagnosis.
+3. Before joining a room, each client wears headphones, holds `I`, speaks, and confirms it hears its own selected microphone. The overlay must reach `本地自检通过`; the log must contain `Local microphone monitor detected input signal` and a `result: PASS` line after release. This is local Windows/WASAPI evidence only, not a Party pass.
+4. Create a private room and wait until both overlays say `[VOICE] 已就绪 · U 队友通话 / I 本地监听`.
+5. A holds `U`, speaks continuously for at least three seconds, then releases it. B listens.
+6. B holds `U`, speaks continuously for at least three seconds, then releases it. A listens.
+7. Once, hold `U` and switch focus away from the game. Confirm the 350 ms watchdog forces mute, then return and complete one normal hold/release.
+8. Leave the room normally so both logs receive the diagnostic summary and cleanup chain.
+9. Preserve both complete Reloaded-II logs, labelled A/B, plus the approximate I-preflight, A-talk, B-talk, focus-loss and leave times. This single pair of logs should be sufficient for the next diagnosis.
 
 ## Healthy evidence
 
@@ -45,6 +46,8 @@ The summary pass means that, during this session, Party observed local microphon
 | Log evidence | Layer identified | Interpretation / next action |
 | --- | --- | --- |
 | Input `Initialized (1)` | Party capture device | Healthy device initialization. Continue to the local indicator. |
+| `I` local monitor logs `result: PASS` and self-audio is audible | Windows capture/render outside Party | The selected Windows mic and playback device work in shared mode. If `U` still reports `NoAudioInput`, focus on Party device selection/integration rather than the physical mic. |
+| `I` starts but reports no microphone signal | Windows capture before Party | Check the physical mic, Windows privacy/input meter, selected endpoint and gain before arranging another two-client test. |
 | Input `NoInput`, `NotFound`, `UserConsentDenied`, `UnsupportedFormat`, `AlreadyInUse` or `UnknownError` | Local capture setup | The state plus translated `errorDetail` is the primary failure. Check Windows microphone privacy, the selected/default communications endpoint, exclusive use and format support. |
 | Output state other than `Initialized (1)` | Party render device | The receiving client cannot establish its selected playback endpoint. Check the endpoint, exclusive use and format support. |
 | `selectedDeviceId=<null>` or empty while state is not initialized | Party device selection | Party did not resolve a usable selected device. For `SystemDefault`, set the intended Windows default communications device; for `Manual`, reselect an active endpoint. |

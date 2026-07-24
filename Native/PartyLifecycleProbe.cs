@@ -67,6 +67,11 @@ public sealed class PartyLifecycleProbe
 
     public bool IsVoiceTestAvailable => IsInitialized && _enableVoiceTest && _chatControlCanary is not null;
 
+    public bool IsVoicePushToTalkReady =>
+        IsVoiceTestAvailable &&
+        !Volatile.Read(ref _suspended) &&
+        _chatControlCanary?.IsRemotePushToTalkReady == true;
+
     internal PartyVoiceUiStatus VoiceUiStatus
     {
         get

@@ -354,6 +354,33 @@ public sealed class PartyChatControlCanaryTests
     }
 
     [Fact]
+    public void VoiceTest_HeldUBeforePeerReadinessDoesNotLatchAnUnmute()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary);
+        Assert.False(canary.IsRemotePushToTalkReady);
+
+        canary.SetPushToTalkPressed(true);
+        ObserveRemoteJoined(canary);
+        canary.OnBatchFinished(Manager);
+
+        Assert.True(canary.IsRemotePushToTalkReady);
+        Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
+        Assert.DoesNotContain("SetAudioInputMuted:False", api.Calls);
+
+        canary.SetPushToTalkPressed(false);
+        canary.SetPushToTalkPressed(true);
+
+        Assert.Contains("SetAudioInputMuted:False", api.Calls);
+    }
+
+    [Fact]
     public void VoiceDiagnostics_CapturesOfficialSignalPathAndEmitsPassSummary()
     {
         var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);

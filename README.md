@@ -1,18 +1,19 @@
 # GBFR Chat Overlay
 
-一个面向《碧蓝幻想 Relink》PC 版的 MMO 风格聊天框 Mod。目标是在不打断普通操作的情况下保留队友聊天记录，并通过一个可配置热键快速输入文字；后续阶段将研究复用游戏现有联机层的按键说话语音。
+一个面向《碧蓝幻想 Relink》PC 版的 MMO 风格聊天框 Mod。目标是在不打断普通操作的情况下保留队友聊天记录，通过热键快速输入文字，并复用游戏现有 PlayFab Party 会话提供按键说话语音。
 
 ## 当前阶段
 
-项目处于原生聊天桥接完成、Party muted ChatControl 双端验证阶段。目前仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及默认启用的 Stage 2 静音 ChatControl canary。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。
+项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。双方安装相同测试包后，按住 `U` 说话，松开即静音。
 
-下一步依次完成：
+当前验证进度：
 
 1. 已用主机/客机日志确认现有 Party manager、认证、网络和 endpoint 生命周期。
-2. 当前验证只连接、始终静音且不授予 Party 聊天权限的 muted ChatControl canary。
-3. 双端 canary 与清理事件通过后，再基于 Party ChatControl 实现按键说话与设备选择。
+2. 已确认双方 muted ChatControl 的创建、连接、远端发现和退出房间前清理事件。
+3. 当前测试包只向同一 PartyNetwork 中检测到的 Mod ChatControl 授予麦克风收发权限；输入默认静音，仅在按住 `U` 时开启。
+4. 设备选择、手柄按键、成员音量/静音和正式 UI 状态仍待后续实现。
 
-当前版本不会构造或修改网络包，也不会尝试绕过任何联机保护。Stage 2 只复用游戏已经认证的 local user、PartyNetwork 和 local device，创建一个输入预先静音的 ChatControl；不会绑定或调用 `PartyChatControlSetPermissions`。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则自动 fail-closed。
+当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 语音通道，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松键、输入心跳超时、暂停和退出会话都会强制静音；所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则自动 fail-closed。
 
 第三方组件及许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

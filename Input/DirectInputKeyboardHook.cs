@@ -21,8 +21,10 @@ public sealed unsafe class DirectInputKeyboardHook
     private readonly ReloadedHooksApi _hooks;
     private readonly Func<bool> _tryActivate;
     private readonly Func<bool> _shouldCapture;
+    private readonly Func<bool> _isVoicePushToTalkEnabled;
     private readonly Action<string> _log;
     private readonly DirectInputKeyboardStateFilter _stateFilter = new();
+    private readonly VoicePushToTalkSafetyGate _voicePushToTalkGate;
     private readonly object _hookSync = new();
 
     private IHook<DirectInput8CreateDelegate>? _directInputCreateHook;
@@ -30,17 +32,25 @@ public sealed unsafe class DirectInputKeyboardHook
     private IHook<GetDeviceStateDelegate>? _getDeviceStateHook;
     private nint _keyboardDevice;
     private bool _initialized;
+    private int _filterFailureLogged;
 
     public DirectInputKeyboardHook(
         ReloadedHooksApi hooks,
         Func<bool> tryActivate,
         Func<bool> shouldCapture,
+        Func<bool> isVoicePushToTalkEnabled,
+        Action<bool> setVoicePushToTalkPressed,
         Action<string> log)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _tryActivate = tryActivate ?? throw new ArgumentNullException(nameof(tryActivate));
         _shouldCapture = shouldCapture ?? throw new ArgumentNullException(nameof(shouldCapture));
+        _isVoicePushToTalkEnabled = isVoicePushToTalkEnabled ??
+            throw new ArgumentNullException(nameof(isVoicePushToTalkEnabled));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _voicePushToTalkGate = new VoicePushToTalkSafetyGate(
+            setVoicePushToTalkPressed ?? throw new ArgumentNullException(nameof(setVoicePushToTalkPressed)),
+            _log);
     }
 
     public void Initialize()
@@ -62,10 +72,12 @@ public sealed unsafe class DirectInputKeyboardHook
         _getDeviceStateHook?.Disable();
         _createDeviceHook?.Disable();
         _directInputCreateHook?.Disable();
+        _voicePushToTalkGate.Suspend();
     }
 
     public void Resume()
     {
+        _voicePushToTalkGate.Resume();
         _directInputCreateHook?.Enable();
         _createDeviceHook?.Enable();
         _getDeviceStateHook?.Enable();
@@ -145,10 +157,25 @@ public sealed unsafe class DirectInputKeyboardHook
             return result;
         }
 
-        _stateFilter.Process(
-            new Span<byte>((void*)state, byteCount),
-            _tryActivate,
-            _shouldCapture);
+        try
+        {
+            _stateFilter.Process(
+                new Span<byte>((void*)state, byteCount),
+                _tryActivate,
+                _shouldCapture,
+                _isVoicePushToTalkEnabled,
+                _voicePushToTalkGate.Report);
+        }
+        catch (Exception exception)
+        {
+            _voicePushToTalkGate.ForceMute();
+            if (Interlocked.Exchange(ref _filterFailureLogged, 1) == 0)
+            {
+                _log(
+                    $"DirectInput keyboard filtering failed; push-to-talk was forced muted and " +
+                    $"further errors are suppressed: {exception.Message}");
+            }
+        }
         return result;
     }
 

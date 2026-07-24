@@ -9,6 +9,7 @@ internal enum PartyChatControlCanaryPhase
     ConfiguringMutedAudio,
     Connecting,
     JoinedMuted,
+    VoiceReady,
     Disconnecting,
     Destroying,
     Completed,
@@ -16,21 +17,28 @@ internal enum PartyChatControlCanaryPhase
 }
 
 /// <summary>
-/// Stage 2 validation only: creates one locally owned Party ChatControl on the game's existing
-/// authenticated Party session, verifies input mute before device selection, and never grants
-/// any chat permissions. All native actions run after the host finishes the observed state batch.
+/// Creates one locally owned Party ChatControl on the game's existing authenticated Party session.
+/// Stage 2 keeps it muted with no permissions; the opt-in Stage 3 test grants microphone-only
+/// permissions to remote ChatControls observed on that same network and uses hold-to-talk mute.
+/// Native actions never overlap the game's state-change batch.
 /// </summary>
 internal sealed class PartyChatControlCanary : IDisposable
 {
     private const uint Success = 0;
     private const uint SucceededStateChange = 0;
     private const uint SystemDefaultAudioDevice = 1;
+    private const PartyChatPermissionOptions MicrophoneVoicePermissions =
+        PartyChatPermissionOptions.SendMicrophoneAudio |
+        PartyChatPermissionOptions.ReceiveMicrophoneAudio;
 
     private readonly IPartyChatControlApi _api;
     private readonly Action<string> _log;
     private readonly Action<Action> _schedule;
+    private readonly bool _enableVoiceTest;
     private readonly object _stateSync = new();
     private readonly object _apiCallSync = new();
+    private readonly HashSet<nint> _remoteChatControls = [];
+    private readonly HashSet<nint> _permissionedRemoteChatControls = [];
     private readonly GCHandle _createTokenHandle;
     private readonly GCHandle _inputTokenHandle;
     private readonly GCHandle _outputTokenHandle;
@@ -71,6 +79,13 @@ internal sealed class PartyChatControlCanary : IDisposable
     private bool _destroyedObserved;
     private bool _teardownRequested;
     private bool _preLeaveObserved;
+    private bool _pushToTalkPressed;
+    private bool _inputUnmuted;
+    // Conservative native-state marker. This is set before an unmute call so a concurrent
+    // fail-closed path never relies solely on the managed mirror being updated afterwards.
+    private bool _microphoneMayBeOpen;
+    private bool _stateBatchActive;
+    private nint _stateBatchManager;
     private int _workScheduled;
     private long _generation;
     private int _disposed;
@@ -78,10 +93,12 @@ internal sealed class PartyChatControlCanary : IDisposable
     public PartyChatControlCanary(
         IPartyChatControlApi api,
         Action<string> log,
-        Action<Action>? schedule = null)
+        Action<Action>? schedule = null,
+        bool enableVoiceTest = false)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _enableVoiceTest = enableVoiceTest;
         _schedule = schedule ?? QueueOnThreadPool;
 
         _createTokenHandle = AllocateToken("create");
@@ -220,12 +237,55 @@ internal sealed class PartyChatControlCanary : IDisposable
     }
 
     /// <summary>
+    /// Fences deferred Party calls before Relink starts a shared state-change batch.
+    /// </summary>
+    public void BeginStateChangeBatch(nint manager)
+    {
+        lock (_apiCallSync)
+        {
+            lock (_stateSync)
+            {
+                if (_disposed != 0 || _suspended || !_nativeCallsAllowed)
+                    return;
+                if (_stateBatchActive)
+                {
+                    FailClosedLocked("Relink started a nested Party state-change batch");
+                    return;
+                }
+
+                _stateBatchActive = true;
+                _stateBatchManager = manager;
+            }
+        }
+    }
+
+    public void CancelStateChangeBatch(nint manager)
+    {
+        lock (_stateSync)
+        {
+            if (_stateBatchActive && manager == _stateBatchManager)
+            {
+                _stateBatchActive = false;
+                _stateBatchManager = nint.Zero;
+            }
+        }
+
+        TryScheduleWork();
+    }
+
+    /// <summary>
     /// Called only after the game's original PartyFinishProcessingStateChanges returns.
     /// </summary>
     public void OnBatchFinished(nint manager)
     {
         lock (_stateSync)
         {
+            if (_stateBatchActive && manager == _stateBatchManager)
+            {
+                _stateBatchActive = false;
+                _stateBatchManager = nint.Zero;
+            }
+
             if (manager == nint.Zero || manager != _manager || _suspended)
                 return;
 
@@ -235,6 +295,11 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 _localChatControl = nint.Zero;
                 _localDevice = nint.Zero;
+                _pushToTalkPressed = false;
+                _inputUnmuted = false;
+                _microphoneMayBeOpen = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
                 _destroyQueued = false;
                 _destroyCallBegan = false;
                 _destroyCompleted = false;
@@ -244,6 +309,18 @@ internal sealed class PartyChatControlCanary : IDisposable
                 EnqueueLogLocked(
                     "Stage 2 cleanup complete: local ChatControlDestroyed was returned to PartyFinishProcessingStateChanges.");
             }
+        }
+
+        TryScheduleWork();
+    }
+
+    public void SetPushToTalkPressed(bool pressed)
+    {
+        lock (_stateSync)
+        {
+            if (_disposed != 0)
+                return;
+            _pushToTalkPressed = _enableVoiceTest && pressed;
         }
 
         TryScheduleWork();
@@ -273,6 +350,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _endpointReady = false;
                 _authenticated = false;
                 _teardownRequested = _localChatControl != nint.Zero;
+                _pushToTalkPressed = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
 
                 if (_localChatControl == nint.Zero)
                 {
@@ -315,6 +395,15 @@ internal sealed class PartyChatControlCanary : IDisposable
             }
             catch (Exception exception)
             {
+                try
+                {
+                    _ = _api.SetAudioInputMuted(localChatControl, muted: true);
+                }
+                catch
+                {
+                    // Relink's original network leave remains the terminal fallback.
+                }
+
                 lock (_stateSync)
                 {
                     if (_localChatControl == localChatControl && _localDevice == localDevice)
@@ -346,6 +435,11 @@ internal sealed class PartyChatControlCanary : IDisposable
                         $"Stage 2 pre-leave PartyChatControlSetAudioInputMuted(true) returned " +
                         $"0x{muteResult:X8}; destruction was still requested.");
                 }
+                else
+                {
+                    _inputUnmuted = false;
+                    _microphoneMayBeOpen = false;
+                }
 
                 if (destroyResult != Success)
                 {
@@ -371,33 +465,81 @@ internal sealed class PartyChatControlCanary : IDisposable
     }
 
     /// <summary>
-    /// Blocks PartyCleanup only long enough to prevent it racing a canary native call.
-    /// No Party API is called from this method.
+    /// Blocks PartyCleanup long enough to invalidate deferred work and synchronously force input
+    /// mute before the manager becomes invalid. PartyCleanup remains the final ownership fallback.
     /// </summary>
     public void BeginManagerCleanup(nint manager)
     {
         lock (_apiCallSync)
         {
+            nint chatControl;
             lock (_stateSync)
             {
-                if (_manager != nint.Zero && manager == _manager)
-                {
-                    if (_localChatControl != nint.Zero && !_destroyedObserved)
-                    {
-                        EnqueueLogLocked(
-                            "Stage 2 manager cleanup reached before local ChatControl teardown completed: " +
-                            $"preLeaveObserved={_preLeaveObserved}, leftObserved={_leftObserved}, " +
-                            $"destroyQueued={_destroyQueued}, destroyCallBegan={_destroyCallBegan}, " +
-                            $"destroyCompleted={_destroyCompleted}, destroyedObserved={_destroyedObserved}. " +
-                            "Party owns final teardown.");
-                    }
+                if (_manager == nint.Zero || manager != _manager)
+                    return;
 
-                    _nativeCallsAllowed = false;
-                    _teardownRequested = false;
-                    _generation++;
-                    EnqueueLogLocked(
-                        "Stage 2 manager cleanup began; canary native calls are now blocked and Party owns final teardown.");
+                _pushToTalkPressed = false;
+                _generation++;
+                chatControl = _localChatControl;
+            }
+
+            uint muteResult = Success;
+            Exception? muteException = null;
+            if (chatControl != nint.Zero)
+            {
+                try
+                {
+                    muteResult = _api.SetAudioInputMuted(chatControl, muted: true);
                 }
+                catch (Exception exception)
+                {
+                    muteException = exception;
+                }
+            }
+
+            lock (_stateSync)
+            {
+                if (_manager == nint.Zero || manager != _manager)
+                    return;
+
+                if (chatControl != nint.Zero && chatControl == _localChatControl)
+                {
+                    if (muteException is null && muteResult == Success)
+                    {
+                        _inputUnmuted = false;
+                        _microphoneMayBeOpen = false;
+                    }
+                    else
+                    {
+                        var failure = muteException is not null
+                            ? $"threw {muteException.GetType().Name}: {muteException.Message}"
+                            : $"returned 0x{muteResult:X8}";
+                        EnqueueLogLocked(
+                            $"Stage 3 manager-cleanup emergency mute {failure}; PartyCleanup owns final teardown.");
+                    }
+                }
+
+                if (_localChatControl != nint.Zero && !_destroyedObserved)
+                {
+                    EnqueueLogLocked(
+                        "Stage 2 manager cleanup reached before local ChatControl teardown completed: " +
+                        $"preLeaveObserved={_preLeaveObserved}, leftObserved={_leftObserved}, " +
+                        $"destroyQueued={_destroyQueued}, destroyCallBegan={_destroyCallBegan}, " +
+                        $"destroyCompleted={_destroyCompleted}, destroyedObserved={_destroyedObserved}. " +
+                        "Party owns final teardown.");
+                }
+
+                _nativeCallsAllowed = false;
+                _teardownRequested = false;
+                _pushToTalkPressed = false;
+                if (chatControl == nint.Zero)
+                    _inputUnmuted = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
+                _stateBatchActive = false;
+                _stateBatchManager = nint.Zero;
+                EnqueueLogLocked(
+                    "Stage 2 manager cleanup began; canary native calls are now blocked and Party owns final teardown.");
             }
         }
     }
@@ -431,6 +573,11 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 _suspended = true;
                 _nativeCallsAllowed = false;
+                _pushToTalkPressed = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
+                _stateBatchActive = false;
+                _stateBatchManager = nint.Zero;
                 _generation++;
                 device = _localDevice;
                 chatControl = _localChatControl;
@@ -442,9 +589,38 @@ internal sealed class PartyChatControlCanary : IDisposable
             if (chatControl == nint.Zero)
                 return;
 
-            _ = _api.SetAudioInputMuted(chatControl, muted: true);
+            uint muteResult = uint.MaxValue;
+            try
+            {
+                muteResult = _api.SetAudioInputMuted(chatControl, muted: true);
+            }
+            catch (Exception exception)
+            {
+                lock (_stateSync)
+                    EnqueueLogLocked($"Stage 3 suspend emergency mute threw {exception.GetType().Name}: {exception.Message}.");
+            }
+
             if (device != nint.Zero && !destroyAlreadyQueued)
-                _ = _api.DestroyChatControl(device, chatControl, _destroyToken);
+            {
+                try
+                {
+                    _ = _api.DestroyChatControl(device, chatControl, _destroyToken);
+                }
+                catch (Exception exception)
+                {
+                    lock (_stateSync)
+                        EnqueueLogLocked($"Stage 2 suspend ChatControl destruction threw {exception.GetType().Name}: {exception.Message}.");
+                }
+            }
+
+            if (muteResult == Success)
+            {
+                lock (_stateSync)
+                {
+                    _inputUnmuted = false;
+                    _microphoneMayBeOpen = false;
+                }
+            }
         }
     }
 
@@ -477,11 +653,56 @@ internal sealed class PartyChatControlCanary : IDisposable
 
         lock (_apiCallSync)
         {
+            nint localDevice;
+            nint localChatControl;
+            bool destroyChatControl;
             lock (_stateSync)
             {
                 _nativeCallsAllowed = false;
                 _teardownRequested = false;
+                _pushToTalkPressed = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
+                _stateBatchActive = false;
+                _stateBatchManager = nint.Zero;
                 _generation++;
+                localDevice = _localDevice;
+                localChatControl = _localChatControl;
+                destroyChatControl = localDevice != nint.Zero &&
+                                     localChatControl != nint.Zero &&
+                                     !_destroyCallBegan &&
+                                     !_destroyedObserved;
+            }
+
+            if (localChatControl != nint.Zero)
+            {
+                try
+                {
+                    if (_api.SetAudioInputMuted(localChatControl, muted: true) == Success)
+                    {
+                        lock (_stateSync)
+                        {
+                            _inputUnmuted = false;
+                            _microphoneMayBeOpen = false;
+                        }
+                    }
+                }
+                catch
+                {
+                    // Destruction below is the terminal best-effort privacy boundary.
+                }
+            }
+
+            if (destroyChatControl)
+            {
+                try
+                {
+                    _ = _api.DestroyChatControl(localDevice, localChatControl, _destroyToken);
+                }
+                catch
+                {
+                    // Dispose cannot safely re-enter the lifecycle pump; Party/process teardown remains final.
+                }
             }
         }
 
@@ -641,6 +862,8 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
         else
         {
+            if (_enableVoiceTest && state.Network == _network)
+                _remoteChatControls.Add(state.ChatControl);
             EnqueueLogLocked(
                 $"Stage 2 ChatControlJoinedNetwork (remote/other): network={Hex(state.Network)}, " +
                 $"chatControl={Hex(state.ChatControl)}.");
@@ -677,6 +900,9 @@ internal sealed class PartyChatControlCanary : IDisposable
     {
         if (state.ChatControl == _localChatControl)
         {
+            _pushToTalkPressed = false;
+            _remoteChatControls.Clear();
+            _permissionedRemoteChatControls.Clear();
             _leftObserved = true;
             _joinedObserved = false;
             _teardownRequested = true;
@@ -686,6 +912,16 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
         else if (state.ChatControl != nint.Zero)
         {
+            if (state.Network == _network)
+            {
+                _remoteChatControls.Remove(state.ChatControl);
+                _permissionedRemoteChatControls.Remove(state.ChatControl);
+                if (_permissionedRemoteChatControls.Count == 0 &&
+                    _phase == PartyChatControlCanaryPhase.VoiceReady)
+                {
+                    _phase = PartyChatControlCanaryPhase.JoinedMuted;
+                }
+            }
             EnqueueLogLocked(
                 $"Stage 2 ChatControlLeftNetwork (remote/other): reason={state.Reason}, " +
                 $"network={Hex(state.Network)}, chatControl={Hex(state.ChatControl)}.");
@@ -720,6 +956,13 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
         else if (state.ChatControl != nint.Zero)
         {
+            _remoteChatControls.Remove(state.ChatControl);
+            _permissionedRemoteChatControls.Remove(state.ChatControl);
+            if (_permissionedRemoteChatControls.Count == 0 &&
+                _phase == PartyChatControlCanaryPhase.VoiceReady)
+            {
+                _phase = PartyChatControlCanaryPhase.JoinedMuted;
+            }
             EnqueueLogLocked(
                 $"Stage 2 ChatControlDestroyed (remote/other): reason={state.Reason}, " +
                 $"chatControl={Hex(state.ChatControl)}.");
@@ -737,6 +980,9 @@ internal sealed class PartyChatControlCanary : IDisposable
         _networkLeaving = true;
         _endpointReady = false;
         _authenticated = false;
+        _pushToTalkPressed = false;
+        _remoteChatControls.Clear();
+        _permissionedRemoteChatControls.Clear();
         _teardownRequested = _localChatControl != nint.Zero;
     }
 
@@ -749,6 +995,9 @@ internal sealed class PartyChatControlCanary : IDisposable
 
         _authenticated = false;
         _networkLeaving = true;
+        _pushToTalkPressed = false;
+        _remoteChatControls.Clear();
+        _permissionedRemoteChatControls.Clear();
         _teardownRequested = _localChatControl != nint.Zero;
     }
 
@@ -778,9 +1027,11 @@ internal sealed class PartyChatControlCanary : IDisposable
             _joinedObserved)
         {
             _phase = PartyChatControlCanaryPhase.JoinedMuted;
-            EnqueueLogLocked(
-                "Stage 2 muted ChatControl canary joined the existing PartyNetwork. " +
-                "Input remains muted and chat permissions remain None.");
+            EnqueueLogLocked(_enableVoiceTest
+                ? "Stage 2 muted ChatControl canary joined the existing PartyNetwork. Input remains muted; " +
+                  "Stage 3 microphone permissions wait for a remote Mod ChatControl on this same network."
+                : "Stage 2 muted ChatControl canary joined the existing PartyNetwork. " +
+                  "Input remains muted and chat permissions remain None.");
         }
     }
 
@@ -789,7 +1040,11 @@ internal sealed class PartyChatControlCanary : IDisposable
         CanaryWorkItem work;
         lock (_stateSync)
         {
-            if (_disposed != 0 || _suspended || !_nativeCallsAllowed || _workScheduled != 0)
+            if (_disposed != 0 ||
+                _suspended ||
+                !_nativeCallsAllowed ||
+                _stateBatchActive ||
+                _workScheduled != 0)
                 return;
 
             work = GetNextWorkLocked();
@@ -812,6 +1067,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                 case CanaryWorkKind.Destroy:
                     _destroyQueued = true;
                     _phase = PartyChatControlCanaryPhase.Destroying;
+                    break;
+                case CanaryWorkKind.GrantVoicePermissions:
+                case CanaryWorkKind.ApplyPushToTalk:
                     break;
             }
         }
@@ -871,10 +1129,39 @@ internal sealed class PartyChatControlCanary : IDisposable
             return CaptureWorkLocked(CanaryWorkKind.Connect);
         }
 
+        if (_enableVoiceTest &&
+            (_phase == PartyChatControlCanaryPhase.JoinedMuted ||
+             _phase == PartyChatControlCanaryPhase.VoiceReady) &&
+            _joinedObserved &&
+            !_networkLeaving &&
+            _localChatControl != nint.Zero)
+        {
+            foreach (var remoteChatControl in _remoteChatControls)
+            {
+                if (!_permissionedRemoteChatControls.Contains(remoteChatControl))
+                {
+                    return CaptureWorkLocked(
+                        CanaryWorkKind.GrantVoicePermissions,
+                        targetChatControl: remoteChatControl);
+                }
+            }
+
+            var shouldUnmute = ShouldInputBeUnmutedLocked();
+            if (shouldUnmute != _inputUnmuted)
+            {
+                return CaptureWorkLocked(
+                    CanaryWorkKind.ApplyPushToTalk,
+                    unmuteInput: shouldUnmute);
+            }
+        }
+
         return default;
     }
 
-    private CanaryWorkItem CaptureWorkLocked(CanaryWorkKind kind) =>
+    private CanaryWorkItem CaptureWorkLocked(
+        CanaryWorkKind kind,
+        nint targetChatControl = default,
+        bool unmuteInput = false) =>
         new(
             kind,
             _generation,
@@ -882,7 +1169,9 @@ internal sealed class PartyChatControlCanary : IDisposable
             _network,
             _localUser,
             _localDevice,
-            _localChatControl);
+            _localChatControl,
+            targetChatControl,
+            unmuteInput);
 
     private void ExecuteWork(CanaryWorkItem work)
     {
@@ -907,13 +1196,44 @@ internal sealed class PartyChatControlCanary : IDisposable
                     case CanaryWorkKind.Destroy:
                         ExecuteDestroy(work);
                         break;
+                    case CanaryWorkKind.GrantVoicePermissions:
+                        ExecuteGrantVoicePermissions(work);
+                        break;
+                    case CanaryWorkKind.ApplyPushToTalk:
+                        ExecutePushToTalk(work);
+                        break;
                 }
             }
         }
         catch (Exception exception)
         {
+            if (work.ChatControl != nint.Zero)
+            {
+                lock (_apiCallSync)
+                {
+                    try
+                    {
+                        _ = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+                    }
+                    catch
+                    {
+                        // The terminal destroy fallback below remains the final privacy boundary.
+                    }
+                }
+            }
+
             lock (_stateSync)
-                FailClosedLocked($"deferred native action {work.Kind} threw: {exception.Message}");
+            {
+                if (work.ChatControl != nint.Zero && work.ChatControl == _localChatControl)
+                {
+                    RequestEmergencyVoiceTeardownLocked(
+                        $"deferred native action {work.Kind} threw {exception.GetType().Name}: {exception.Message}");
+                }
+                else
+                {
+                    FailClosedLocked($"deferred native action {work.Kind} threw: {exception.Message}");
+                }
+            }
         }
         finally
         {
@@ -967,6 +1287,11 @@ internal sealed class PartyChatControlCanary : IDisposable
             }
             _localDevice = localDevice;
             _localChatControl = chatControl;
+            _inputUnmuted = false;
+            _microphoneMayBeOpen = false;
+            _pushToTalkPressed = false;
+            _remoteChatControls.Clear();
+            _permissionedRemoteChatControls.Clear();
         }
 
         result = _api.SetAudioInputMuted(chatControl, muted: true);
@@ -1009,7 +1334,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                 $"Stage 2 canary creation queued on existing manager/network/device: manager={Hex(work.Manager)}, " +
                 $"network={Hex(work.Network)}, localUser={Hex(work.LocalUser)}, device={Hex(localDevice)}, " +
                 $"chatControl={Hex(chatControl)}. Input mute was set and verified before system-default I/O selection; " +
-                "PartyChatControlSetPermissions is not bound or called.");
+                (_enableVoiceTest
+                    ? "microphone permissions remain None until a remote Mod ChatControl joins this network."
+                    : "PartyChatControlSetPermissions will not be called."));
         }
     }
 
@@ -1033,9 +1360,166 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
     }
 
+    private void ExecuteGrantVoicePermissions(CanaryWorkItem work)
+    {
+        var result = _api.SetPermissions(
+            work.ChatControl,
+            work.TargetChatControl,
+            MicrophoneVoicePermissions);
+        if (result != Success)
+        {
+            _ = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+            lock (_stateSync)
+            {
+                if (IsWorkCurrentLocked(work))
+                {
+                    RequestEmergencyVoiceTeardownLocked(
+                        $"PartyChatControlSetPermissions(microphone send/receive) returned 0x{result:X8}");
+                }
+            }
+            return;
+        }
+
+        lock (_stateSync)
+        {
+            if (!IsWorkCurrentLocked(work))
+                return;
+
+            _permissionedRemoteChatControls.Add(work.TargetChatControl);
+            _phase = PartyChatControlCanaryPhase.VoiceReady;
+            EnqueueLogLocked(
+                $"Stage 3 voice test permissions granted for remote ChatControl={Hex(work.TargetChatControl)} " +
+                $"on network={Hex(work.Network)}: SendMicrophoneAudio|ReceiveMicrophoneAudio (0x0005). " +
+                "Input remains muted until U is held.");
+        }
+    }
+
+    private void ExecutePushToTalk(CanaryWorkItem work)
+    {
+        if (work.UnmuteInput)
+        {
+            lock (_stateSync)
+            {
+                if (!IsWorkCurrentLocked(work))
+                    return;
+
+                // Set this before touching Party. Another thread can now fail closed without a
+                // window where native input is open but the managed state still says muted.
+                _microphoneMayBeOpen = true;
+            }
+        }
+
+        var desiredMuted = !work.UnmuteInput;
+        var setResult = _api.SetAudioInputMuted(work.ChatControl, desiredMuted);
+        var observedMuted = true;
+        var verifyResult = setResult == Success
+            ? _api.GetAudioInputMuted(work.ChatControl, out observedMuted)
+            : uint.MaxValue;
+        if (setResult != Success || verifyResult != Success || observedMuted != desiredMuted)
+        {
+            var emergencyMuteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+            lock (_stateSync)
+            {
+                if (work.ChatControl == _localChatControl)
+                {
+                    if (emergencyMuteResult == Success)
+                        _microphoneMayBeOpen = false;
+                    RequestEmergencyVoiceTeardownLocked(
+                        $"push-to-talk mute transition failed: requestedMuted={desiredMuted}, " +
+                        $"set=0x{setResult:X8}, verify=0x{verifyResult:X8}, observedMuted={observedMuted}, " +
+                        $"emergencyMute=0x{emergencyMuteResult:X8}");
+                }
+            }
+            return;
+        }
+
+        var staleUnmute = false;
+        lock (_stateSync)
+        {
+            if (!IsWorkCurrentLocked(work))
+            {
+                staleUnmute = work.UnmuteInput;
+            }
+            else
+            {
+                _inputUnmuted = work.UnmuteInput;
+                _microphoneMayBeOpen = work.UnmuteInput;
+                EnqueueLogLocked(work.UnmuteInput
+                    ? "Stage 3 push-to-talk microphone UNMUTED while U is held."
+                    : "Stage 3 push-to-talk microphone muted.");
+            }
+        }
+
+        if (!staleUnmute)
+            return;
+
+        var staleMuteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+        lock (_stateSync)
+        {
+            if (staleMuteResult == Success)
+            {
+                _inputUnmuted = false;
+                _microphoneMayBeOpen = false;
+            }
+            else if (work.ChatControl == _localChatControl)
+            {
+                RequestEmergencyVoiceTeardownLocked(
+                    $"stale push-to-talk unmute could not be reversed: mute=0x{staleMuteResult:X8}");
+            }
+        }
+    }
+
     private void ExecuteDisconnect(CanaryWorkItem work)
     {
-        _ = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+        var muteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+        if (muteResult != Success)
+        {
+            // Do not wait on an asynchronous disconnect while input may still be open. Party's
+            // DestroyChatControl contract disconnects the control from every network as part of
+            // terminal destruction, which is the shortest available fail-closed path here.
+            var destroyResult = _api.DestroyChatControl(
+                work.LocalDevice,
+                work.ChatControl,
+                _destroyToken);
+            lock (_stateSync)
+            {
+                if (!IsWorkCurrentLocked(work))
+                    return;
+
+                _disconnectQueued = false;
+                _pushToTalkPressed = false;
+                _remoteChatControls.Clear();
+                _permissionedRemoteChatControls.Clear();
+                _sessionFaulted = true;
+                _joinedObserved = false;
+                _networkLeaving = true;
+                _teardownRequested = true;
+
+                if (destroyResult == Success)
+                {
+                    _destroyQueued = true;
+                    _destroyCallBegan = true;
+                    _phase = PartyChatControlCanaryPhase.Destroying;
+                    EnqueueLogLocked(
+                        $"Stage 3 disconnect mute returned 0x{muteResult:X8}; " +
+                        "local ChatControl destruction was queued immediately instead of waiting unmuted.");
+                }
+                else
+                {
+                    _destroyQueued = false;
+                    _teardownRequested = false;
+                    _nativeCallsAllowed = false;
+                    _phase = PartyChatControlCanaryPhase.Disabled;
+                    _generation++;
+                    EnqueueLogLocked(
+                        $"Stage 3 disconnect mute returned 0x{muteResult:X8} and emergency " +
+                        $"PartyDeviceDestroyChatControl returned 0x{destroyResult:X8}; " +
+                        "canary calls stopped and Party owns final cleanup.");
+                }
+            }
+            return;
+        }
+
         var result = _api.DisconnectChatControl(work.Network, work.ChatControl, _disconnectToken);
         if (result != Success)
         {
@@ -1058,13 +1542,17 @@ internal sealed class PartyChatControlCanary : IDisposable
         lock (_stateSync)
         {
             if (IsWorkCurrentLocked(work))
+            {
+                _inputUnmuted = false;
+                _microphoneMayBeOpen = false;
                 EnqueueLogLocked("Stage 2 DisconnectChatControl queued; awaiting left-network event.");
+            }
         }
     }
 
     private void ExecuteDestroy(CanaryWorkItem work)
     {
-        _ = _api.SetAudioInputMuted(work.ChatControl, muted: true);
+        var muteResult = _api.SetAudioInputMuted(work.ChatControl, muted: true);
         var result = _api.DestroyChatControl(work.LocalDevice, work.ChatControl, _destroyToken);
         if (result != Success)
         {
@@ -1083,6 +1571,11 @@ internal sealed class PartyChatControlCanary : IDisposable
         {
             if (IsWorkCurrentLocked(work))
             {
+                if (muteResult == Success)
+                {
+                    _inputUnmuted = false;
+                    _microphoneMayBeOpen = false;
+                }
                 _destroyCallBegan = true;
                 EnqueueLogLocked("Stage 2 DestroyChatControl queued; awaiting completed and destroyed events.");
             }
@@ -1097,6 +1590,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             _sessionFaulted = true;
             if (hasOwnedChatControl && _localChatControl != nint.Zero)
             {
+                _pushToTalkPressed = false;
                 _teardownRequested = true;
                 _joinedObserved = false;
                 _networkLeaving = true;
@@ -1110,9 +1604,28 @@ internal sealed class PartyChatControlCanary : IDisposable
 
     private void RequestTeardownLocked(string reason)
     {
-        EnqueueLogLocked($"Stage 2 canary validation failed: {reason}; cleanup requested while muted.");
+        _pushToTalkPressed = false;
+        EnqueueLogLocked(
+            $"Stage 2 canary validation failed: {reason}; cleanup requested with microphone mute enforced.");
         _sessionFaulted = true;
         _teardownRequested = _localChatControl != nint.Zero;
+        if (!_teardownRequested)
+            _phase = PartyChatControlCanaryPhase.Disabled;
+    }
+
+    private void RequestEmergencyVoiceTeardownLocked(string reason)
+    {
+        _pushToTalkPressed = false;
+        _inputUnmuted = false;
+        _remoteChatControls.Clear();
+        _permissionedRemoteChatControls.Clear();
+        _sessionFaulted = true;
+        _teardownRequested = _localChatControl != nint.Zero;
+        _joinedObserved = false;
+        _networkLeaving = true;
+        EnqueueLogLocked(
+            $"Stage 3 voice test failed closed: {reason}; microphone was re-muted best-effort and " +
+            "local ChatControl destruction was requested.");
         if (!_teardownRequested)
             _phase = PartyChatControlCanaryPhase.Disabled;
     }
@@ -1120,11 +1633,26 @@ internal sealed class PartyChatControlCanary : IDisposable
     private void FailClosedLocked(string reason)
     {
         _sessionFaulted = true;
-        _nativeCallsAllowed = false;
-        _teardownRequested = false;
+        _pushToTalkPressed = false;
         _phase = PartyChatControlCanaryPhase.Disabled;
         _generation++;
-        EnqueueLogLocked($"Stage 2 canary disabled (fail-closed): {reason}.");
+        if ((_inputUnmuted || _microphoneMayBeOpen) &&
+            _localChatControl != nint.Zero &&
+            !_suspended)
+        {
+            _teardownRequested = true;
+            _joinedObserved = false;
+            _networkLeaving = true;
+            EnqueueLogLocked(
+                $"Stage 3 voice test failed closed while the microphone was open: {reason}; " +
+                "emergency mute and local ChatControl destruction were requested.");
+        }
+        else
+        {
+            _nativeCallsAllowed = false;
+            _teardownRequested = false;
+            EnqueueLogLocked($"Stage 2 canary disabled (fail-closed): {reason}.");
+        }
     }
 
     private bool IsWorkCurrent(CanaryWorkItem work)
@@ -1133,16 +1661,40 @@ internal sealed class PartyChatControlCanary : IDisposable
             return IsWorkCurrentLocked(work);
     }
 
-    private bool IsWorkCurrentLocked(CanaryWorkItem work) =>
-        _disposed == 0 &&
-        !_suspended &&
-        _nativeCallsAllowed &&
-        work.Generation == _generation &&
-        work.Manager == _manager &&
-        (work.Network == nint.Zero || work.Network == _network) &&
-        (work.LocalUser == nint.Zero || work.LocalUser == _localUser) &&
-        (work.LocalDevice == nint.Zero || work.LocalDevice == _localDevice) &&
-        (work.ChatControl == nint.Zero || work.ChatControl == _localChatControl);
+    private bool IsWorkCurrentLocked(CanaryWorkItem work)
+    {
+        if (_disposed != 0 ||
+            _suspended ||
+            !_nativeCallsAllowed ||
+            _stateBatchActive ||
+            work.Generation != _generation ||
+            work.Manager != _manager ||
+            (work.Network != nint.Zero && work.Network != _network) ||
+            (work.LocalUser != nint.Zero && work.LocalUser != _localUser) ||
+            (work.LocalDevice != nint.Zero && work.LocalDevice != _localDevice) ||
+            (work.ChatControl != nint.Zero && work.ChatControl != _localChatControl))
+        {
+            return false;
+        }
+
+        if (work.Kind == CanaryWorkKind.GrantVoicePermissions &&
+            !_remoteChatControls.Contains(work.TargetChatControl))
+        {
+            return false;
+        }
+
+        return work.Kind != CanaryWorkKind.ApplyPushToTalk ||
+               work.UnmuteInput == ShouldInputBeUnmutedLocked();
+    }
+
+    private bool ShouldInputBeUnmutedLocked() =>
+        _enableVoiceTest &&
+        _pushToTalkPressed &&
+        !_sessionFaulted &&
+        !_networkLeaving &&
+        _joinedObserved &&
+        _phase == PartyChatControlCanaryPhase.VoiceReady &&
+        _permissionedRemoteChatControls.Count != 0;
 
     private void BeginNewSessionLocked(nint network, nint localUser)
     {
@@ -1168,6 +1720,13 @@ internal sealed class PartyChatControlCanary : IDisposable
         _destroyedObserved = false;
         _teardownRequested = false;
         _preLeaveObserved = false;
+        _pushToTalkPressed = false;
+        _inputUnmuted = false;
+        _microphoneMayBeOpen = false;
+        _stateBatchActive = false;
+        _stateBatchManager = nint.Zero;
+        _remoteChatControls.Clear();
+        _permissionedRemoteChatControls.Clear();
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
@@ -1198,6 +1757,13 @@ internal sealed class PartyChatControlCanary : IDisposable
         _destroyedObserved = false;
         _teardownRequested = false;
         _preLeaveObserved = false;
+        _pushToTalkPressed = false;
+        _inputUnmuted = false;
+        _microphoneMayBeOpen = false;
+        _stateBatchActive = false;
+        _stateBatchManager = nint.Zero;
+        _remoteChatControls.Clear();
+        _permissionedRemoteChatControls.Clear();
         _phase = PartyChatControlCanaryPhase.WaitingForAuthenticatedSession;
         _generation++;
     }
@@ -1221,6 +1787,8 @@ internal sealed class PartyChatControlCanary : IDisposable
         Connect,
         Disconnect,
         Destroy,
+        GrantVoicePermissions,
+        ApplyPushToTalk,
     }
 
     private readonly record struct CanaryWorkItem(
@@ -1230,5 +1798,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         nint Network,
         nint LocalUser,
         nint LocalDevice,
-        nint ChatControl);
+        nint ChatControl,
+        nint TargetChatControl,
+        bool UnmuteInput);
 }

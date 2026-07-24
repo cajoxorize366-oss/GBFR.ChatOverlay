@@ -70,7 +70,8 @@ public class Mod : ModBase // <= Do not Remove.
                     _hooks,
                     message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
                     enableLifecycleLogging: _configuration.EnablePartyLifecycleProbe,
-                    enableMutedChatControlCanary: _configuration.EnableMutedPartyChatControlCanary);
+                    enableMutedChatControlCanary: _configuration.EnableMutedPartyChatControlCanary,
+                    enableVoiceTest: _configuration.EnableVoiceInput);
                 _partyLifecycleProbe.Initialize();
             }
             catch (Exception exception)
@@ -85,6 +86,14 @@ public class Mod : ModBase // <= Do not Remove.
             "System",
             "GBFR Chat Overlay loaded. Press Y to open chat.",
             ChatMessageKind.System);
+        if (_partyLifecycleProbe?.IsVoiceTestAvailable == true)
+        {
+            history.Add(
+                "System",
+                "EXPERIMENTAL PARTY VOICE TEST: both clients need this package. Hold U to talk; " +
+                "the microphone is muted at every other time.",
+                ChatMessageKind.System);
+        }
 
         IChatTransport transport = new LocalPreviewChatTransport();
         IIncomingChatSource? incoming = null;
@@ -144,6 +153,9 @@ public class Mod : ModBase // <= Do not Remove.
             _hooks,
             _overlay.TryRequestOpen,
             _overlay.ShouldCaptureKeyboard,
+            () => _configuration.EnableVoiceInput &&
+                  _partyLifecycleProbe?.IsVoiceTestAvailable == true,
+            pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
@@ -168,18 +180,18 @@ public class Mod : ModBase // <= Do not Remove.
 
     public override void Suspend()
     {
+        _directInputKeyboard?.Suspend();
         _partyLifecycleProbe?.Suspend();
         _nativeChatBridge?.Suspend();
-        _directInputKeyboard?.Suspend();
         _overlay?.Suspend();
     }
 
     public override void Resume()
     {
         _overlay?.Resume();
-        _directInputKeyboard?.Resume();
-        _nativeChatBridge?.Resume();
         _partyLifecycleProbe?.Resume();
+        _nativeChatBridge?.Resume();
+        _directInputKeyboard?.Resume();
     }
     #endregion
 

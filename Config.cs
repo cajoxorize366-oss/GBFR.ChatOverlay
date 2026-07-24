@@ -22,7 +22,7 @@ public class Config : Configurable<Config>
     public bool EnablePartyLifecycleProbe { get; set; } = true;
 
     [DisplayName("Enable Muted Party ChatControl Canary")]
-    [Description("Stage 2 validation: create one muted ChatControl on the existing Party session without granting chat permissions. Both clients need the mod. Changing this setting requires restarting the mod.")]
+    [Description("Required Stage 2 lifecycle foundation: create one initially muted ChatControl on the existing Party session. Both clients need the mod. Changing this setting requires restarting the mod.")]
     [DefaultValue(true)]
     public bool EnableMutedPartyChatControlCanary { get; set; } = true;
 
@@ -59,10 +59,10 @@ public class Config : Configurable<Config>
     [SliderControlParams(minimum: 0.0, maximum: 1.0)]
     public double BackgroundOpacity { get; set; } = 0.55;
 
-    [DisplayName("Voice Input")]
-    [Description("Reserved for the PlayFab Party push-to-talk milestone.")]
-    [DefaultValue(false)]
-    public bool EnableVoiceInput { get; set; }
+    [DisplayName("Experimental Party Voice Test (Hold U)")]
+    [Description("PREVIEW: grant microphone-only send/receive permissions to remote Mod ChatControls on the same PartyNetwork. Hold U to talk; release, focus loss, input timeout and session exit force mute. Both clients need this package. Restart required.")]
+    [DefaultValue(true)]
+    public bool EnableVoiceInput { get; set; } = true;
 }
 
 /// <summary>

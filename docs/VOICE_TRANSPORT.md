@@ -110,21 +110,24 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 2: muted ChatControl canary
 
-- Implemented in `Native/PartyChatControlCanary.cs` and enabled by default for the current external validation build. Two-client creation, connection and remote ChatControl discovery have been confirmed; explicit local teardown-event validation remains outstanding for the pre-leave cleanup build.
+- Implemented in `Native/PartyChatControlCanary.cs` and enabled by default. Two-client creation, connection, remote ChatControl discovery and pre-leave local teardown events have been confirmed on both host and guest.
 - Create one local ChatControl for the existing authenticated local user.
 - Keep input muted before selecting system-default input/output.
 - Connect it only to the already joined PartyNetwork.
 - Observe local completion plus remote `ChatControlCreated`/`ChatControlJoinedNetwork` events.
-- Do not grant audio permissions yet; verify join/leave and cleanup on both clients.
+- The Stage 2 portion grants no audio permissions; it establishes and validates join/leave ownership before Stage 3 is allowed to run.
 - Native work discovered from state changes is deferred until after the game's original `PartyFinishProcessingStateChanges` returns. The canary additionally detours Relink's existing `PartyNetworkLeaveNetwork` call: before entering the original function, it queues destruction of the still-muted local ChatControl so Party can return `ChatControlLeftNetwork`, destroy completion and destroyed events through Relink's normal state-change pump. It never starts or consumes a state-change batch itself.
-- The canary binds no permission or endpoint-send export and rejects manager/session ambiguity, malformed batches, unknown state types, pre-existing local ChatControls and failed mute verification.
+- The canary never binds an endpoint-send export and rejects manager/session ambiguity, malformed batches, unknown state types, pre-existing local ChatControls and failed mute verification.
 
 ### Stage 3: push to talk
 
-- Negotiate the Mod capability through ChatControl presence, not through gameplay endpoint packets.
-- Grant only microphone send/receive permissions between Mod ChatControls.
-- Keep the microphone muted by default; unmute while the configured push-to-talk control is held.
-- Add per-player mute, input/output device selection, volume, disconnect cleanup and clear UI status.
+- The first external voice test is implemented and enabled by default in `0.3.0-preview.1`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
+- Negotiate Mod capability through a remote ChatControl joining the same existing PartyNetwork, not through gameplay endpoint packets.
+- Call `PartyChatControlSetPermissions(local, remote, 0x0005)` for each observed Mod peer. The only enabled bits are `SendMicrophoneAudio` (`0x0001`) and `ReceiveMicrophoneAudio` (`0x0004`); text-to-speech, text-chat and transcription permissions remain unset.
+- Keep the microphone synchronously muted and verified by default. DirectInput consumes `U` for the voice test; holding it unsets Party input mute and releasing it restores mute.
+- A 350 ms input heartbeat watchdog forces release after focus loss, lost key-up or stalled keyboard polling. Mod suspend, remote-capability loss, pre-leave cleanup and terminal failure also force a best-effort mute before ChatControl destruction.
+- Party calls are fenced while Relink owns a state-change batch. Permission and mute work runs only after the original `PartyFinishProcessingStateChanges` has returned.
+- Input/output device selection, controller push-to-talk, per-player volume/mute and final UI status remain future work. This preview uses Party's system-default input and output devices.
 
 ## Safety and service boundary
 

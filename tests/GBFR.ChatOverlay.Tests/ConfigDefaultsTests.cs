@@ -18,6 +18,12 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
+    public void ExperimentalPartyVoiceTest_IsEnabledForPreviewPackage()
+    {
+        Assert.True(new Config().EnableVoiceInput);
+    }
+
+    [Fact]
     public void Configurator_UsesExplicitConfigurationDirectory()
     {
         var configured = Path.Combine(Path.GetTempPath(), "gbfr-explicit-config");

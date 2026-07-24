@@ -42,14 +42,14 @@ The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.
 - Hashed quick-chat/stamp records are intentionally ignored by the incoming bridge until their text resolver is hooked.
 
-## Optional Party lifecycle probe
+## Party lifecycle foundation
 
-The PlayFab Party probe is enabled by default for this validation build and never sends Party data. Restart the Mod after changing `Enable Party Lifecycle Probe`; disable it after preserving the private-session capture.
+The PlayFab Party lifecycle probe is enabled by default. The probe itself is observation-only; the separately configured Stage 2/3 ChatControl canary makes the Party calls described below. Restart the Mod after changing either Party option.
 
 Expected startup evidence:
 
 ```text
-Party lifecycle probe attached at 0x...; observation only, no Party calls or sends.
+Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. Microphone stays muted unless U is held.
 Party manager captured from PartyInitialize: 0x....
 ```
 
@@ -63,43 +63,65 @@ Party lifecycle state EndpointCreated (12).
 
 Leaving should produce endpoint, device and network leave/destroy events. `EndpointMessageReceived`, text and transcription payload events are deliberately filtered and must not appear in the probe log.
 
-Disable the probe after collecting both logs. If enabling it changes matchmaking, causes a crash, or prevents normal chat, disable the Mod and preserve the Reloaded-II log; do not proceed to the ChatControl canary.
+The one-time `PartyStartProcessingStateChanges returned error 0x00001000; further errors are suppressed.` line at startup is not by itself a failed test. It can occur before Relink supplies the authenticated session. Judge the run by the later authenticated, endpoint, ChatControl and permission success lines. If enabling the Mod changes matchmaking, causes a crash, or prevents normal chat, disable it and preserve the full Reloaded-II log.
 
-## Stage 2 muted ChatControl canary
+## Stage 2 ChatControl lifecycle
 
-The current validation build enables `Enable Muted Party ChatControl Canary` by default. Test only in a private two-client session with the same package installed on both sides. This stage selects the system-default input/output only after synchronously setting and verifying input mute. It never binds or calls `PartyChatControlSetPermissions`, so no peer is authorized to send or receive voice.
+The current validation build enables `Enable Muted Party ChatControl Canary` by default. Test only in a private two-client session with the same package installed on both sides. The canary selects the system-default input/output only after synchronously setting and verifying input mute. Voice permissions are not granted until the Stage 2 join sequence is complete and a remote Mod ChatControl has been observed on the same PartyNetwork.
 
 On each client, the local path should include lines equivalent to:
 
 ```text
-Party lifecycle/Stage 2 canary attached at 0x...; one muted ChatControl may join the existing PartyNetwork, with no chat permissions granted.
+Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. Microphone stays muted unless U is held.
 Stage 2 captured authenticated existing session: network=0x..., localUser=0x....
 Stage 2 confirmed Relink's existing gameplay endpoint before canary creation: endpoint=0x....
-Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before system-default I/O selection; PartyChatControlSetPermissions is not bound or called.
+Stage 2 canary creation queued on existing manager/network/device: ... Input mute was set and verified before system-default I/O selection; microphone permissions remain None until a remote Mod ChatControl joins this network.
 Stage 2 CreateChatControlCompleted: result=0, ...
 Stage 2 ChatControlCreated (local canary): chatControl=0x....
 Stage 2 SetChatAudioInputCompleted: result=0, ... selectionType=1.
 Stage 2 SetChatAudioOutputCompleted: result=0, ... selectionType=1.
 Stage 2 ConnectChatControlCompleted: result=0, ...
 Stage 2 ChatControlJoinedNetwork (local canary): network=0x..., chatControl=0x....
-Stage 2 muted ChatControl canary joined the existing PartyNetwork. Input remains muted and chat permissions remain None.
+Stage 2 muted ChatControl canary joined the existing PartyNetwork. Input remains muted; Stage 3 microphone permissions wait for a remote Mod ChatControl on this same network.
 ```
 
-After both clients are present, each side must also observe its peer without changing permissions:
+After both clients are present, each side must observe its peer:
 
 ```text
 Stage 2 ChatControlCreated (remote/other): chatControl=0x....
 Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x....
 ```
 
-Leave the session normally on both clients. For each successfully joined local canary, the leave path should first include a line equivalent to:
+## Stage 3 two-client realtime voice test
+
+Prerequisites: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Party Voice Test (Hold U)` enabled, and select the intended microphone/speaker as the Windows system defaults before starting Relink. Use a private two-client room and label the saved logs as client A and client B.
+
+Before touching `U`, both logs must contain a grant for the remote control discovered above:
+
+```text
+Stage 3 voice test permissions granted for remote ChatControl=0x... on network=0x...: SendMicrophoneAudio|ReceiveMicrophoneAudio (0x0005). Input remains muted until U is held.
+```
+
+Run this exact test in both directions:
+
+1. Client A holds `U`, speaks a short phrase, then releases `U`.
+2. A must log `Stage 3 push-to-talk microphone UNMUTED while U is held.` on key-down and `Stage 3 push-to-talk microphone muted.` on release.
+3. Client B must hear the phrase only during A's hold interval. Party does not expose a useful “audio was heard” state-change here, so the receiving result is a manual observation rather than a log line.
+4. Repeat with B speaking and A listening. Both directions must pass; one-way audio is a failed test.
+5. While holding `U`, switch focus away from the game without delivering a normal key-up. Within roughly 350 ms, the speaker should log `Stage 3 push-to-talk heartbeat timed out; microphone mute was forced.` and the peer must stop hearing audio. Return to the game and repeat a normal hold/release once to prove recovery.
+
+`U` is consumed by the Mod while this preview is available, so it should not reach Relink. The microphone must remain silent before the permission log, while `U` is released, after focus loss, and after the last remote Mod ChatControl leaves.
+
+## Session-exit and cleanup test
+
+After bidirectional voice passes, have A leave the room normally while B remains. For the strongest boundary check, A may hold `U` and use mouse/controller navigation to trigger leave; the pre-leave detour must mute before destruction. For each successfully joined local canary, the leave path should first include a line equivalent to:
 
 ```text
 Stage 2 pre-leave DestroyChatControl queued before Relink PartyNetworkLeaveNetwork: network=0x..., chatControl=0x...; awaiting local left/completed/destroyed events from the game's state-change pump.
 ```
 
-Then preserve `ChatControlLeftNetwork (local canary)`, `DestroyChatControlCompleted: result=0`, `ChatControlDestroyed (local canary)`, `Stage 2 cleanup complete`, and `PartyCleanup completed`. Event interleaving can differ, but the handles in the local completion lines must match the locally owned canary. The peer should independently observe the departing control as `remote/other`.
+Then preserve `ChatControlLeftNetwork (local canary)`, `DestroyChatControlCompleted: result=0`, `ChatControlDestroyed (local canary)`, `Stage 2 cleanup complete`, and `PartyCleanup completed`. Event interleaving can differ, but the handles in the local completion lines must match the locally owned canary. B should independently observe A as `ChatControlLeftNetwork (remote/other)` and/or `ChatControlDestroyed (remote/other)` and must stop hearing A immediately. Repeat by recreating the room and swapping host/guest roles if possible.
 
 If `Stage 2 manager cleanup reached before local ChatControl teardown completed` appears, preserve the full diagnostic fields. `PartyCleanup completed` still proves the manager's safety fallback ran, but the strict Stage 2 teardown-event check has not passed.
 
-The test fails if either client logs `Stage 2 canary disabled (fail-closed)`, a nonzero Stage 2 result/error, a manager ownership conflict, missing mute verification, or a second local ChatControl. It also fails if matchmaking, native text chat or rendering changes. There must be no permission grant, audio unmute, second `PartyInitialize`, new gameplay endpoint, or `PartyEndpointSendMessage` action from this Mod. Disable `Enable Muted Party ChatControl Canary`, restart, and preserve both full logs after any failure.
+The test fails if either client lacks the `0x0005` permission line, logs `Stage 3 voice test failed closed`, logs `Stage 2 canary disabled (fail-closed)`, reports a nonzero Party operation, or cannot complete the local cleanup chain. It also fails for one-way/no audio, audio while `U` is released, audio continuing after focus loss/peer departure, a manager ownership conflict, a second local ChatControl, changed matchmaking, broken native text chat or rendering. The Mod must not call `PartyEndpointSendMessage`, initialize a second Party manager or create another gameplay endpoint. Disable `Experimental Party Voice Test`, restart, and preserve both complete logs plus approximate key-down/key-up/leave times after any failure.

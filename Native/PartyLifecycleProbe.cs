@@ -20,6 +20,7 @@ public sealed class PartyLifecycleProbe
     private readonly Action<string> _log;
     private readonly bool _enableLifecycleLogging;
     private readonly bool _enableMutedChatControlCanary;
+    private readonly bool _enableVoiceTest;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentQueue<string> _pendingLogs = new();
 
@@ -42,15 +43,19 @@ public sealed class PartyLifecycleProbe
         ReloadedHooksApi hooks,
         Action<string> log,
         bool enableLifecycleLogging = true,
-        bool enableMutedChatControlCanary = false)
+        bool enableMutedChatControlCanary = false,
+        bool enableVoiceTest = false)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _enableLifecycleLogging = enableLifecycleLogging;
         _enableMutedChatControlCanary = enableMutedChatControlCanary;
+        _enableVoiceTest = enableVoiceTest;
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
+
+    public bool IsVoiceTestAvailable => IsInitialized && _enableVoiceTest && _chatControlCanary is not null;
 
     public void Initialize()
     {
@@ -99,7 +104,8 @@ public sealed class PartyLifecycleProbe
                     {
                         _chatControlCanary = new PartyChatControlCanary(
                             new PartyNativeApi(module),
-                            EnqueueLog);
+                            EnqueueLog,
+                            enableVoiceTest: _enableVoiceTest);
                     }
                     catch (Exception exception)
                     {
@@ -141,8 +147,11 @@ public sealed class PartyLifecycleProbe
                 Volatile.Write(ref _initialized, true);
                 _log(_chatControlCanary is null
                     ? $"Party lifecycle probe attached at 0x{(nuint)module:X}; observation only, no Party calls or sends."
-                    : $"Party lifecycle/Stage 2 canary attached at 0x{(nuint)module:X}; " +
-                      "one muted ChatControl may join the existing PartyNetwork, with no chat permissions granted.");
+                    : _enableVoiceTest
+                        ? $"Party lifecycle/Stage 3 voice test attached at 0x{(nuint)module:X}; " +
+                          "one ChatControl may join the existing PartyNetwork. Microphone stays muted unless U is held."
+                        : $"Party lifecycle/Stage 2 canary attached at 0x{(nuint)module:X}; " +
+                          "one muted ChatControl may join the existing PartyNetwork, with no chat permissions granted.");
             }
             catch
             {
@@ -185,6 +194,18 @@ public sealed class PartyLifecycleProbe
                 DisableHooks();
                 throw;
             }
+        }
+    }
+
+    public void SetPushToTalkPressed(bool pressed)
+    {
+        try
+        {
+            _chatControlCanary?.SetPushToTalkPressed(pressed);
+        }
+        catch (Exception exception)
+        {
+            LogInspectionFailureOnce(exception);
         }
     }
 
@@ -271,16 +292,30 @@ public sealed class PartyLifecycleProbe
         nint stateChangeCountOutput,
         nint stateChangesOutput)
     {
-        var result = _startProcessingHook!.OriginalFunction(
-            handle,
-            stateChangeCountOutput,
-            stateChangesOutput);
+        _chatControlCanary?.BeginStateChangeBatch(handle);
+        uint result;
+        try
+        {
+            result = _startProcessingHook!.OriginalFunction(
+                handle,
+                stateChangeCountOutput,
+                stateChangesOutput);
+        }
+        catch
+        {
+            _chatControlCanary?.CancelStateChangeBatch(handle);
+            throw;
+        }
 
         if (Volatile.Read(ref _suspended))
+        {
+            _chatControlCanary?.CancelStateChangeBatch(handle);
             return result;
+        }
 
         if (result != 0)
         {
+            _chatControlCanary?.CancelStateChangeBatch(handle);
             if (Interlocked.Exchange(ref _startFailureLogged, 1) == 0)
             {
                 EnqueueLog(
@@ -307,7 +342,16 @@ public sealed class PartyLifecycleProbe
         uint stateChangeCount,
         nint stateChanges)
     {
-        var result = _finishProcessingHook!.OriginalFunction(handle, stateChangeCount, stateChanges);
+        uint result;
+        try
+        {
+            result = _finishProcessingHook!.OriginalFunction(handle, stateChangeCount, stateChanges);
+        }
+        catch
+        {
+            _chatControlCanary?.CancelStateChangeBatch(handle);
+            throw;
+        }
         if (!Volatile.Read(ref _suspended) && result == 0)
         {
             try
@@ -318,6 +362,10 @@ public sealed class PartyLifecycleProbe
             {
                 LogInspectionFailureOnce(exception);
             }
+        }
+        else
+        {
+            _chatControlCanary?.CancelStateChangeBatch(handle);
         }
         if (!Volatile.Read(ref _suspended) &&
             result != 0 &&

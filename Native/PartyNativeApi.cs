@@ -2,6 +2,14 @@ using System.Runtime.InteropServices;
 
 namespace GBFR.ChatOverlay.Native;
 
+[Flags]
+internal enum PartyChatPermissionOptions : uint
+{
+    None = 0x0000,
+    SendMicrophoneAudio = 0x0001,
+    ReceiveMicrophoneAudio = 0x0004,
+}
+
 internal interface IPartyChatControlApi
 {
     uint GetLocalDevice(nint manager, out nint localDevice);
@@ -20,6 +28,11 @@ internal interface IPartyChatControlApi
 
     uint GetAudioInputMuted(nint localChatControl, out bool muted);
 
+    uint SetPermissions(
+        nint localChatControl,
+        nint targetChatControl,
+        PartyChatPermissionOptions permissions);
+
     uint SetSystemDefaultAudioInput(nint localChatControl, nint asyncIdentifier);
 
     uint SetSystemDefaultAudioOutput(nint localChatControl, nint asyncIdentifier);
@@ -32,7 +45,8 @@ internal interface IPartyChatControlApi
 /// <summary>
 /// Exact flat-C bindings from Party_c.h in Microsoft.PlayFab.PlayFabParty.Cpp.Windows 1.10.12.
 /// The caller supplies the already loaded, hash-verified game module. This class never loads or
-/// initializes another Party runtime and deliberately exposes no chat-permission API.
+/// initializes another Party runtime. The only exposed permission call is restricted by the caller
+/// to microphone send/receive; no text, TTS, transcription or endpoint-send API is bound.
 /// </summary>
 internal sealed class PartyNativeApi : IPartyChatControlApi
 {
@@ -44,6 +58,7 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     private readonly PartyDeviceDestroyChatControlDelegate _deviceDestroyChatControl;
     private readonly PartyChatControlSetAudioInputMutedDelegate _chatControlSetAudioInputMuted;
     private readonly PartyChatControlGetAudioInputMutedDelegate _chatControlGetAudioInputMuted;
+    private readonly PartyChatControlSetPermissionsDelegate _chatControlSetPermissions;
     private readonly PartyChatControlSetAudioInputDelegate _chatControlSetAudioInput;
     private readonly PartyChatControlSetAudioOutputDelegate _chatControlSetAudioOutput;
     private readonly PartyNetworkConnectChatControlDelegate _networkConnectChatControl;
@@ -72,6 +87,9 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         _chatControlGetAudioInputMuted = Bind<PartyChatControlGetAudioInputMutedDelegate>(
             verifiedPartyModule,
             "PartyChatControlGetAudioInputMuted");
+        _chatControlSetPermissions = Bind<PartyChatControlSetPermissionsDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlSetPermissions");
         _chatControlSetAudioInput = Bind<PartyChatControlSetAudioInputDelegate>(
             verifiedPartyModule,
             "PartyChatControlSetAudioInput");
@@ -120,6 +138,12 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         muted = nativeMuted != 0;
         return result;
     }
+
+    public uint SetPermissions(
+        nint localChatControl,
+        nint targetChatControl,
+        PartyChatPermissionOptions permissions) =>
+        _chatControlSetPermissions(localChatControl, targetChatControl, (uint)permissions);
 
     public uint SetSystemDefaultAudioInput(nint localChatControl, nint asyncIdentifier) =>
         _chatControlSetAudioInput(
@@ -178,6 +202,12 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
     private delegate uint PartyChatControlGetAudioInputMutedDelegate(
         nint localChatControl,
         out byte muted);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlSetPermissionsDelegate(
+        nint localChatControl,
+        nint targetChatControl,
+        uint permissions);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyChatControlSetAudioInputDelegate(

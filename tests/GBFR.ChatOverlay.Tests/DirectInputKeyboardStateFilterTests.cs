@@ -71,4 +71,73 @@ public sealed class DirectInputKeyboardStateFilterTests
         Assert.False(filter.Process(state, () => false, () => false));
         Assert.Equal(0x80, state[42]);
     }
+
+    [Fact]
+    public void Process_ReportsAndFiltersVoicePushToTalkWhileEnabled()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var reports = new List<bool>();
+        var state = new byte[256];
+        state[0x16] = 0x80;
+
+        var filtered = filter.Process(
+            state,
+            () => false,
+            () => false,
+            () => true,
+            reports.Add);
+
+        Assert.True(filtered);
+        Assert.Equal(0, state[0x16]);
+        Assert.Equal(new[] { true }, reports);
+
+        filtered = filter.Process(
+            state,
+            () => false,
+            () => false,
+            () => true,
+            reports.Add);
+
+        Assert.False(filtered);
+        Assert.Equal(new[] { true, false }, reports);
+    }
+
+    [Fact]
+    public void Process_DoesNotOpenMicrophoneWhileChatCapturesKeyboard()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var reports = new List<bool>();
+        var state = new byte[256];
+        state[0x16] = 0x80;
+
+        filter.Process(
+            state,
+            () => false,
+            () => true,
+            () => true,
+            reports.Add);
+
+        Assert.Equal(new[] { false }, reports);
+        Assert.All(state, value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public void Process_LeavesVoiceKeyForGameWhenVoiceTestIsDisabled()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var reports = new List<bool>();
+        var state = new byte[256];
+        state[0x16] = 0x80;
+
+        var filtered = filter.Process(
+            state,
+            () => false,
+            () => false,
+            () => false,
+            reports.Add);
+
+        Assert.False(filtered);
+        Assert.Equal(0x80, state[0x16]);
+        Assert.Equal(new[] { false }, reports);
+    }
 }

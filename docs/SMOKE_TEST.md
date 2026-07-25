@@ -36,6 +36,14 @@ After the chat field first becomes active, the log should also contain exactly o
 
 `Unicode` is also a valid window-kind result. On a Chinese ANSI window using Sogou or Microsoft Pinyin, code page `936` is expected. If Windows reactivates the game IME context while the chat field is open, one additional `Win32 IME candidate UI enabled ...` line is expected; its forwarded `WM_IME_SETCONTEXT` value must end with candidate bits `F`. It is supplementary evidence, not required on every chat open because the game keeps one top-level HWND active.
 
+When the IME opens its first readable candidate page, the log should contain:
+
+```text
+[gbfr.qol.chatoverlay] Win32 IME candidate fallback captured list 0: count=..., selection=..., pageStart=..., pageSize=...; candidates are now drawn inside the Overlay.
+```
+
+If the composition ends with `without an IMM32 candidate list`, preserve that complete line: it means this input method exposed only an external TSF/Qt UI and the fallback received no words to draw.
+
 ## Visual and input checks
 
 1. Stay on the title screen, save-selection screen, loading screen and a solo town with no online room. Confirm that no Overlay is drawn and pressing `Y`, `U` or `I` is left to the game.
@@ -43,7 +51,7 @@ After the chat field first becomes active, the log should also contain exactly o
 3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.2 bridge is connected.
 4. Press `Y` once. The input field should open without inserting the activation key itself.
 5. Enter `ABC123`, then use Microsoft Pinyin and Sogou to commit `我是`. The field must contain exactly `ABC123我是` once: `我` must never become `ÎÒ`, and Latin characters must not duplicate.
-6. While composing with Sogou, confirm that its candidate window is visible beside/below the chat field and follows it in windowed, borderless and fullscreen modes. Select candidates with both number keys and mouse; composition must remain active instead of disappearing on the candidate window's transient focus change.
+6. While composing with Sogou, confirm that the Overlay displays `候选：1.…` directly above the chat field, including brackets around the selected word. Select candidates with number keys, Space and normal IME paging; the fallback is display-only and intentionally does not simulate keys or mouse selection.
 7. Press Escape during an unfinished composition, reopen with `Y`, and type `我是` again. No pending lead byte, old composition or candidate window may leak into the new input session.
 8. In the online room, press Enter and confirm the other client receives the message.
 9. Have the second client send a free-text reply. Confirm it appears once in the Overlay history.
@@ -62,6 +70,7 @@ After the chat field first becomes active, the log should also contain exactly o
 - Do not mix individual DLLs from older packages. This build intentionally uses the same official `ImguiHookDx11`, prebuilt pinned CJK atlas and cached original WndProc as the proven Extra Sigil frontend; its fallback now selects `DefWindowProcA` or `DefWindowProcW` to match the actual game window.
 - If the Overlay renders but controls still respond, preserve the three DirectInput log lines; their presence distinguishes a state-filter bug from a missed hook.
 - If Chinese characters render as boxes, record the `CJK font loaded before DX11 hook initialization` line and Windows display language. If they become Latin-1 text such as `ÎÒ`, preserve the new `Win32 IME compatibility active` line, input-method name and complete Reloaded-II log.
+- If composition text appears but the in-overlay candidate row does not, preserve either `candidate notification did not expose a readable IMM32 list` or `composition ended without an IMM32 candidate list`. Their presence distinguishes an IMM32 parsing error from a TSF/Qt-only input method.
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.
 - Hashed quick-chat/stamp records are intentionally ignored by the incoming bridge until their text resolver is hooked.
 

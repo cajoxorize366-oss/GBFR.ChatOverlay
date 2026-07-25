@@ -36,6 +36,7 @@ public sealed class ChatOverlayHost
     private readonly Func<PartyVoiceUiStatus> _getVoiceUiStatus;
     private readonly Action<string> _log;
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
+    private ImeCandidateSnapshot? _imeCandidateSnapshot;
     private int _openRequested;
     private int _captureKeyboard;
     private int _swallowActivationKeyUntilRelease;
@@ -43,6 +44,11 @@ public sealed class ChatOverlayHost
     private int _imeCompatibilityLogged;
     private int _imeCandidateUiLogged;
     private int _imeDecodeFailureLogged;
+    private int _imeCandidateCaptureLogged;
+    private int _imeCandidateReadFailureLogged;
+    private int _imeCompositionWithoutCandidatesLogged;
+    private int _imeCompositionObserved;
+    private int _imeCandidateCapturedInComposition;
     private int _platformImeBridgeLogged;
     private int _renderThreadLogged;
     private int _onlineRoomGateFailureLogged;
@@ -85,6 +91,7 @@ public sealed class ChatOverlayHost
 
         Interlocked.Exchange(ref _captureKeyboard, 1);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+        ClearImeCandidateSnapshot();
         Interlocked.Exchange(ref _openRequested, 1);
         return true;
     }
@@ -131,6 +138,7 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+        ClearImeCandidateSnapshot();
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
@@ -153,6 +161,8 @@ public sealed class ChatOverlayHost
 
             _session.DrainIncoming();
             var configuration = _getConfiguration();
+            if (!configuration.EnableImeCandidateFallback)
+                ClearImeCandidateSnapshot();
             var onlineRoomActive = IsOnlineRoomActive();
             var previousOnlineRoomInactive = Interlocked.Exchange(
                 ref _onlineRoomWasInactive,
@@ -190,6 +200,7 @@ public sealed class ChatOverlayHost
                 _session.Composer.Cancel();
                 _releaseCaptureFrames = 2;
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+                ClearImeCandidateSnapshot();
                 _statusText = null;
             }
 
@@ -240,7 +251,7 @@ public sealed class ChatOverlayHost
                 return;
 
             DrawVoiceStatus();
-            DrawHistory(composerOpen);
+            DrawHistory(composerOpen, configuration.EnableImeCandidateFallback);
             if (composerOpen)
                 DrawComposer(openedThisFrame);
         }
@@ -260,9 +271,13 @@ public sealed class ChatOverlayHost
         ImGui.Separator();
     }
 
-    private void DrawHistory(bool composerOpen)
+    private void DrawHistory(bool composerOpen, bool imeCandidateFallbackEnabled)
     {
-        var childHeight = composerOpen ? -58.0f : 0.0f;
+        var candidateVisible = imeCandidateFallbackEnabled &&
+                               Volatile.Read(ref _imeCandidateSnapshot)?.Count > 0;
+        var childHeight = composerOpen
+            ? candidateVisible ? -104.0f : -58.0f
+            : 0.0f;
         using var childSize = CreateVector2(0.0f, childHeight);
         var began = ImGui.BeginChildStr(
             "##GBFRChatHistory",
@@ -296,6 +311,7 @@ public sealed class ChatOverlayHost
     private unsafe void DrawComposer(bool openedThisFrame)
     {
         ImGui.Separator();
+        DrawImeCandidateFallback();
         if (_focusInputNextFrame && !openedThisFrame)
         {
             ImGui.SetKeyboardFocusHere(0);
@@ -324,6 +340,7 @@ public sealed class ChatOverlayHost
                 Array.Clear(_inputBuffer);
                 _releaseCaptureFrames = 2;
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+                ClearImeCandidateSnapshot();
                 _statusText = null;
             }
             else
@@ -391,6 +408,7 @@ public sealed class ChatOverlayHost
         if (message == Win32ImeCompatibility.WmImeChar)
         {
             Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+            ClearImeCandidateSnapshot();
             if (unicodeWindow)
             {
                 ImGui.ImGuiIO_AddInputCharacterUTF16(
@@ -455,6 +473,129 @@ public sealed class ChatOverlayHost
         return true;
     }
 
+    private void ObserveImeUiMessage(nint windowHandle, uint message, nint wParam, nint lParam)
+    {
+        if (!_getConfiguration().EnableImeCandidateFallback)
+        {
+            ClearImeCandidateSnapshot();
+            return;
+        }
+
+        try
+        {
+            if (message == Win32ImeCompatibility.WmImeStartComposition)
+            {
+                ClearImeCandidateSnapshot();
+                Interlocked.Exchange(ref _imeCompositionObserved, 1);
+                Interlocked.Exchange(ref _imeCandidateCapturedInComposition, 0);
+                return;
+            }
+
+            if (message == Win32ImeCompatibility.WmImeEndComposition)
+            {
+                var compositionObserved = Interlocked.Exchange(ref _imeCompositionObserved, 0) != 0;
+                var candidateCaptured = Interlocked.Exchange(
+                    ref _imeCandidateCapturedInComposition,
+                    0) != 0;
+                ClearImeCandidateSnapshot();
+                if (compositionObserved &&
+                    !candidateCaptured &&
+                    Interlocked.Exchange(ref _imeCompositionWithoutCandidatesLogged, 1) == 0)
+                {
+                    LogSafely(
+                        "Win32 IME composition ended without an IMM32 candidate list. " +
+                        "This input method may expose candidates only through its external TSF/Qt UI.");
+                }
+
+                return;
+            }
+
+            uint candidateMask;
+            var reportReadFailure = false;
+            if (message == Win32ImeCompatibility.WmImeNotify)
+            {
+                var notification = unchecked((uint)(nuint)wParam);
+                if (notification == Win32ImeCandidateReader.ImnCloseCandidate)
+                {
+                    ClearImeCandidateSnapshot();
+                    return;
+                }
+
+                if (!Win32ImeCandidateReader.IsRefreshNotification(notification))
+                    return;
+
+                candidateMask = unchecked((uint)(nuint)lParam);
+                reportReadFailure = notification is
+                    Win32ImeCandidateReader.ImnOpenCandidate or
+                    Win32ImeCandidateReader.ImnChangeCandidate;
+            }
+            else if (message == Win32ImeCompatibility.WmImeComposition)
+            {
+                Interlocked.Exchange(ref _imeCompositionObserved, 1);
+                candidateMask = 1;
+            }
+            else
+            {
+                return;
+            }
+
+            if (Win32ImeCandidateReader.TryReadFirstCandidateList(
+                    windowHandle,
+                    candidateMask,
+                    out var snapshot,
+                    out var failure) &&
+                snapshot is not null)
+            {
+                Volatile.Write(ref _imeCandidateSnapshot, snapshot);
+                Interlocked.Exchange(ref _imeCandidateCapturedInComposition, 1);
+                if (Interlocked.Exchange(ref _imeCandidateCaptureLogged, 1) == 0)
+                {
+                    LogSafely(
+                        $"Win32 IME candidate fallback captured list {snapshot.ListIndex}: " +
+                        $"count={snapshot.Count}, selection={snapshot.SelectedIndex}, " +
+                        $"pageStart={snapshot.PageStart}, pageSize={snapshot.PageSize}; " +
+                        "candidates are now drawn inside the Overlay.");
+                }
+
+                return;
+            }
+
+            if (reportReadFailure &&
+                Interlocked.Exchange(ref _imeCandidateReadFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    $"Win32 IME candidate notification did not expose a readable IMM32 list: {failure}; " +
+                    "further read failures are suppressed.");
+            }
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _imeCandidateReadFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    "Win32 IME candidate fallback recovered from an exception; " +
+                    $"further failures are suppressed: {exception.GetType().Name}: {exception.Message}.");
+            }
+        }
+    }
+
+    private void DrawImeCandidateFallback()
+    {
+        if (!_getConfiguration().EnableImeCandidateFallback)
+            return;
+
+        var snapshot = Volatile.Read(ref _imeCandidateSnapshot);
+        if (snapshot is null)
+            return;
+
+        var displayText = snapshot.BuildDisplayText();
+        if (!string.IsNullOrEmpty(displayText))
+            ImGui.TextWrapped(displayText);
+    }
+
+    private void ClearImeCandidateSnapshot() =>
+        Volatile.Write(ref _imeCandidateSnapshot, null);
+
     private static void AddUtf8Input(string text)
     {
         if (!string.IsNullOrEmpty(text))
@@ -507,6 +648,9 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+        ClearImeCandidateSnapshot();
+        Interlocked.Exchange(ref _imeCompositionObserved, 0);
+        Interlocked.Exchange(ref _imeCandidateCapturedInComposition, 0);
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
@@ -610,11 +754,12 @@ public sealed class ChatOverlayHost
                 if (host.TryHandleImeCharacter(hWnd, message, wParam))
                     return nint.Zero;
 
-                // The overlay does not paint an IME UI itself. Let the proper
-                // ANSI/Unicode default window proc own composition and candidate
-                // lifecycle messages instead of Relink's chat WndProc.
+                // Preserve the system IME lifecycle through the proper
+                // ANSI/Unicode default procedure. The Overlay also snapshots an
+                // IMM32 candidate list here as a fallback for invisible Qt UI.
                 if (host.ShouldRouteImeUiToDefault(message))
                 {
+                    host.ObserveImeUiMessage(hWnd, message, wParam, lParam);
                     var forwardedLParam = Win32ImeCompatibility.PrepareImeUiLParam(
                         message,
                         wParam,

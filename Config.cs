@@ -12,6 +12,11 @@ public class Config : Configurable<Config>
     [DefaultValue(true)]
     public bool EnableOverlay { get; set; } = true;
 
+    [DisplayName("Overlay IME Candidate Fallback")]
+    [Description("Draw the current IMM32 candidate list inside the chat box when a third-party IME's external candidate window is invisible. Number-key selection remains owned by the IME.")]
+    [DefaultValue(true)]
+    public bool EnableImeCandidateFallback { get; set; } = true;
+
     [DisplayName("Enable Native Chat Bridge")]
     [Description("Connect directly to supported Relink chat functions. Changing this setting requires restarting the mod.")]
     [DefaultValue(true)]

@@ -1,6 +1,6 @@
 # One-run Party voice troubleshooting matrix
 
-This is the required two-client test for `0.3.0-preview.14`. It follows Microsoft PlayFab Party's native audio troubleshooting flow. The online U path does not configure an audio-manipulation capture stream: Party owns microphone capture, encoding, transmission and playback. When Relink has configured Party's Audio task as `Manual`, the Mod supplies only the required 40 ms `PartyDoWork(Audio)` pump.
+This is the required two-client test for `0.3.0-preview.16`. It follows Microsoft PlayFab Party's native audio troubleshooting flow. The online U path does not configure an audio-manipulation capture stream: Party owns microphone capture, encoding, transmission and playback. When Relink has configured Party's Audio task as `Manual`, the Mod supplies only the required 40 ms `PartyDoWork(Audio)` pump.
 
 ## What the package measures
 
@@ -67,9 +67,9 @@ This pass means Party observed native local capture plus one specific remote pee
 
 | Log evidence | Layer identified | Interpretation / next action |
 | --- | --- | --- |
-| Log contains `ConfigureAudioManipulationCaptureStreamCompleted`, `official Party capture sink acquired`, `SubmitBuffer`, or `0x000010D8` | Wrong/old package | Preview.14 never enters the replacement-sink path. Remove the old Mod folder, install the complete ZIP and confirm both DLL/version pairs match. |
+| Log contains `ConfigureAudioManipulationCaptureStreamCompleted`, `official Party capture sink acquired`, `SubmitBuffer`, or `0x000010D8` | Wrong/old package | Preview.14 and later never enter the replacement-sink path. Remove the old Mod folder, install the complete ZIP and confirm both DLL/version pairs match. |
 | `Audio=Automatic (0)` followed by `sole owner` | Party automatic audio work | Healthy: Party owns its internal audio thread; no Mod `DoWork` pump should start. |
-| `Audio=Manual (1)` but no `started ... PartyDoWork(Audio) ... 40 ms` line | Missing/failed audio work pump | Preserve the immediately adjacent mode-query/fail-closed log and confirm preview.14 is installed as a complete package. |
+| `Audio=Manual (1)` but no `started ... PartyDoWork(Audio) ... 40 ms` line | Missing/failed audio work pump | Preserve the immediately adjacent mode-query/fail-closed log and confirm preview.16 is installed as a complete package. |
 | `PartyGetWorkMode(Audio)` or `PartyDoWork(Audio)` returns an error | Party work scheduling | Voice is deliberately fail-closed for that manager. Preserve the exact error and the complete lifecycle; do not judge microphone or transport from that run. |
 | `I` reports `result: PASS` and self-audio is audible | Windows capture/render outside Party | The selected Windows mic and playback device work in shared mode. This is preflight evidence, not an online pass. |
 | `I` starts but reports no microphone signal | Windows capture before Party | Check the physical mic, Windows privacy/input meter, selected endpoint and gain. |

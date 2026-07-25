@@ -7,6 +7,12 @@ namespace GBFR.ChatOverlay.Tests;
 public sealed class ConfigDefaultsTests
 {
     [Fact]
+    public void ImeCandidateFallback_IsEnabledForThirdPartyInputMethods()
+    {
+        Assert.True(new Config().EnableImeCandidateFallback);
+    }
+
+    [Fact]
     public void PartyLifecycleProbe_IsEnabledForValidationBuilds()
     {
         Assert.True(new Config().EnablePartyLifecycleProbe);

@@ -2,7 +2,7 @@
 
 This project consumes the following packages:
 
-- [Reloaded.Imgui.Hook](https://github.com/Sewer56/Reloaded.Imgui.Hook) and its Direct3D 11 backend. `Overlay/SafeImguiHookDx11.cs` is adapted from the upstream Direct3D 11 backend at commit `c3a42c84536c0a8480bc5667cb891afae274f5a7`; it adds guarded native callbacks, HRESULT-aware resize handling, and fail-open game rendering. The source repository contains an MIT license, reproduced at `licenses/Reloaded.Imgui.Hook-LICENSE.md`; the NuGet package metadata for the core package currently identifies LGPL-3.0-only.
+- [Reloaded.Imgui.Hook](https://github.com/Sewer56/Reloaded.Imgui.Hook) and its official Direct3D 11 backend. `Overlay/CjkConfiguredDx11Hook.cs` wraps that backend to configure and build a pinned CJK font atlas before native DX11 initialization, following the frontend path already validated by this project's Extra Sigil companion Mod. The source repository contains an MIT license, reproduced at `licenses/Reloaded.Imgui.Hook-LICENSE.md`; the NuGet package metadata for the core package currently identifies LGPL-3.0-only.
 - [DearImguiSharp](https://github.com/Sewer56/DearImguiSharp), which wraps cimgui and Dear ImGui.
 - [Dear ImGui](https://github.com/ocornut/imgui), distributed under the MIT license.
 - Reloaded-II interfaces and hooks from the [Reloaded Project](https://github.com/Reloaded-Project).

@@ -20,9 +20,14 @@ public sealed class ChatOverlayHost
     private const uint WmSysKeyDown = 0x0104;
     private const uint WmSysKeyUp = 0x0105;
     private const uint WmSysChar = 0x0106;
+    private const uint WmKillFocus = 0x0008;
+    private const uint WmActivate = 0x0006;
+    private const uint WmActivateApp = 0x001C;
     private const int InputBufferSize = 2_048;
 
     private static ChatOverlayHost? s_activeHost;
+    private static int s_hasOriginalWndProc;
+    private static WndProcHook.WndProc s_originalWndProc;
 
     private readonly ChatSession _session;
     private readonly Func<Config> _getConfiguration;
@@ -32,8 +37,8 @@ public sealed class ChatOverlayHost
     private int _openRequested;
     private int _captureKeyboard;
     private int _swallowActivationKeyUntilRelease;
-    private int _wndProcDisabled;
     private int _wndProcFailureLogged;
+    private int _renderThreadLogged;
     private int _releaseCaptureFrames;
     private bool _focusInputNextFrame;
     private bool _windowOpen = true;
@@ -82,24 +87,16 @@ public sealed class ChatOverlayHost
         var options = new ImguiHookOptions
         {
             EnableViewports = false,
-            IgnoreWindowUnactivate = false,
+            IgnoreWindowUnactivate = true,
             CustomWndProcHandlerPointer = GetCustomWndProcPointer(),
-            Implementations = new List<IImguiHook> { new SafeImguiHookDx11(_log) },
+            Implementations = new List<IImguiHook> { new CjkConfiguredDx11Hook(_log) },
         };
 
         try
         {
             await ImguiHook.Create(Render, options).ConfigureAwait(false);
-            try
-            {
-                ConfigureFont();
-            }
-            catch (Exception exception)
-            {
-                _log($"CJK font setup failed; using the default ImGui font: {exception.Message}");
-            }
             Volatile.Write(ref _initialized, true);
-            _log("DirectX 11 ImGui hook initialized.");
+            _log("DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path.");
         }
         catch
         {
@@ -129,36 +126,49 @@ public sealed class ChatOverlayHost
 
     private void Render()
     {
-        _session.DrainIncoming();
-        var configuration = _getConfiguration();
-        if (!configuration.EnableOverlay)
+        try
+        {
+            if (Interlocked.CompareExchange(ref _renderThreadLogged, 1, 0) == 0)
+                LogSafely($"First Direct3D11 Present callback: OS TID {GetCurrentThreadId()}.");
+
+            _session.DrainIncoming();
+            var configuration = _getConfiguration();
+            if (!configuration.EnableOverlay)
+            {
+                _session.Composer.Cancel();
+                Interlocked.Exchange(ref _openRequested, 0);
+                Interlocked.Exchange(ref _captureKeyboard, 0);
+                return;
+            }
+
+            if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
+                Interlocked.Exchange(ref _captureKeyboard, 0);
+
+            var openedThisFrame = Interlocked.Exchange(ref _openRequested, 0) != 0;
+            if (openedThisFrame)
+            {
+                _session.Composer.OpenKeyboard();
+                SyncInputBufferFromDraft();
+                _focusInputNextFrame = true;
+                _statusText = _session.TransportStatusText;
+            }
+
+            if (_session.Composer.IsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
+            {
+                _session.Composer.Cancel();
+                _releaseCaptureFrames = 2;
+                _statusText = null;
+            }
+
+            DrawChatWindow(configuration, openedThisFrame);
+        }
+        catch (Exception exception)
         {
             _session.Composer.Cancel();
             Interlocked.Exchange(ref _openRequested, 0);
             Interlocked.Exchange(ref _captureKeyboard, 0);
-            return;
+            LogSafely($"Render callback recovered from an exception: {exception}");
         }
-
-        if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
-            Interlocked.Exchange(ref _captureKeyboard, 0);
-
-        var openedThisFrame = Interlocked.Exchange(ref _openRequested, 0) != 0;
-        if (openedThisFrame)
-        {
-            _session.Composer.OpenKeyboard();
-            SyncInputBufferFromDraft();
-            _focusInputNextFrame = true;
-            _statusText = _session.TransportStatusText;
-        }
-
-        if (_session.Composer.IsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
-        {
-            _session.Composer.Cancel();
-            _releaseCaptureFrames = 2;
-            _statusText = null;
-        }
-
-        DrawChatWindow(configuration, openedThisFrame);
     }
 
     private void DrawChatWindow(Config configuration, bool openedThisFrame)
@@ -192,18 +202,21 @@ public sealed class ChatOverlayHost
         if (!composerOpen)
             flags |= ImGuiWindowFlags.NoInputs;
 
-        if (!ImGui.Begin("GBFR Chat##GBFRChatOverlay", ref _windowOpen, (int)flags))
+        var began = ImGui.Begin("GBFR Chat##GBFRChatOverlay", ref _windowOpen, (int)flags);
+        try
+        {
+            if (!began)
+                return;
+
+            DrawVoiceStatus();
+            DrawHistory(composerOpen);
+            if (composerOpen)
+                DrawComposer(openedThisFrame);
+        }
+        finally
         {
             ImGui.End();
-            return;
         }
-
-        DrawVoiceStatus();
-        DrawHistory(composerOpen);
-        if (composerOpen)
-            DrawComposer(openedThisFrame);
-
-        ImGui.End();
     }
 
     private void DrawVoiceStatus()
@@ -220,8 +233,16 @@ public sealed class ChatOverlayHost
     {
         var childHeight = composerOpen ? -58.0f : 0.0f;
         using var childSize = CreateVector2(0.0f, childHeight);
-        if (ImGui.BeginChildStr("##GBFRChatHistory", childSize, false, (int)ImGuiWindowFlags.NoBackground))
+        var began = ImGui.BeginChildStr(
+            "##GBFRChatHistory",
+            childSize,
+            false,
+            (int)ImGuiWindowFlags.NoBackground);
+        try
         {
+            if (!began)
+                return;
+
             var snapshot = _session.History.Snapshot();
             foreach (var message in snapshot)
             {
@@ -235,7 +256,10 @@ public sealed class ChatOverlayHost
                 ImGui.SetScrollHereY(1.0f);
             }
         }
-        ImGui.EndChild();
+        finally
+        {
+            ImGui.EndChild();
+        }
     }
 
     private unsafe void DrawComposer(bool openedThisFrame)
@@ -323,26 +347,6 @@ public sealed class ChatOverlayHost
         return Encoding.UTF8.GetString(_inputBuffer, 0, length);
     }
 
-    private unsafe void ConfigureFont()
-    {
-        var fontDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
-        var candidates = new[] { "msyh.ttc", "msyhbd.ttc", "simhei.ttf" };
-        var fontPath = candidates
-            .Select(fileName => Path.Combine(fontDirectory, fileName))
-            .FirstOrDefault(File.Exists);
-
-        if (fontPath is null)
-        {
-            _log("No known CJK system font was found; using the default ImGui font.");
-            return;
-        }
-
-        var fonts = ImguiHook.IO.Fonts;
-        var glyphRanges = ImGui.ImFontAtlasGetGlyphRangesChineseFull(fonts);
-        ImGui.ImFontAtlasAddFontFromFileTTF(fonts, fontPath, 18.0f, null!, ref glyphRanges[0]);
-        _log($"Loaded CJK font: {fontPath}");
-    }
-
     private static ImVec2 CreateVector2(float x, float y)
     {
         var vector = new ImVec2();
@@ -358,47 +362,91 @@ public sealed class ChatOverlayHost
     private static unsafe nint CustomWndProc(nint hWnd, uint message, nint wParam, nint lParam)
     {
         var host = s_activeHost;
-        if (host is not null && Volatile.Read(ref host._wndProcDisabled) == 0)
-        {
-            try
-            {
-                ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
-                if (host.ShouldCaptureWindowMessage(message, wParam))
-                    return nint.Zero;
-            }
-            catch (Exception exception)
-            {
-                host.DisableCustomWndProc("ImGui/input handling", exception);
-            }
-        }
-
+        var originalStarted = false;
         try
         {
-            return WndProcHook.Instance.Hook.OriginalFunction.Value.Invoke(hWnd, message, wParam, lParam);
+            ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
+            if (ImguiHook.Options?.IgnoreWindowUnactivate == true)
+            {
+                if (message == WmKillFocus)
+                    return nint.Zero;
+                if ((message is WmActivate or WmActivateApp) && wParam == nint.Zero)
+                    return nint.Zero;
+            }
+
+            if (host?.ShouldCaptureWindowMessage(message, wParam) is true)
+                return nint.Zero;
+
+            var hook = WndProcHook.Instance;
+            if (hook is not null)
+            {
+                var original = hook.Hook.OriginalFunction;
+                s_originalWndProc = original;
+                Volatile.Write(ref s_hasOriginalWndProc, 1);
+                originalStarted = true;
+                return original.Value.Invoke(hWnd, message, wParam, lParam);
+            }
+
+            if (Volatile.Read(ref s_hasOriginalWndProc) != 0)
+            {
+                originalStarted = true;
+                return s_originalWndProc.Value.Invoke(hWnd, message, wParam, lParam);
+            }
+
+            return DefWindowProcW(hWnd, message, wParam, lParam);
         }
         catch (Exception exception)
         {
-            host?.DisableCustomWndProc("original window procedure", exception);
-            return nint.Zero;
+            host?.LogWndProcFallback(exception);
+            if (!originalStarted && Volatile.Read(ref s_hasOriginalWndProc) != 0)
+            {
+                try
+                {
+                    return s_originalWndProc.Value.Invoke(hWnd, message, wParam, lParam);
+                }
+                catch (Exception fallbackException)
+                {
+                    host?.LogWndProcFallback(fallbackException);
+                }
+            }
+
+            return DefWindowProcW(hWnd, message, wParam, lParam);
         }
     }
 
-    private void DisableCustomWndProc(string stage, Exception exception)
+    private void LogSafely(string message)
     {
-        Interlocked.Exchange(ref _wndProcDisabled, 1);
+        try
+        {
+            _log(message);
+        }
+        catch
+        {
+            // A logger must never let an exception cross a native render callback.
+        }
+    }
+
+    private void LogWndProcFallback(Exception exception)
+    {
         if (Interlocked.Exchange(ref _wndProcFailureLogged, 1) != 0)
             return;
 
         try
         {
             _log(
-                $"Custom WndProc disabled after {stage} failed: " +
+                "Custom WndProc recovered through DefWindowProcW after an exception: " +
                 $"{exception.GetType().Name} (0x{unchecked((uint)exception.HResult):X8}): " +
-                $"{exception.Message}. Game window messages will continue through the original handler.");
+                $"{exception.Message}.");
         }
         catch
         {
             // A logger must not let an exception cross an unmanaged callback.
         }
     }
+
+    [DllImport("user32.dll")]
+    private static extern nint DefWindowProcW(nint hWnd, uint message, nint wParam, nint lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 }

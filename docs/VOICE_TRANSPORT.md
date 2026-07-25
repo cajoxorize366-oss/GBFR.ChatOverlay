@@ -121,7 +121,7 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 3: push to talk
 
-- The external voice test is implemented and enabled by default in `0.3.0-preview.9`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
+- The external voice test is implemented and enabled by default in `0.3.0-preview.10`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
 - Negotiate Mod capability through a remote ChatControl joining the same existing PartyNetwork, not through gameplay endpoint packets.
 - Call `PartyChatControlSetPermissions(local, remote, 0x0005)` for each observed Mod peer. The only enabled bits are `SendMicrophoneAudio` (`0x0001`) and `ReceiveMicrophoneAudio` (`0x0004`); text-to-speech, text-chat and transcription permissions remain unset.
 - Before connecting the ChatControl, configure Party's official audio-manipulation capture stream for the documented Windows format: 24,000 Hz, channel mask `0`, mono, 32-bit float, non-interleaved. Connection is gated on the asynchronous configure completion, a non-null sink returned by `PartyChatControlGetAudioManipulationCaptureStream`, and exact `GetFormat` readback.

@@ -66,6 +66,25 @@ internal enum PartyLocalChatControlChatIndicator : uint
     NoAudioInput = 3,
 }
 
+internal enum PartyThreadId : uint
+{
+    Audio = 0,
+    Networking = 1,
+}
+
+internal enum PartyWorkMode : uint
+{
+    Automatic = 0,
+    Manual = 1,
+}
+
+internal interface IPartyAudioWorkApi
+{
+    uint GetWorkMode(PartyThreadId threadId, out PartyWorkMode workMode);
+
+    uint DoWork(nint manager, PartyThreadId threadId);
+}
+
 internal enum PartyChatControlChatIndicator : uint
 {
     Silent = 0,
@@ -187,8 +206,10 @@ internal interface IPartyChatControlApi
 /// initializes another Party runtime. The only exposed permission call is restricted by the caller
 /// to microphone send/receive; no text, TTS, transcription or endpoint-send API is bound.
 /// </summary>
-internal sealed class PartyNativeApi : IPartyChatControlApi
+internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
 {
+    private readonly PartyGetWorkModeDelegate _getWorkMode;
+    private readonly PartyDoWorkDelegate _doWork;
     private readonly PartyGetLocalDeviceDelegate _getLocalDevice;
     private readonly PartyDeviceGetChatControlsDelegate _deviceGetChatControls;
     private readonly PartyDeviceCreateChatControlDelegate _deviceCreateChatControl;
@@ -226,6 +247,8 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         if (nint.Size != 8)
             throw new PlatformNotSupportedException("The Relink Party bindings require a 64-bit process.");
 
+        _getWorkMode = Bind<PartyGetWorkModeDelegate>(verifiedPartyModule, "PartyGetWorkMode");
+        _doWork = Bind<PartyDoWorkDelegate>(verifiedPartyModule, "PartyDoWork");
         _getLocalDevice = Bind<PartyGetLocalDeviceDelegate>(verifiedPartyModule, "PartyGetLocalDevice");
         _deviceGetChatControls = Bind<PartyDeviceGetChatControlsDelegate>(
             verifiedPartyModule,
@@ -323,6 +346,16 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
 
     public uint GetLocalDevice(nint manager, out nint localDevice) =>
         _getLocalDevice(manager, out localDevice);
+
+    public uint GetWorkMode(PartyThreadId threadId, out PartyWorkMode workMode)
+    {
+        var result = _getWorkMode((uint)threadId, out var nativeWorkMode);
+        workMode = (PartyWorkMode)nativeWorkMode;
+        return result;
+    }
+
+    public uint DoWork(nint manager, PartyThreadId threadId) =>
+        _doWork(manager, (uint)threadId);
 
     public uint GetLocalChatControlCount(nint localDevice, out uint chatControlCount)
     {
@@ -592,6 +625,12 @@ internal sealed class PartyNativeApi : IPartyChatControlApi
         deviceId = nativeDeviceId == nint.Zero ? null : Marshal.PtrToStringUTF8(nativeDeviceId);
         return result;
     }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyGetWorkModeDelegate(uint threadId, out uint workMode);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyDoWorkDelegate(nint manager, uint threadId);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyGetLocalDeviceDelegate(nint manager, out nint localDevice);

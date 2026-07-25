@@ -33,6 +33,7 @@ public sealed class PartyLifecycleProbe
     private IHook<PartyStartProcessingStateChangesDelegate>? _startProcessingHook;
     private IHook<PartyFinishProcessingStateChangesDelegate>? _finishProcessingHook;
     private PartyChatControlCanary? _chatControlCanary;
+    private PartyAudioWorkPump? _audioWorkPump;
     private nint _partyHandle;
     private bool _initialized;
     private bool _suspended;
@@ -42,6 +43,7 @@ public sealed class PartyLifecycleProbe
     private int _startFailureLogged;
     private int _finishFailureLogged;
     private int _diagnosticRequestFailureLogged;
+    private nint _audioWorkStartPendingManager;
 
     public PartyLifecycleProbe(
         ReloadedHooksApi hooks,
@@ -137,6 +139,13 @@ public sealed class PartyLifecycleProbe
                             enableVoiceTest: _enableVoiceTest,
                             audioInputSelection: _audioInputSelection,
                             audioOutputSelection: _audioOutputSelection);
+                        if (_enableVoiceTest)
+                        {
+                            _audioWorkPump = new PartyAudioWorkPump(
+                                partyApi,
+                                EnqueueLog,
+                                reason => _chatControlCanary?.DisableFailClosed(reason));
+                        }
                     }
                     catch (Exception exception)
                     {
@@ -190,6 +199,8 @@ public sealed class PartyLifecycleProbe
             {
                 DisableHooks();
                 ClearHooks();
+                _audioWorkPump?.Dispose();
+                _audioWorkPump = null;
                 _chatControlCanary?.Dispose();
                 _chatControlCanary = null;
                 throw;
@@ -199,12 +210,14 @@ public sealed class PartyLifecycleProbe
 
     public void Suspend()
     {
-        _chatControlCanary?.SuspendBestEffort();
         lock (_lifecycleSync)
         {
             Volatile.Write(ref _suspended, true);
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             DisableHooks();
         }
+        _audioWorkPump?.DetachManager(nint.Zero, "Mod suspension");
+        _chatControlCanary?.SuspendBestEffort();
     }
 
     public void Resume()
@@ -225,6 +238,8 @@ public sealed class PartyLifecycleProbe
             {
                 Volatile.Write(ref _suspended, true);
                 DisableHooks();
+                _audioWorkPump?.DetachManager(nint.Zero, "failed Mod resume");
+                _chatControlCanary?.SuspendBestEffort();
                 throw;
             }
         }
@@ -269,7 +284,9 @@ public sealed class PartyLifecycleProbe
         {
             if (result == 0 && handleOutput != nint.Zero)
             {
-                CapturePartyHandle(Marshal.ReadIntPtr(handleOutput), "PartyInitialize");
+                var handle = Marshal.ReadIntPtr(handleOutput);
+                if (CapturePartyHandle(handle, "PartyInitialize"))
+                    EnsureAudioWorkPump(handle, "PartyInitialize");
             }
             else if (result != 0)
             {
@@ -286,6 +303,10 @@ public sealed class PartyLifecycleProbe
 
     private uint PartyCleanup(nint handle)
     {
+        Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
+        _audioWorkPump?.DetachManager(
+            nint.Zero,
+            $"PartyCleanup for manager 0x{(nuint)handle:X}");
         _chatControlCanary?.BeginManagerCleanup(handle);
         var result = _cleanupHook!.OriginalFunction(handle);
         if (Volatile.Read(ref _suspended))
@@ -353,18 +374,21 @@ public sealed class PartyLifecycleProbe
         }
         catch
         {
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             throw;
         }
 
         if (Volatile.Read(ref _suspended))
         {
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             return result;
         }
 
         if (result != 0)
         {
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             if (Interlocked.Exchange(ref _startFailureLogged, 1) == 0)
             {
@@ -376,11 +400,13 @@ public sealed class PartyLifecycleProbe
 
         try
         {
-            CapturePartyHandle(handle, "PartyStartProcessingStateChanges");
+            if (CapturePartyHandle(handle, "PartyStartProcessingStateChanges"))
+                Interlocked.Exchange(ref _audioWorkStartPendingManager, handle);
             InspectStateChanges(handle, stateChangeCountOutput, stateChangesOutput);
         }
         catch (Exception exception)
         {
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             LogInspectionFailureOnce(exception);
         }
 
@@ -399,6 +425,7 @@ public sealed class PartyLifecycleProbe
         }
         catch
         {
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             throw;
         }
@@ -407,14 +434,32 @@ public sealed class PartyLifecycleProbe
             try
             {
                 _chatControlCanary?.OnBatchFinished(handle);
+                var pendingManager = Interlocked.Exchange(
+                    ref _audioWorkStartPendingManager,
+                    nint.Zero);
+                if (pendingManager == handle)
+                {
+                    EnsureAudioWorkPump(handle, "PartyFinishProcessingStateChanges");
+                }
+                else if (pendingManager != nint.Zero)
+                {
+                    _chatControlCanary?.DisableFailClosed(
+                        $"Party audio work start manager mismatch: pending 0x{(nuint)pendingManager:X}, " +
+                        $"finished 0x{(nuint)handle:X}");
+                    EnqueueLog(
+                        $"Party audio work pump rejected stale manager 0x{(nuint)pendingManager:X} " +
+                        $"after finishing state changes for 0x{(nuint)handle:X}.");
+                }
             }
             catch (Exception exception)
             {
+                Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
                 LogInspectionFailureOnce(exception);
             }
         }
         else
         {
+            Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _chatControlCanary?.CancelStateChangeBatch(handle);
         }
         if (!Volatile.Read(ref _suspended) &&
@@ -481,10 +526,10 @@ public sealed class PartyLifecycleProbe
         }
     }
 
-    private void CapturePartyHandle(nint handle, string source)
+    private bool CapturePartyHandle(nint handle, string source)
     {
         if (handle == nint.Zero)
-            return;
+            return false;
 
         var previous = Interlocked.CompareExchange(ref _partyHandle, handle, nint.Zero);
         if (previous == nint.Zero)
@@ -492,18 +537,27 @@ public sealed class PartyLifecycleProbe
             EnqueueLog(
                 $"Party manager captured from {source}: 0x{(nuint)handle:X}.");
             _chatControlCanary?.CaptureManager(handle, source);
+            return true;
         }
-        else if (previous == handle)
+        if (previous == handle)
         {
             _chatControlCanary?.CaptureManager(handle, source);
+            return false;
         }
-        else
-        {
-            EnqueueLog(
-                $"Party manager ownership conflict at {source}: retained 0x{(nuint)previous:X}, " +
-                $"rejected 0x{(nuint)handle:X}; Stage 2 will fail closed.");
-            _chatControlCanary?.CaptureManager(handle, source);
-        }
+
+        EnqueueLog(
+            $"Party manager ownership conflict at {source}: retained 0x{(nuint)previous:X}, " +
+            $"rejected 0x{(nuint)handle:X}; Stage 2 will fail closed.");
+        _chatControlCanary?.CaptureManager(handle, source);
+        return false;
+    }
+
+    private void EnsureAudioWorkPump(nint handle, string source)
+    {
+        if (!_enableVoiceTest || handle == nint.Zero || Volatile.Read(ref _suspended))
+            return;
+
+        _audioWorkPump?.AttachManager(handle, source);
     }
 
     private void LogInspectionFailureOnce(Exception exception)

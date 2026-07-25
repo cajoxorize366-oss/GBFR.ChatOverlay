@@ -1,6 +1,6 @@
 # One-run Party voice troubleshooting matrix
 
-This is the required two-client test for `0.3.0-preview.11`. It follows Microsoft PlayFab Party's native audio troubleshooting flow. The online U path no longer configures an audio-manipulation capture stream: Party owns microphone capture, encoding, transmission and playback.
+This is the required two-client test for `0.3.0-preview.13`. It follows Microsoft PlayFab Party's native audio troubleshooting flow. The online U path does not configure an audio-manipulation capture stream: Party owns microphone capture, encoding, transmission and playback. When Relink has configured Party's Audio task as `Manual`, the Mod supplies only the required 40 ms `PartyDoWork(Audio)` pump.
 
 ## What the package measures
 
@@ -34,6 +34,8 @@ Before U, each client should show the native route and initialized devices:
 
 ```text
 Party lifecycle/Stage 3 voice test attached at 0x...; ... U unmutes Party's native selected microphone path directly; no audio-manipulation capture stream is configured, and input stays muted unless U is held.
+Party work modes captured from ...: Audio=Manual (1), Networking=Automatic (0).
+Party Audio work mode is Manual; started the Mod-owned PartyDoWork(Audio) pump at 40 ms intervals. The global work mode was not changed.
 Stage 2 canary creation queued ... Party's native selected microphone path remains active; no audio-manipulation capture stream is configured ...
 Stage 3 Party audio input state: Initialized (1); errorDetail=0x00000000.
 Stage 3 Party audio output state: Initialized (1); errorDetail=0x00000000.
@@ -65,13 +67,16 @@ This pass means Party observed native local capture plus one specific remote pee
 
 | Log evidence | Layer identified | Interpretation / next action |
 | --- | --- | --- |
-| Log contains `ConfigureAudioManipulationCaptureStreamCompleted`, `official Party capture sink acquired`, `SubmitBuffer`, or `0x000010D8` | Wrong/old package | Preview.11 never enters the replacement-sink path. Remove the old Mod folder, install the complete ZIP and confirm both DLL/version pairs match. |
+| Log contains `ConfigureAudioManipulationCaptureStreamCompleted`, `official Party capture sink acquired`, `SubmitBuffer`, or `0x000010D8` | Wrong/old package | Preview.13 never enters the replacement-sink path. Remove the old Mod folder, install the complete ZIP and confirm both DLL/version pairs match. |
+| `Audio=Automatic (0)` followed by `sole owner` | Party automatic audio work | Healthy: Party owns its internal audio thread; no Mod `DoWork` pump should start. |
+| `Audio=Manual (1)` but no `started ... PartyDoWork(Audio) ... 40 ms` line | Missing/failed audio work pump | Preserve the immediately adjacent mode-query/fail-closed log and confirm preview.13 is installed as a complete package. |
+| `PartyGetWorkMode(Audio)` or `PartyDoWork(Audio)` returns an error | Party work scheduling | Voice is deliberately fail-closed for that manager. Preserve the exact error and the complete lifecycle; do not judge microphone or transport from that run. |
 | `I` reports `result: PASS` and self-audio is audible | Windows capture/render outside Party | The selected Windows mic and playback device work in shared mode. This is preflight evidence, not an online pass. |
 | `I` starts but reports no microphone signal | Windows capture before Party | Check the physical mic, Windows privacy/input meter, selected endpoint and gain. |
 | Input state other than `Initialized (1)` | Party native capture device | Party cannot establish the selected microphone. Use the state and translated `errorDetail`, then verify the endpoint and Windows privacy settings. |
 | Output state other than `Initialized (1)` | Party render device | The receiving client cannot establish its selected playback endpoint. Check the endpoint, exclusive use and format support. |
 | U held but `nativeInputUnmuted=False` or `inputMuted=True` | Push-to-talk mute transition | Party did not open the ChatControl input. Preserve the Set/Get mute logs and lifecycle immediately before U. |
-| U held and `localIndicator=NoAudioInput` | Party native input | Party has no usable audio input on that ChatControl. Compare the logged selected device ID with Windows and the successful I endpoint. |
+| U held and `localIndicator=NoAudioInput` after a healthy Automatic owner or active Manual pump | Party native input | Party still has no usable audio input on that ChatControl. Compare the logged selected device ID with Windows and the successful I endpoint. |
 | U held and local remains `Silent` despite speech | Party native capture/signal | Party initialized and unmuted the input but did not detect voice. Verify mic gain/privacy and speak continuously for at least three seconds. |
 | U held and `localIndicator=Talking` | Local Party send evidence | Party is capturing the native microphone. This alone does not prove the remote client received it. |
 | Permission readback lacks send or receive microphone bits | Chat permission | The live local-to-remote relation is not `0x0005`; transport cannot be ready. |
@@ -104,3 +109,5 @@ The one-time startup line `PartyStartProcessingStateChanges returned error 0x000
 - [Microsoft: PartyChatPermissionOptions](https://learn.microsoft.com/en-us/xbox/playfab/multiplayer/networking/reference/enums/partychatpermissionoptions)
 - [Microsoft: Real-time audio manipulation](https://learn.microsoft.com/en-us/xbox/playfab/community/voice-communications/concepts-realtime-audio-manipulation)
 - [Microsoft: Party quickstart](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/quickstart)
+- [Microsoft: PartyManager::SetWorkMode](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partymanager/methods/partymanager_setworkmode)
+- [Microsoft: PartyManager::DoWork](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partymanager/methods/partymanager_dowork)

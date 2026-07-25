@@ -55,7 +55,7 @@ Steam Voice only captures/compresses and decompresses voice. The title must stil
 
 ## Party voice capability
 
-The game imports only Party networking and endpoint APIs; it does not import any `PartyChatControl*` function. Voice is available in the exact shipped DLL but is not enabled by Relink's current call surface.
+The game imports Party networking and endpoint APIs plus `PartySetWorkMode`, but it imports neither `PartyDoWork` nor any `PartyChatControl*` function. Voice is available in the exact shipped DLL but is not enabled by Relink's current call surface. The static import pair is consistent with the title placing an unused task in manual mode without pumping it; the runtime `PartyGetWorkMode` log remains the authoritative check for each process.
 
 The verified C ABI includes:
 
@@ -121,10 +121,11 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 
 ### Stage 3: push to talk
 
-- The external voice test is implemented and enabled by default in `0.3.0-preview.11`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
+- The external voice test is implemented and enabled by default in `0.3.0-preview.13`. Every participant must install the same package; a vanilla peer has no remote ChatControl and is not granted voice permissions.
 - Negotiate Mod capability through a remote ChatControl joining the same existing PartyNetwork, not through gameplay endpoint packets.
 - Call `PartyChatControlSetPermissions(local, remote, 0x0005)` for each observed Mod peer. The only enabled bits are `SendMicrophoneAudio` (`0x0001`) and `ReceiveMicrophoneAudio` (`0x0004`); text-to-speech, text-chat and transcription permissions remain unset.
 - Do not configure an audio-manipulation capture stream in the production path. Party's default ChatControl path owns microphone capture, encoding, transport and remote rendering. The earlier replacement sink filled its configured 200 ms buffer after five 40 ms frames and then returned `0x10D8` continuously because no consumer drained it; preview.11 removes that replacement path rather than resetting or enlarging the queue.
+- After the existing manager is captured, preview.13 queries both Party work modes. If `Audio=Automatic`, Party's internal real-time audio thread remains the sole owner and the Mod does no work. If `Audio=Manual`, the Mod runs one dedicated above-normal-priority pump and calls only `PartyDoWork(manager, Audio)` at 40 ms intervals, as required by the official Party ABI. It never calls `PartySetWorkMode`, never pumps `Networking`, and synchronously stops the audio pump before suspend or `PartyCleanup`. An Audio-mode query or Audio `DoWork` error disables voice for that manager; the independent Networking-mode query is diagnostic only.
 - Keep the Party microphone synchronously muted and verified by default. DirectInput consumes `U` for the voice test. A U hold only calls `PartyChatControlSetAudioInputMuted(false)` and verifies the readback; release calls the same API with `true`. No WASAPI capture backend, resampler, custom PCM buffer or `PartyAudioManipulationSinkStreamSubmitBuffer` call participates in online voice.
 - A 350 ms input heartbeat watchdog forces release after focus loss, lost key-up or stalled keyboard polling. Mod suspend, remote-capability loss, pre-leave cleanup and terminal failure also force a best-effort mute before ChatControl destruction.
 - Party permission, mute and setup calls are fenced while Relink owns a state-change batch and run only after the game's original `PartyFinishProcessingStateChanges` returns.
@@ -153,6 +154,8 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 - [Microsoft: PartyLocalChatControl::ConfigureAudioManipulationCaptureStream](https://learn.microsoft.com/en-us/xbox/playfab/multiplayer/networking/reference/classes/partylocalchatcontrol/methods/partylocalchatcontrol_configureaudiomanipulationcapturestream)
 - [Microsoft: PartyAudioManipulationSinkStream::SubmitBuffer](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partyaudiomanipulationsinkstream/methods/partyaudiomanipulationsinkstream_submitbuffer)
 - [Microsoft: troubleshoot Party audio and chat](https://learn.microsoft.com/en-us/xbox/playfab/community/voice-communications/concepts-audio-troubleshooting)
+- [Microsoft: PartyManager::SetWorkMode](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partymanager/methods/partymanager_setworkmode)
+- [Microsoft: PartyManager::DoWork](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partymanager/methods/partymanager_dowork)
 - [Microsoft: PartyLocalChatControl::GetChatIndicator](https://learn.microsoft.com/en-us/gaming/playfab/multiplayer/networking/reference/classes/partylocalchatcontrol/methods/partylocalchatcontrol_getchatindicator)
 - [Valve: ISteamUser voice API](https://partner.steamgames.com/doc/api/isteamuser)
 - [Valve: ISteamNetworkingMessages](https://partner.steamgames.com/doc/api/ISteamNetworkingMessages)

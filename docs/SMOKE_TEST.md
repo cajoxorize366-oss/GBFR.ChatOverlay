@@ -62,7 +62,11 @@ Expected startup evidence:
 ```text
 Party lifecycle/Stage 3 voice test attached at 0x...; one ChatControl may join the existing PartyNetwork. U unmutes Party's native selected microphone path directly; no audio-manipulation capture stream is configured, and input stays muted unless U is held.
 Party manager captured from PartyInitialize: 0x....
+Party work modes captured from PartyInitialize: Audio=Manual (1), Networking=Automatic (0).
+Party Audio work mode is Manual; started the Mod-owned PartyDoWork(Audio) pump at 40 ms intervals. The global work mode was not changed.
 ```
+
+`Audio=Automatic (0)` plus `Party's internal real-time audio thread remains the sole owner` is equally healthy and must not be followed by a Mod pump. `Audio=Manual (1)` requires the 40 ms pump line above. Any `PartyGetWorkMode(Audio)` or `PartyDoWork(Audio)` error is a fail-closed voice failure for that manager.
 
 If Party initialized before the Mod attached, the manager can instead be captured from `PartyStartProcessingStateChanges`. During host/join/leave, preserve the ordered lifecycle lines. The host should include `CreateNewNetworkCompleted`; a joining client should include `ConnectToNetworkCompleted`. Both sides should then show authentication and endpoint lifecycle events such as:
 
@@ -125,7 +129,7 @@ Local microphone monitor playback stopped after ... ms; PlaybackStopped event ob
 Local microphone monitor cleanup complete after ... ms.
 ```
 
-Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. Preview.12 keeps I as this separate WASAPI preflight, while U lets Party capture the configured endpoint directly. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
+Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. Preview.12 keeps I as this separate WASAPI preflight, while preview.13 also supplies Party's audio work only when the runtime reports `Audio=Manual`. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
 
 Prerequisites for `U`: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Voice (U Party / I Local Test)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual), initialized Party input/output states, and the startup line explicitly saying that no audio-manipulation capture stream is configured.
 

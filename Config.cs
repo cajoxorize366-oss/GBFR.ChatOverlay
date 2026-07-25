@@ -70,6 +70,16 @@ public class Config : Configurable<Config>
     [DefaultValue(true)]
     public bool EnableVoiceInput { get; set; } = true;
 
+    [DisplayName("Enable Party Voice Indicators")]
+    [Description("Draw microphone indicators from Relink's live party-HUD node transforms. Normal mode remains online-room gated; the explicit Show All position test also works with a CPU party.")]
+    [DefaultValue(true)]
+    public bool EnableVoiceIndicators { get; set; } = true;
+
+    [DisplayName("Voice Indicator Debug: Show All Slots")]
+    [Description("POSITION TEST: show every live lobby or battle HUD row, including a CPU party, without other Mod clients. Disable after both native HUD placements are confirmed.")]
+    [DefaultValue(true)]
+    public bool ShowAllVoiceIndicatorSlots { get; set; } = true;
+
     [DisplayName("Voice Microphone")]
     [Description("Windows recording endpoint selected for Party voice while U is held and captured locally while I is held. Defaults to Default (Windows system default). Restart required.")]
     [Editor(

@@ -31,6 +31,15 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
+    public void VoiceIndicatorPositionPreview_ShowsAllNativeHudSlotsByDefault()
+    {
+        var configuration = new Config();
+
+        Assert.True(configuration.EnableVoiceIndicators);
+        Assert.True(configuration.ShowAllVoiceIndicatorSlots);
+    }
+
+    [Fact]
     public void MicrophoneSelfMonitor_UsesConservativeDefaultVolume()
     {
         Assert.Equal(0.35, new Config().MicrophoneSelfMonitorVolume);

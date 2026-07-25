@@ -9,6 +9,7 @@ The Reloaded-II log should contain messages equivalent to:
 ```text
 [gbfr.qol.chatoverlay] Relink 2.0.2 native chat bridge attached: send=..., receive=....
 [gbfr.qol.chatoverlay] Relink incoming player-name resolver attached: senderSlot=..., memberLookup=...; empty RPC sender labels now use the verified four-slot lobby member table.
+[gbfr.qol.chatoverlay] Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
 [gbfr.qol.chatoverlay] DirectInput8 keyboard interception initialized.
 [gbfr.qol.chatoverlay] CJK font loaded before DX11 hook initialization: ..., 9 glyph ranges.
 [gbfr.qol.chatoverlay] DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path.
@@ -47,7 +48,7 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 
 ## Visual and input checks
 
-1. Stay on the title screen, save-selection screen, loading screen and a solo town with no online room. Confirm that no Overlay is drawn and pressing `Y`, `U` or `I` is left to the game.
+1. Stay on the title screen, save-selection screen, loading screen and a solo town with no online room. Confirm that the chat window is not drawn and pressing `Y`, `U` or `I` is left to the game. The separate default `Show All Slots` position test may draw microphone icons only when live party-HUD rows exist; disable that switch when checking the strict no-visual baseline.
 2. Create an online room as host. After `AuthenticateLocalUserCompleted` and the matching successful `CreateEndpointCompleted`, confirm that the readiness transition log above appears even before a guest joins.
 3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.2 bridge is connected.
 4. Press `Y` once. The input field should open without inserting the activation key itself.
@@ -62,9 +63,22 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 13. Leave or disband the online room. Confirm the Overlay disappears immediately and `Y/U/I` return to the game before returning to title.
 14. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
 
+## 0.4.0 voice-indicator position preview
+
+This first 0.4 package validates HUD placement without requiring another player. `Enable Party Voice Indicators` and `Voice Indicator Debug: Show All Slots` are enabled by default. The debug override intentionally draws an idle microphone icon at 70% opacity for every active CPU/player HUD row; it is not proof that those rows use the Mod. Unlike chat and input, this explicit position-test override may render in a CPU party without an authenticated online room.
+
+1. Form a four-character CPU party in town. Confirm the log reports `Native party-HUD microphone anchors are live: layout=OnlineLobby, activeRows=4, viewport=...`; no manual layout selector exists. All four icons should sit immediately to the right of each compact party information row and must not cover portraits, names, level text or the CPU/platform badge area.
+2. Enter a quest with the battle party HUD. Confirm the same log reports `layout=Battle`; the local-player icon must follow the far-right edge of the long local HP row while the other three follow the separate right edge of the shorter teammate HP rows.
+3. Repeat at another resolution, HUD scale or ultrawide aspect if available. The icon must remain attached to the same native row edge because its center and size come from that live UI node's final transform; there is no screenshot reference resolution or uniform image scale to tune.
+4. If aggregate Party voice reaches `Speaking`, the debug local slot becomes 100% opaque; idle preview slots remain 70% opaque.
+5. Disable `Voice Indicator Debug: Show All Slots`. Preview.1 must hide every icon because secure remote ChatControl-to-party-slot identity mapping is deliberately not enabled yet. A CPU or vanilla player must never receive an inferred Mod badge.
+
+Remote per-slot talking state and Mod capability negotiation remain deferred until the native placements are approved. Automatic lobby/battle detection is already supplied by the two controller types. Record the game resolution, HUD scale, reported native layout/row count and a screenshot for every position correction. A real platform icon should remain in the portrait/name/badge region because the microphone anchors use the party-info/HP right edge; if it overlaps, preserve the log and screenshot before changing the selected child node.
+
 ## Failure handling
 
 - If `Native chat bridge validation failed` appears, preserve the reported executable SHA-256. The Overlay should remain usable as a local preview.
+- If `Native party-HUD anchor tracking unavailable` appears, preserve the complete signature-validation error. Chat and voice transport may continue, but microphone icons must remain hidden rather than fall back to screenshot coordinates.
 - If the game fails before `DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path`, disable the Mod and preserve the Reloaded-II log.
 - If the log reaches `[WndProcHook]` but not `First Direct3D11 Present callback`, collect the Windows Application Error/WER entry. That boundary distinguishes native backend or WndProc initialization from managed Overlay rendering.
 - If `Render callback recovered from an exception` appears, preserve the complete line. The callback guard released chat input capture, but the visual Overlay is degraded for that session.

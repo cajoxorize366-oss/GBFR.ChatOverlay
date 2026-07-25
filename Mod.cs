@@ -51,6 +51,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
     private readonly PartyLifecycleProbe? _partyLifecycleProbe;
+    private readonly RelinkPartyHudTracker? _partyHudTracker;
     private readonly LocalMicrophoneMonitor? _localMicrophoneMonitor;
     private readonly RelinkGameContextProbe? _gameContextProbe;
 
@@ -117,6 +118,21 @@ public class Mod : ModBase // <= Do not Remove.
                 _logger.WriteLine(
                     $"[{_modConfig.ModId}] Online Party-room gate unavailable; the Overlay will remain " +
                     $"hidden (fail-closed): {exception}");
+            }
+        }
+
+        if (_hooks is not null)
+        {
+            try
+            {
+                _partyHudTracker = new RelinkPartyHudTracker(_hooks, moduleLog);
+                _partyHudTracker.Initialize();
+            }
+            catch (Exception exception)
+            {
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Native party-HUD anchor tracking unavailable; " +
+                    $"voice indicators will remain hidden (fail-closed): {exception}");
             }
         }
 
@@ -210,6 +226,7 @@ public class Mod : ModBase // <= Do not Remove.
             IsOnlineRoomActive,
             ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
+            GetPartyHudAnchors,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
         _directInputKeyboard = new DirectInputKeyboardHook(
@@ -254,6 +271,7 @@ public class Mod : ModBase // <= Do not Remove.
         _directInputKeyboard?.Suspend();
         _localMicrophoneMonitor?.Suspend();
         _partyLifecycleProbe?.Suspend();
+        _partyHudTracker?.Suspend();
         _nativeChatBridge?.Suspend();
         _overlay?.Suspend();
     }
@@ -263,6 +281,7 @@ public class Mod : ModBase // <= Do not Remove.
         _overlay?.Resume();
         _localMicrophoneMonitor?.Resume();
         _partyLifecycleProbe?.Resume();
+        _partyHudTracker?.Resume();
         _nativeChatBridge?.Resume();
         _directInputKeyboard?.Resume();
     }
@@ -301,6 +320,17 @@ public class Mod : ModBase // <= Do not Remove.
 
     private bool IsOnlineRoomActive() =>
         _partyLifecycleProbe?.IsOnlineRoomActive == true;
+
+    private IReadOnlyList<PartyHudAnchor> GetPartyHudAnchors(
+        float viewportX,
+        float viewportY,
+        float viewportWidth,
+        float viewportHeight) =>
+        _partyHudTracker?.GetAnchors(
+            viewportX,
+            viewportY,
+            viewportWidth,
+            viewportHeight) ?? Array.Empty<PartyHudAnchor>();
 
     private void ReleaseRoomScopedInputs()
     {

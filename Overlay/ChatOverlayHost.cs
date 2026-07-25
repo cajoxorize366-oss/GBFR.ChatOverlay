@@ -35,6 +35,7 @@ public sealed class ChatOverlayHost
     private readonly Func<bool> _isOnlineRoomActive;
     private readonly Action _onOnlineRoomUnavailable;
     private readonly Func<PartyVoiceUiStatus> _getVoiceUiStatus;
+    private readonly Func<float, float, float, float, IReadOnlyList<PartyHudAnchor>> _getPartyHudAnchors;
     private readonly Action<string> _log;
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private ImeCandidateSnapshot? _imeCandidateSnapshot;
@@ -69,6 +70,7 @@ public sealed class ChatOverlayHost
         Func<bool> isOnlineRoomActive,
         Action onOnlineRoomUnavailable,
         Func<PartyVoiceUiStatus> getVoiceUiStatus,
+        Func<float, float, float, float, IReadOnlyList<PartyHudAnchor>> getPartyHudAnchors,
         Action<string> log)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
@@ -77,6 +79,7 @@ public sealed class ChatOverlayHost
         _onOnlineRoomUnavailable = onOnlineRoomUnavailable ??
             throw new ArgumentNullException(nameof(onOnlineRoomUnavailable));
         _getVoiceUiStatus = getVoiceUiStatus ?? throw new ArgumentNullException(nameof(getVoiceUiStatus));
+        _getPartyHudAnchors = getPartyHudAnchors ?? throw new ArgumentNullException(nameof(getPartyHudAnchors));
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
@@ -170,6 +173,9 @@ public sealed class ChatOverlayHost
                 onlineRoomActive ? 0 : 1);
             if (!onlineRoomActive && previousOnlineRoomInactive == 0)
                 NotifyOnlineRoomUnavailable();
+            var voiceUiStatus = _getVoiceUiStatus();
+            if (onlineRoomActive || configuration.ShowAllVoiceIndicatorSlots)
+                VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
             if (!configuration.EnableOverlay || !onlineRoomActive)
             {
                 ResetInteractionState();
@@ -205,7 +211,7 @@ public sealed class ChatOverlayHost
                 _statusText = null;
             }
 
-            DrawChatWindow(configuration, openedThisFrame);
+            DrawChatWindow(configuration, openedThisFrame, voiceUiStatus);
         }
         catch (Exception exception)
         {
@@ -214,7 +220,10 @@ public sealed class ChatOverlayHost
         }
     }
 
-    private void DrawChatWindow(Config configuration, bool openedThisFrame)
+    private void DrawChatWindow(
+        Config configuration,
+        bool openedThisFrame,
+        PartyVoiceUiStatus voiceUiStatus)
     {
         var viewport = ImGui.GetMainViewport();
         var workPosition = viewport.WorkPos;
@@ -254,7 +263,7 @@ public sealed class ChatOverlayHost
             var imeCandidateText = composerOpen
                 ? GetImeCandidateFallbackText(configuration.EnableImeCandidateFallback)
                 : null;
-            DrawVoiceStatus();
+            DrawVoiceStatus(voiceUiStatus);
             DrawHistory(composerOpen, imeCandidateText);
             if (composerOpen)
                 DrawComposer(openedThisFrame, imeCandidateText);
@@ -265,9 +274,9 @@ public sealed class ChatOverlayHost
         }
     }
 
-    private void DrawVoiceStatus()
+    private static void DrawVoiceStatus(PartyVoiceUiStatus voiceUiStatus)
     {
-        var presentation = VoiceOverlayPresenter.Create(_getVoiceUiStatus());
+        var presentation = VoiceOverlayPresenter.Create(voiceUiStatus);
         if (!presentation.IsVisible)
             return;
 

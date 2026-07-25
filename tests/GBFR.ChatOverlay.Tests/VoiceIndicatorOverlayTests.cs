@@ -86,6 +86,22 @@ public sealed class VoiceIndicatorOverlayTests
         Assert.Equal(0x0038220Cu, VoiceIndicatorOverlay.PackColor(0x0C, 0x22, 0x38, -1.0f));
     }
 
+    [Fact]
+    public void CreatePalette_KeepsSeventyPercentIdleAlphaButMakesIdleVisiblyMuted()
+    {
+        var idle = VoiceIndicatorOverlay.CreatePalette(
+            isSpeaking: false,
+            VoiceIndicatorOverlay.IdleOpacity);
+        var speaking = VoiceIndicatorOverlay.CreatePalette(
+            isSpeaking: true,
+            VoiceIndicatorOverlay.SpeakingOpacity);
+
+        Assert.Equal(0xB2000000u, idle.Foreground & 0xFF000000u);
+        Assert.Equal(0xFF000000u, speaking.Foreground & 0xFF000000u);
+        Assert.NotEqual(idle.Foreground & 0x00FFFFFFu, speaking.Foreground & 0x00FFFFFFu);
+        Assert.NotEqual(idle.Accent & 0x00FFFFFFu, speaking.Accent & 0x00FFFFFFu);
+    }
+
     private static void AssertPlacement(
         VoiceIndicatorPlacement placement,
         int slotIndex,

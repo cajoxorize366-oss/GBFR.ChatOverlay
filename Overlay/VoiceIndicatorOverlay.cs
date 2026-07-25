@@ -12,6 +12,11 @@ internal readonly record struct VoiceIndicatorPlacement(
     float Opacity,
     bool IsSpeaking);
 
+internal readonly record struct VoiceIndicatorPalette(
+    uint Accent,
+    uint Foreground,
+    uint Background);
+
 internal static class VoiceIndicatorOverlay
 {
     internal const float IdleOpacity = 0.70f;
@@ -91,6 +96,25 @@ internal static class VoiceIndicatorOverlay
                ((uint)alpha << 24);
     }
 
+    internal static VoiceIndicatorPalette CreatePalette(bool isSpeaking, float opacity)
+    {
+        if (isSpeaking)
+        {
+            return new VoiceIndicatorPalette(
+                PackColor(105, 224, 255, opacity),
+                PackColor(245, 252, 255, opacity),
+                PackColor(6, 15, 23, opacity * 0.72f));
+        }
+
+        // Keep the requested 70% alpha, but use a muted idle palette as well.
+        // A bright white 70%-alpha glyph still looked nearly opaque against
+        // Relink's dark battle backgrounds, making the state change too subtle.
+        return new VoiceIndicatorPalette(
+            PackColor(72, 137, 154, opacity),
+            PackColor(164, 181, 188, opacity),
+            PackColor(6, 15, 23, opacity * 0.50f));
+    }
+
     private static void DrawMicrophone(ImDrawList drawList, VoiceIndicatorPlacement placement)
     {
         var size = placement.Size;
@@ -99,13 +123,17 @@ internal static class VoiceIndicatorOverlay
         var centerY = placement.CenterY;
         var radius = size * 0.5f;
         var lineWidth = Math.Max(1.0f, size * 0.065f);
-        var accent = PackColor(105, 224, 255, opacity);
-        var foreground = PackColor(245, 252, 255, opacity);
-        var background = PackColor(6, 15, 23, opacity * 0.72f);
+        var palette = CreatePalette(placement.IsSpeaking, opacity);
 
         using var center = CreateVector2(centerX, centerY);
-        ImGui.ImDrawListAddCircleFilled(drawList, center, radius, background, 24);
-        ImGui.ImDrawListAddCircle(drawList, center, radius - (lineWidth * 0.5f), accent, 24, lineWidth);
+        ImGui.ImDrawListAddCircleFilled(drawList, center, radius, palette.Background, 24);
+        ImGui.ImDrawListAddCircle(
+            drawList,
+            center,
+            radius - (lineWidth * 0.5f),
+            palette.Accent,
+            24,
+            lineWidth);
 
         var capsuleHalfWidth = size * 0.12f;
         var capsuleTop = centerY - (size * 0.28f);
@@ -116,7 +144,7 @@ internal static class VoiceIndicatorOverlay
             drawList,
             capsuleMinimum,
             capsuleMaximum,
-            foreground,
+            palette.Foreground,
             capsuleHalfWidth,
             0);
 
@@ -129,16 +157,16 @@ internal static class VoiceIndicatorOverlay
             0.0f,
             MathF.PI,
             12);
-        ImGui.ImDrawListPathStroke(drawList, foreground, 0, lineWidth);
+        ImGui.ImDrawListPathStroke(drawList, palette.Foreground, 0, lineWidth);
 
         var stemTop = centerY + (size * 0.18f);
         var stemBottom = centerY + (size * 0.29f);
         using var stemStart = CreateVector2(centerX, stemTop);
         using var stemEnd = CreateVector2(centerX, stemBottom);
-        ImGui.ImDrawListAddLine(drawList, stemStart, stemEnd, foreground, lineWidth);
+        ImGui.ImDrawListAddLine(drawList, stemStart, stemEnd, palette.Foreground, lineWidth);
         using var baseStart = CreateVector2(centerX - (size * 0.13f), stemBottom);
         using var baseEnd = CreateVector2(centerX + (size * 0.13f), stemBottom);
-        ImGui.ImDrawListAddLine(drawList, baseStart, baseEnd, foreground, lineWidth);
+        ImGui.ImDrawListAddLine(drawList, baseStart, baseEnd, palette.Foreground, lineWidth);
     }
 
     private static ImVec2 CreateVector2(float x, float y)

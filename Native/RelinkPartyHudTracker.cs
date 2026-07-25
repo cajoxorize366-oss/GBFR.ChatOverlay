@@ -36,7 +36,11 @@ internal sealed class RelinkPartyHudTracker
     private const float NativeRightEdgeGap = 18.0f;
 
     private static readonly int[] TownTargetPointerOffsets = [0x1B8, 0x230];
-    private static readonly int[] BattleTargetPointerOffsets = [0x3F0, 0x3B0, 0x1B0];
+    // ControllerPlParameter01 object refs are 0x20 bytes each. The resolved
+    // pointers below are HpGauge01 and HpGauge02. HpGaugeMask is a narrow mask
+    // node near the name-side of the row and Root does not describe the HP
+    // bar's far-right edge, so neither is a safe fallback for this anchor.
+    private static readonly int[] BattleTargetPointerOffsets = [0x3B0, 0x3D0];
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Action<string> _log;
@@ -67,6 +71,8 @@ internal sealed class RelinkPartyHudTracker
     }
 
     internal bool IsInitialized => Volatile.Read(ref _initialized);
+
+    internal static ReadOnlySpan<int> BattleAnchorPointerOffsets => BattleTargetPointerOffsets;
 
     internal void Initialize()
     {

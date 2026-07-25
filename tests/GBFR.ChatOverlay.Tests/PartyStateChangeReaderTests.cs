@@ -61,6 +61,70 @@ public sealed class PartyStateChangeReaderTests
     }
 
     [Fact]
+    public void Read_DestroyEndpointCompleted_UsesOfficialPack8Offsets()
+    {
+        var pointer = Marshal.AllocHGlobal(40);
+        try
+        {
+            Zero(pointer, 40);
+            Marshal.WriteInt32(pointer, 0, (int)PartyStateChangeType.DestroyEndpointCompleted);
+            Marshal.WriteInt32(pointer, 4, 0);
+            Marshal.WriteInt32(pointer, 8, unchecked((int)0xAABBCCDD));
+            Marshal.WriteIntPtr(pointer, 16, (nint)0x1111);
+            Marshal.WriteIntPtr(pointer, 24, (nint)0x2222);
+            Marshal.WriteIntPtr(pointer, 32, (nint)0x3333);
+
+            var snapshot = PartyStateChangeReader.Read(pointer);
+
+            Assert.Equal(0u, snapshot.Result);
+            Assert.Equal(0xAABBCCDDu, snapshot.ErrorDetail);
+            Assert.Equal((nint)0x1111, snapshot.Network);
+            Assert.Equal((nint)0x2222, snapshot.Endpoint);
+            Assert.Equal((nint)0x3333, snapshot.AsyncIdentifier);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    [Fact]
+    public void Read_EndpointDestroyedAndLocalUserKicked_CopyTeardownHandles()
+    {
+        var endpointPointer = Marshal.AllocHGlobal(32);
+        var kickedPointer = Marshal.AllocHGlobal(24);
+        try
+        {
+            Zero(endpointPointer, 32);
+            Marshal.WriteInt32(endpointPointer, 0, (int)PartyStateChangeType.EndpointDestroyed);
+            Marshal.WriteIntPtr(endpointPointer, 8, (nint)0x1111);
+            Marshal.WriteIntPtr(endpointPointer, 16, (nint)0x2222);
+            Marshal.WriteInt32(endpointPointer, 24, 3);
+            Marshal.WriteInt32(endpointPointer, 28, 0x1234);
+
+            Zero(kickedPointer, 24);
+            Marshal.WriteInt32(kickedPointer, 0, (int)PartyStateChangeType.LocalUserKicked);
+            Marshal.WriteIntPtr(kickedPointer, 8, (nint)0x3333);
+            Marshal.WriteIntPtr(kickedPointer, 16, (nint)0x4444);
+
+            var endpoint = PartyStateChangeReader.Read(endpointPointer);
+            var kicked = PartyStateChangeReader.Read(kickedPointer);
+
+            Assert.Equal((nint)0x1111, endpoint.Network);
+            Assert.Equal((nint)0x2222, endpoint.Endpoint);
+            Assert.Equal(3u, endpoint.Reason);
+            Assert.Equal(0x1234u, endpoint.ErrorDetail);
+            Assert.Equal((nint)0x3333, kicked.Network);
+            Assert.Equal((nint)0x4444, kicked.LocalUser);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(endpointPointer);
+            Marshal.FreeHGlobal(kickedPointer);
+        }
+    }
+
+    [Fact]
     public void Read_JoinedAndLeftNetwork_CopiesRemoteObservableHandles()
     {
         var joinedPointer = Marshal.AllocHGlobal(24);

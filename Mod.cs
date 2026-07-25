@@ -52,6 +52,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly RelinkChatBridge? _nativeChatBridge;
     private readonly PartyLifecycleProbe? _partyLifecycleProbe;
     private readonly LocalMicrophoneMonitor? _localMicrophoneMonitor;
+    private readonly RelinkGameContextProbe? _gameContextProbe;
 
     public Mod(ModContext context)
     {
@@ -64,6 +65,20 @@ public class Mod : ModBase // <= Do not Remove.
 
         Action<string> moduleLog =
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+        if (_hooks is not null)
+        {
+            try
+            {
+                _gameContextProbe = RelinkGameContextProbe.CreateForCurrentProcess(moduleLog);
+            }
+            catch (Exception exception)
+            {
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Relink native chat-manager probe unavailable; " +
+                    $"native sends will fail closed: {exception.Message}");
+            }
+        }
+
         var audioInputSelection = ResolvedAudioEndpointSelection.SystemDefault();
         var audioOutputSelection = ResolvedAudioEndpointSelection.SystemDefault();
         if (_configuration.EnableMutedPartyChatControlCanary || _configuration.EnableVoiceInput)
@@ -81,10 +96,7 @@ public class Mod : ModBase // <= Do not Remove.
                 moduleLog);
         }
 
-        if (_hooks is not null &&
-            (_configuration.EnablePartyLifecycleProbe ||
-             _configuration.EnableMutedPartyChatControlCanary ||
-             _configuration.EnableVoiceInput))
+        if (_hooks is not null)
         {
             try
             {
@@ -102,7 +114,9 @@ public class Mod : ModBase // <= Do not Remove.
             }
             catch (Exception exception)
             {
-                _logger.WriteLine($"[{_modConfig.ModId}] Party lifecycle probe unavailable: {exception}");
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Online Party-room gate unavailable; the Overlay will remain " +
+                    $"hidden (fail-closed): {exception}");
             }
         }
 
@@ -148,8 +162,10 @@ public class Mod : ModBase // <= Do not Remove.
             {
                 _nativeChatBridge = new RelinkChatBridge(
                     _hooks,
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                    _gameContextProbe);
                 _nativeChatBridge.Initialize();
+                _gameContextProbe ??= _nativeChatBridge.GameContext;
                 transport = _nativeChatBridge;
                 incoming = _nativeChatBridge;
                 transportStatus = "Native Relink chat connected (2.0.2).";
@@ -191,6 +207,8 @@ public class Mod : ModBase // <= Do not Remove.
         _overlay = new ChatOverlayHost(
             _chatSession,
             () => _configuration,
+            IsOnlineRoomActive,
+            ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
@@ -198,11 +216,13 @@ public class Mod : ModBase // <= Do not Remove.
             _hooks,
             _overlay.TryRequestOpen,
             _overlay.ShouldCaptureKeyboard,
-            () => _configuration.EnableVoiceInput &&
+            () => IsOnlineRoomActive() &&
+                  _configuration.EnableVoiceInput &&
                   _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
-            () => _configuration.EnableVoiceInput &&
+            () => IsOnlineRoomActive() &&
+                  _configuration.EnableVoiceInput &&
                   _localMicrophoneMonitor?.IsAvailable == true,
             pressed => _localMicrophoneMonitor?.SetPressed(pressed),
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
@@ -277,6 +297,15 @@ public class Mod : ModBase // <= Do not Remove.
             return new PartyVoiceUiStatus(PartyVoiceUiState.LocalSelfTestFailed);
 
         return _partyLifecycleProbe?.VoiceUiStatus ?? PartyVoiceUiStatus.Unavailable;
+    }
+
+    private bool IsOnlineRoomActive() =>
+        _partyLifecycleProbe?.IsOnlineRoomActive == true;
+
+    private void ReleaseRoomScopedInputs()
+    {
+        _partyLifecycleProbe?.SetPushToTalkPressed(false);
+        _localMicrophoneMonitor?.SetPressed(false);
     }
 
     #region For Exports, Serialization etc.

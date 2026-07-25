@@ -19,6 +19,14 @@ The Reloaded-II log should contain messages equivalent to:
 
 The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after the game initializes DirectInput.
 
+The ImGui backend and Relink's native chat manager may both initialize before an online room exists. They are not room-readiness signals. The Overlay itself and its `Y/U/I` interception must remain inactive on the title, save-selection, loading and solo-town flows. It opens only after Relink authenticates the local user on an existing PartyNetwork and successfully creates the matching local gameplay endpoint. A host does not need to wait for a remote player. The log should then contain exactly one transition line:
+
+```text
+[gbfr.qol.chatoverlay] Relink online Party room became active; overlay rendering and Y/U/I hotkeys are now enabled.
+```
+
+Calling `PartyNetworkLeaveNetwork`, or observing the matching endpoint, local user, Network or Party manager being destroyed, must hide the Overlay again and release any open composer or held voice/local-monitor input.
+
 After the chat field first becomes active, the log should also contain exactly one line equivalent to:
 
 ```text
@@ -29,17 +37,20 @@ After the chat field first becomes active, the log should also contain exactly o
 
 ## Visual and input checks
 
-1. Confirm that the lower-left system message says the native Relink 2.0.2 bridge is connected.
-2. Press `Y` once. The input field should open without inserting the activation key itself.
-3. Enter `ABC123`, then use Microsoft Pinyin and Sogou to commit `我是`. The field must contain exactly `ABC123我是` once: `我` must never become `ÎÒ`, and Latin characters must not duplicate.
-4. While composing with Sogou, confirm that its candidate window is visible beside/below the chat field and follows it in windowed, borderless and fullscreen modes. Select candidates with both number keys and mouse; composition must remain active instead of disappearing on the candidate window's transient focus change.
-5. Press Escape during an unfinished composition, reopen with `Y`, and type `我是` again. No pending lead byte, old composition or candidate window may leak into the new input session.
-6. In an online lobby or party, press Enter and confirm a second vanilla client receives the message.
-7. Have the second client send a free-text reply. Confirm it appears once in the Overlay history.
-8. Confirm the local message appears once as `You`; a server echo with identical text should not add a duplicate line.
-9. While the input field is open, press movement and combat keys. The game should not respond to them.
-10. Press Escape. The input field should close, and controls should resume after held keys have been released.
-11. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
+1. Stay on the title screen, save-selection screen, loading screen and a solo town with no online room. Confirm that no Overlay is drawn and pressing `Y`, `U` or `I` is left to the game.
+2. Create an online room as host. After `AuthenticateLocalUserCompleted` and the matching successful `CreateEndpointCompleted`, confirm that the readiness transition log above appears even before a guest joins.
+3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.2 bridge is connected.
+4. Press `Y` once. The input field should open without inserting the activation key itself.
+5. Enter `ABC123`, then use Microsoft Pinyin and Sogou to commit `我是`. The field must contain exactly `ABC123我是` once: `我` must never become `ÎÒ`, and Latin characters must not duplicate.
+6. While composing with Sogou, confirm that its candidate window is visible beside/below the chat field and follows it in windowed, borderless and fullscreen modes. Select candidates with both number keys and mouse; composition must remain active instead of disappearing on the candidate window's transient focus change.
+7. Press Escape during an unfinished composition, reopen with `Y`, and type `我是` again. No pending lead byte, old composition or candidate window may leak into the new input session.
+8. In the online room, press Enter and confirm the other client receives the message.
+9. Have the second client send a free-text reply. Confirm it appears once in the Overlay history.
+10. Confirm the local message appears once as `You`; a server echo with identical text should not add a duplicate line.
+11. While the input field is open, press movement and combat keys. The game should not respond to them.
+12. Press Escape. The input field should close, and controls should resume after held keys have been released.
+13. Leave or disband the online room. Confirm the Overlay disappears immediately and `Y/U/I` return to the game before returning to title.
+14. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
 
 ## Failure handling
 
@@ -55,7 +66,7 @@ After the chat field first becomes active, the log should also contain exactly o
 
 ## Party lifecycle foundation
 
-The PlayFab Party lifecycle probe is enabled by default. The probe itself is observation-only; the separately configured Stage 2/3 ChatControl canary makes the Party calls described below. Restart the Mod after changing either Party option.
+The observation-only PlayFab Party lifecycle hook is always active because it is the Overlay's online-room gate. `Log Party Lifecycle Diagnostics` controls only event logging; the separately configured Stage 2/3 ChatControl canary makes the Party calls described below. Restart the Mod after changing either Party option.
 
 Expected startup evidence:
 

@@ -52,10 +52,16 @@ internal static class PartyStateChangeReader
                 ReadAuthenticateLocalUserCompleted(stateChange, type),
             PartyStateChangeType.CreateEndpointCompleted =>
                 ReadCreateEndpointCompleted(stateChange, type),
+            PartyStateChangeType.DestroyEndpointCompleted =>
+                ReadDestroyEndpointCompleted(stateChange, type),
+            PartyStateChangeType.EndpointDestroyed =>
+                ReadEndpointDestroyed(stateChange, type),
             PartyStateChangeType.DestroyLocalUserCompleted =>
                 ReadDestroyLocalUserCompleted(stateChange, type),
             PartyStateChangeType.LocalUserRemoved =>
                 ReadLocalUserRemoved(stateChange, type),
+            PartyStateChangeType.LocalUserKicked =>
+                ReadLocalUserKicked(stateChange, type),
             PartyStateChangeType.RemoveLocalUserCompleted =>
                 ReadRemoveLocalUserCompleted(stateChange, type),
             PartyStateChangeType.LeaveNetworkCompleted =>
@@ -129,6 +135,25 @@ internal static class PartyStateChangeReader
             Endpoint = Marshal.ReadIntPtr(pointer, 40),
         };
 
+    private static PartyStateChangeSnapshot ReadDestroyEndpointCompleted(nint pointer, uint type) =>
+        new(type)
+        {
+            Result = ReadUInt32(pointer, 4),
+            ErrorDetail = ReadUInt32(pointer, 8),
+            Network = Marshal.ReadIntPtr(pointer, 16),
+            Endpoint = Marshal.ReadIntPtr(pointer, 24),
+            AsyncIdentifier = Marshal.ReadIntPtr(pointer, 32),
+        };
+
+    private static PartyStateChangeSnapshot ReadEndpointDestroyed(nint pointer, uint type) =>
+        new(type)
+        {
+            Network = Marshal.ReadIntPtr(pointer, 8),
+            Endpoint = Marshal.ReadIntPtr(pointer, 16),
+            Reason = ReadUInt32(pointer, 24),
+            ErrorDetail = ReadUInt32(pointer, 28),
+        };
+
     private static PartyStateChangeSnapshot ReadDestroyLocalUserCompleted(nint pointer, uint type) =>
         new(type)
         {
@@ -144,6 +169,13 @@ internal static class PartyStateChangeReader
             Network = Marshal.ReadIntPtr(pointer, 8),
             LocalUser = Marshal.ReadIntPtr(pointer, 16),
             Reason = ReadUInt32(pointer, 24),
+        };
+
+    private static PartyStateChangeSnapshot ReadLocalUserKicked(nint pointer, uint type) =>
+        new(type)
+        {
+            Network = Marshal.ReadIntPtr(pointer, 8),
+            LocalUser = Marshal.ReadIntPtr(pointer, 16),
         };
 
     private static PartyStateChangeSnapshot ReadRemoveLocalUserCompleted(nint pointer, uint type) =>

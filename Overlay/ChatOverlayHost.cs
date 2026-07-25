@@ -31,6 +31,8 @@ public sealed class ChatOverlayHost
 
     private readonly ChatSession _session;
     private readonly Func<Config> _getConfiguration;
+    private readonly Func<bool> _isOnlineRoomActive;
+    private readonly Action _onOnlineRoomUnavailable;
     private readonly Func<PartyVoiceUiStatus> _getVoiceUiStatus;
     private readonly Action<string> _log;
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
@@ -41,6 +43,8 @@ public sealed class ChatOverlayHost
     private int _imeCompatibilityLogged;
     private int _imeDecodeFailureLogged;
     private int _renderThreadLogged;
+    private int _onlineRoomGateFailureLogged;
+    private int _onlineRoomWasInactive = 1;
     private int _releaseCaptureFrames;
     private int _pendingAnsiLeadByte = -1;
     private int _attachedDefaultImeContext;
@@ -54,11 +58,16 @@ public sealed class ChatOverlayHost
     internal ChatOverlayHost(
         ChatSession session,
         Func<Config> getConfiguration,
+        Func<bool> isOnlineRoomActive,
+        Action onOnlineRoomUnavailable,
         Func<PartyVoiceUiStatus> getVoiceUiStatus,
         Action<string> log)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
+        _isOnlineRoomActive = isOnlineRoomActive ?? throw new ArgumentNullException(nameof(isOnlineRoomActive));
+        _onOnlineRoomUnavailable = onOnlineRoomUnavailable ??
+            throw new ArgumentNullException(nameof(onOnlineRoomUnavailable));
         _getVoiceUiStatus = getVoiceUiStatus ?? throw new ArgumentNullException(nameof(getVoiceUiStatus));
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
@@ -69,6 +78,7 @@ public sealed class ChatOverlayHost
     {
         if (!Volatile.Read(ref _initialized) ||
             !_getConfiguration().EnableOverlay ||
+            !IsOnlineRoomActive() ||
             _session.Composer.IsOpen)
             return false;
 
@@ -79,7 +89,9 @@ public sealed class ChatOverlayHost
     }
 
     public bool ShouldCaptureKeyboard() =>
-        _getConfiguration().EnableOverlay && Volatile.Read(ref _captureKeyboard) != 0;
+        _getConfiguration().EnableOverlay &&
+        IsOnlineRoomActive() &&
+        Volatile.Read(ref _captureKeyboard) != 0;
 
     public async Task InitializeAsync(IReloadedHooks hooks)
     {
@@ -141,14 +153,22 @@ public sealed class ChatOverlayHost
 
             _session.DrainIncoming();
             var configuration = _getConfiguration();
-            if (!configuration.EnableOverlay)
+            var onlineRoomActive = IsOnlineRoomActive();
+            var previousOnlineRoomInactive = Interlocked.Exchange(
+                ref _onlineRoomWasInactive,
+                onlineRoomActive ? 0 : 1);
+            if (!onlineRoomActive && previousOnlineRoomInactive == 0)
+                NotifyOnlineRoomUnavailable();
+            if (!configuration.EnableOverlay || !onlineRoomActive)
             {
-                _session.Composer.Cancel();
-                Interlocked.Exchange(ref _openRequested, 0);
-                Interlocked.Exchange(ref _captureKeyboard, 0);
-                Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-                DetachDefaultImeContextIfOwned();
+                ResetInteractionState();
                 return;
+            }
+
+            if (previousOnlineRoomInactive != 0)
+            {
+                LogSafely(
+                    "Relink online Party room became active; overlay rendering and Y/U/I hotkeys are now enabled.");
             }
 
             if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
@@ -176,11 +196,7 @@ public sealed class ChatOverlayHost
         }
         catch (Exception exception)
         {
-            _session.Composer.Cancel();
-            Interlocked.Exchange(ref _openRequested, 0);
-            Interlocked.Exchange(ref _captureKeyboard, 0);
-            Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-            DetachDefaultImeContextIfOwned();
+            ResetInteractionState();
             LogSafely($"Render callback recovered from an exception: {exception}");
         }
     }
@@ -325,7 +341,7 @@ public sealed class ChatOverlayHost
 
     private bool ShouldCaptureWindowMessage(uint message, nint wParam)
     {
-        if (!_getConfiguration().EnableOverlay)
+        if (!_getConfiguration().EnableOverlay || !IsOnlineRoomActive())
             return false;
 
         var composerOpen = _session.Composer.IsOpen;
@@ -333,9 +349,13 @@ public sealed class ChatOverlayHost
             (message is WmKeyDown or WmSysKeyDown) &&
             wParam == VirtualKeyY)
         {
-            TryRequestOpen();
-            Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 1);
-            return true;
+            if (TryRequestOpen())
+            {
+                Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 1);
+                return true;
+            }
+
+            return false;
         }
 
         if ((message is WmKeyUp or WmSysKeyUp) &&
@@ -351,6 +371,7 @@ public sealed class ChatOverlayHost
 
     private bool IsCapturingTextInput() =>
         _getConfiguration().EnableOverlay &&
+        IsOnlineRoomActive() &&
         Volatile.Read(ref _captureKeyboard) != 0 &&
         _session.Composer.IsOpen;
 
@@ -483,6 +504,52 @@ public sealed class ChatOverlayHost
         var windowHandle = Volatile.Read(ref _windowHandle);
         if (windowHandle != nint.Zero)
             Win32ImeCompatibility.DetachDefaultContext(windowHandle);
+    }
+
+    private bool IsOnlineRoomActive()
+    {
+        try
+        {
+            return _isOnlineRoomActive();
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _onlineRoomGateFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    $"Overlay online-room gate failed closed; further failures are suppressed: " +
+                    $"{exception.GetType().Name}: {exception.Message}.");
+            }
+
+            return false;
+        }
+    }
+
+    private void ResetInteractionState()
+    {
+        _session.Composer.Cancel();
+        Interlocked.Exchange(ref _openRequested, 0);
+        Interlocked.Exchange(ref _captureKeyboard, 0);
+        Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
+        Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+        DetachDefaultImeContextIfOwned();
+        _releaseCaptureFrames = 0;
+        _focusInputNextFrame = false;
+        _statusText = null;
+    }
+
+    private void NotifyOnlineRoomUnavailable()
+    {
+        try
+        {
+            _onOnlineRoomUnavailable();
+        }
+        catch (Exception exception)
+        {
+            LogSafely(
+                $"Overlay online-room release callback failed closed: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+        }
     }
 
     private void LogImeCompatibility(nint windowHandle, uint codePage)

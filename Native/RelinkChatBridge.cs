@@ -14,25 +14,31 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Action<string> _log;
+    private readonly RelinkGameContextProbe? _configuredGameContext;
     private readonly ConcurrentQueue<IncomingChatMessage> _incoming = new();
     private readonly RecentEchoSuppressor _echoSuppressor = new();
     private readonly object _lifecycleSync = new();
 
     private IHook<SendMessageDelegate>? _sendHook;
     private IHook<RpcMessageDelegate>? _rpcHook;
-    private nint _managerSlot;
     private bool _initialized;
     private bool _suspended;
     private int _incomingCount;
     private int _decodeFailureLogged;
 
-    public RelinkChatBridge(ReloadedHooksApi hooks, Action<string> log)
+    public RelinkChatBridge(
+        ReloadedHooksApi hooks,
+        Action<string> log,
+        RelinkGameContextProbe? gameContext = null)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _configuredGameContext = gameContext;
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
+
+    public RelinkGameContextProbe? GameContext { get; private set; }
 
     public void Initialize()
     {
@@ -41,14 +47,12 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
             if (_initialized)
                 return;
 
-            using var process = Process.GetCurrentProcess();
-            var mainModule = process.MainModule ??
-                throw new InvalidOperationException("The game module is unavailable.");
-            var imagePath = mainModule.FileName;
-            var moduleBase = mainModule.BaseAddress;
-            var rvas = RelinkBuildLocator.Resolve(imagePath);
+            var gameContext = _configuredGameContext ??
+                RelinkGameContextProbe.CreateForCurrentProcess(_log);
+            var moduleBase = gameContext.ModuleBase;
+            var rvas = gameContext.ChatRvas;
 
-            _managerSlot = moduleBase + rvas.ManagerSlot;
+            GameContext = gameContext;
             try
             {
                 _sendHook = _hooks.CreateHook<SendMessageDelegate>(
@@ -72,7 +76,7 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                 _sendHook?.Disable();
                 _rpcHook = null;
                 _sendHook = null;
-                _managerSlot = nint.Zero;
+                GameContext = null;
                 throw;
             }
         }
@@ -97,8 +101,7 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
             if (!IsInitialized || _suspended)
                 return ChatSendResult.Unavailable("The Relink native chat bridge is not active.");
 
-            var manager = Marshal.ReadIntPtr(_managerSlot);
-            if (manager == nint.Zero)
+            if (GameContext?.TryGetHudChatManager(out var manager) != true)
                 return ChatSendResult.Unavailable("Relink's chat Manager is not ready in the current game state.");
 
             var utf8 = new byte[byteCount + 1];

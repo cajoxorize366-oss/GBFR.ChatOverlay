@@ -26,6 +26,7 @@ public sealed class PartyLifecycleProbe
     private readonly ResolvedAudioEndpointSelection _audioOutputSelection;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentQueue<string> _pendingLogs = new();
+    private readonly PartyRoomSessionTracker _onlineRoom = new();
 
     private IHook<PartyInitializeDelegate>? _initializeHook;
     private IHook<PartyCleanupDelegate>? _cleanupHook;
@@ -66,6 +67,9 @@ public sealed class PartyLifecycleProbe
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
+
+    public bool IsOnlineRoomActive =>
+        IsInitialized && !Volatile.Read(ref _suspended) && _onlineRoom.IsActive;
 
     public bool IsVoiceTestAvailable => IsInitialized && _enableVoiceTest && _chatControlCanary is not null;
 
@@ -166,13 +170,10 @@ public sealed class PartyLifecycleProbe
                     NativeLibrary.GetExport(module, "PartyCleanup"));
                 _cleanupHook.Activate();
 
-                if (_chatControlCanary is not null)
-                {
-                    _leaveNetworkHook = _hooks.CreateHook<PartyNetworkLeaveNetworkDelegate>(
-                        PartyNetworkLeaveNetwork,
-                        NativeLibrary.GetExport(module, "PartyNetworkLeaveNetwork"));
-                    _leaveNetworkHook.Activate();
-                }
+                _leaveNetworkHook = _hooks.CreateHook<PartyNetworkLeaveNetworkDelegate>(
+                    PartyNetworkLeaveNetwork,
+                    NativeLibrary.GetExport(module, "PartyNetworkLeaveNetwork"));
+                _leaveNetworkHook.Activate();
 
                 _startProcessingHook = _hooks.CreateHook<PartyStartProcessingStateChangesDelegate>(
                     PartyStartProcessingStateChanges,
@@ -203,6 +204,7 @@ public sealed class PartyLifecycleProbe
                 _audioWorkPump = null;
                 _chatControlCanary?.Dispose();
                 _chatControlCanary = null;
+                _onlineRoom.Reset();
                 throw;
             }
         }
@@ -285,6 +287,7 @@ public sealed class PartyLifecycleProbe
             if (result == 0 && handleOutput != nint.Zero)
             {
                 var handle = Marshal.ReadIntPtr(handleOutput);
+                _onlineRoom.Reset();
                 if (CapturePartyHandle(handle, "PartyInitialize"))
                     EnsureAudioWorkPump(handle, "PartyInitialize");
             }
@@ -312,7 +315,10 @@ public sealed class PartyLifecycleProbe
         if (Volatile.Read(ref _suspended))
         {
             if (result == 0)
+            {
                 Interlocked.CompareExchange(ref _partyHandle, nint.Zero, handle);
+                _onlineRoom.Reset();
+            }
             _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: result == 0);
             return result;
         }
@@ -322,6 +328,7 @@ public sealed class PartyLifecycleProbe
             if (result == 0)
             {
                 Interlocked.CompareExchange(ref _partyHandle, nint.Zero, handle);
+                _onlineRoom.Reset();
                 _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: true);
                 EnqueueLog($"PartyCleanup completed for manager 0x{(nuint)handle:X}.");
             }
@@ -355,7 +362,10 @@ public sealed class PartyLifecycleProbe
             }
         }
 
-        return _leaveNetworkHook!.OriginalFunction(network, asyncIdentifier);
+        var result = _leaveNetworkHook!.OriginalFunction(network, asyncIdentifier);
+        if (!Volatile.Read(ref _suspended) && result == 0)
+            _onlineRoom.MarkNetworkLeaveQueued(network);
+        return result;
     }
 
     private uint PartyStartProcessingStateChanges(
@@ -481,6 +491,7 @@ public sealed class PartyLifecycleProbe
     {
         if (stateChangeCountOutput == nint.Zero || stateChangesOutput == nint.Zero)
         {
+            _onlineRoom.Reset();
             _chatControlCanary?.DisableFailClosed(
                 "Party returned null state-change output storage");
             return;
@@ -491,6 +502,7 @@ public sealed class PartyLifecycleProbe
             return;
         if (count > MaximumStateChangesPerBatch)
         {
+            _onlineRoom.Reset();
             _chatControlCanary?.DisableFailClosed(
                 $"Party state batch count {count} exceeded the safety limit");
             EnqueueLog($"Party state batch count {count} exceeds the probe safety limit; batch ignored.");
@@ -500,6 +512,7 @@ public sealed class PartyLifecycleProbe
         var stateChanges = Marshal.ReadIntPtr(stateChangesOutput);
         if (stateChanges == nint.Zero)
         {
+            _onlineRoom.Reset();
             _chatControlCanary?.DisableFailClosed(
                 "Party returned a non-empty state batch with a null array");
             return;
@@ -510,12 +523,14 @@ public sealed class PartyLifecycleProbe
             var stateChange = Marshal.ReadIntPtr(stateChanges, checked((int)(index * (uint)nint.Size)));
             if (stateChange == nint.Zero)
             {
+                _onlineRoom.Reset();
                 _chatControlCanary?.DisableFailClosed(
                     $"Party state batch entry {index} was null");
-                continue;
+                return;
             }
 
             var snapshot = PartyStateChangeReader.Read(stateChange);
+            _onlineRoom.Observe(snapshot);
             if (_enableLifecycleLogging && PartyStateChangeCatalog.IsLifecycle(snapshot.Type))
             {
                 EnqueueLog(
@@ -548,6 +563,7 @@ public sealed class PartyLifecycleProbe
         EnqueueLog(
             $"Party manager ownership conflict at {source}: retained 0x{(nuint)previous:X}, " +
             $"rejected 0x{(nuint)handle:X}; Stage 2 will fail closed.");
+        _onlineRoom.Reset();
         _chatControlCanary?.CaptureManager(handle, source);
         return false;
     }
@@ -562,6 +578,7 @@ public sealed class PartyLifecycleProbe
 
     private void LogInspectionFailureOnce(Exception exception)
     {
+        _onlineRoom.Reset();
         _chatControlCanary?.DisableFailClosed(
             $"Party state inspection threw {exception.GetType().Name}: {exception.Message}");
         if (Interlocked.Exchange(ref _inspectionFailureLogged, 1) == 0)

@@ -8,7 +8,7 @@ namespace GBFR.ChatOverlay.Configuration;
 public class Config : Configurable<Config>
 {
     [DisplayName("Enable Overlay")]
-    [Description("Show the chat overlay when the rendering bridge is available.")]
+    [Description("Show the chat overlay only while an authenticated Relink online Party room is active.")]
     [DefaultValue(true)]
     public bool EnableOverlay { get; set; } = true;
 
@@ -17,8 +17,8 @@ public class Config : Configurable<Config>
     [DefaultValue(true)]
     public bool EnableNativeChatBridge { get; set; } = true;
 
-    [DisplayName("Enable Party Lifecycle Probe")]
-    [Description("Attach an observation-only PlayFab Party lifecycle probe. No voice or network data is sent. Changing this setting requires restarting the mod.")]
+    [DisplayName("Log Party Lifecycle Diagnostics")]
+    [Description("Log observed PlayFab Party lifecycle events. The observation-only online-room gate remains active regardless; it sends no voice or network data. Restart required.")]
     [DefaultValue(true)]
     public bool EnablePartyLifecycleProbe { get; set; } = true;
 

@@ -16,6 +16,7 @@
 6. 语音调试包会记录原生输入/输出状态、所选设备、静音回读、双方 ChatIndicator、权限回读、接收静音与渲染音量，并在退出时给出按远端成员隔离的判定摘要。真正的联机通过要求讲话端出现 `localIndicator=Talking`、对端出现 `remoteIndicator=Talking`，并实际听到声音。手柄按键与成员音量/静音仍待后续实现。
 7. Preview.12 在 ANSI 游戏窗口边界重组并按当前输入法代码页解码 DBCS 提交字符，避免 CP936 的 `我`（`CE D2`）被 ImGui 当作 `ÎÒ`；输入框激活时同时维护 IMM32 组合与候选窗位置，以兼容搜狗等第三方中文输入法。聊天缓冲内部、原生聊天桥和网络收发仍统一使用 UTF-8。
 8. Preview.13 在捕获现有 Party manager 后读取 Party 的 `Audio`/`Networking` work mode。`Audio=Automatic` 时完全交给 Party 内部线程；只有 `Audio=Manual` 时才由 Mod 在独立高优先级线程每 40 ms 调用一次 `PartyDoWork(Audio)`，且绝不调用 `PartySetWorkMode`。这修复了 Windows 本地 `I` 自检通过、Party 输入/输出也显示 Initialized，但 `U` 始终停在 `NoAudioInput` 的宿主工作模式断层。
+9. Preview.14 不再猜测 Relink 的标题、选档、加载或城镇 UI 状态。Overlay 生命周期直接绑定游戏现有的 PlayFab Party 联机房间：同一 Network/LocalUser 完成认证并成功创建本地 gameplay endpoint 后显示并开放 `Y/U/I`，不要求远端玩家已经加入；调用 LeaveNetwork、端点/用户/Network 被销毁或 PartyCleanup 后立即隐藏并释放输入。标题、单机城镇和加载流程自然保持关闭，原生聊天 manager 只继续作为发送函数参数。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则保持禁用。
 

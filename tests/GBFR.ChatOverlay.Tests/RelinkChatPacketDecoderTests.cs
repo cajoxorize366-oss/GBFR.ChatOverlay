@@ -12,9 +12,14 @@ public sealed class RelinkChatPacketDecoderTests
         var packet = CreatePacket("你好，骑空士", "Djeeta", 0x1234, 7, 9);
         var timestamp = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
 
-        var decoded = RelinkChatPacketDecoder.TryDecode(packet, timestamp, out var message);
+        var decoded = RelinkChatPacketDecoder.TryDecode(
+            packet,
+            timestamp,
+            out var message,
+            out var hasExplicitSenderLabel);
 
         Assert.True(decoded);
+        Assert.True(hasExplicitSenderLabel);
         Assert.Equal("你好，骑空士", message.Text);
         Assert.Equal("Djeeta", message.Sender);
         Assert.Equal(0x1234u, message.SenderId);
@@ -28,8 +33,13 @@ public sealed class RelinkChatPacketDecoderTests
     {
         var packet = CreatePacket("hello", string.Empty, 0x89ABCDEF, 0, 0);
 
-        Assert.True(RelikDecode(packet, out var sender));
-        Assert.Equal("Player 89ABCDEF", sender);
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message,
+            out var hasExplicitSenderLabel));
+        Assert.False(hasExplicitSenderLabel);
+        Assert.Equal("Player 89ABCDEF", message.Sender);
     }
 
     [Fact]
@@ -61,13 +71,6 @@ public sealed class RelinkChatPacketDecoderTests
         var packet = new byte[RelinkChatPacketDecoder.PacketBytesToCopy - 1];
 
         Assert.False(RelinkChatPacketDecoder.TryDecode(packet, DateTimeOffset.UtcNow, out _));
-    }
-
-    private static bool RelikDecode(byte[] packet, out string sender)
-    {
-        var result = RelinkChatPacketDecoder.TryDecode(packet, DateTimeOffset.UtcNow, out var message);
-        sender = message.Sender;
-        return result;
     }
 
     private static byte[] CreatePacket(

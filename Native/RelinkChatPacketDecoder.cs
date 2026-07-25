@@ -24,9 +24,17 @@ public static class RelinkChatPacketDecoder
     public static bool TryDecode(
         ReadOnlySpan<byte> packet,
         DateTimeOffset receivedAt,
-        out IncomingChatMessage message)
+        out IncomingChatMessage message) =>
+        TryDecode(packet, receivedAt, out message, out _);
+
+    internal static bool TryDecode(
+        ReadOnlySpan<byte> packet,
+        DateTimeOffset receivedAt,
+        out IncomingChatMessage message,
+        out bool hasExplicitSenderLabel)
     {
         message = default;
+        hasExplicitSenderLabel = false;
         if (packet.Length < PacketBytesToCopy)
             return false;
 
@@ -44,12 +52,13 @@ public static class RelinkChatPacketDecoder
         }
 
         var senderId = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(SenderIdOffset, sizeof(uint)));
-        TryDecodeNullTerminated(
+        var decodedSenderLabel = TryDecodeNullTerminated(
             packet.Slice(SenderLabelOffset, SenderLabelBufferSize),
             SenderLabelBufferSize - 1,
             out var senderLabel);
 
-        var sender = string.IsNullOrWhiteSpace(senderLabel)
+        hasExplicitSenderLabel = decodedSenderLabel && !string.IsNullOrWhiteSpace(senderLabel);
+        var sender = !hasExplicitSenderLabel
             ? $"Player {senderId:X8}"
             : senderLabel.Trim();
         var category = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(CategoryOffset, sizeof(uint)));
@@ -79,4 +88,3 @@ public static class RelinkChatPacketDecoder
         }
     }
 }
-

@@ -8,6 +8,7 @@ The Reloaded-II log should contain messages equivalent to:
 
 ```text
 [gbfr.qol.chatoverlay] Relink 2.0.2 native chat bridge attached: send=..., receive=....
+[gbfr.qol.chatoverlay] Relink incoming player-name resolver attached: senderSlot=..., memberLookup=...; empty RPC sender labels now use the verified four-slot lobby member table.
 [gbfr.qol.chatoverlay] DirectInput8 keyboard interception initialized.
 [gbfr.qol.chatoverlay] CJK font loaded before DX11 hook initialization: ..., 9 glyph ranges.
 [gbfr.qol.chatoverlay] DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path.
@@ -54,7 +55,7 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 6. While composing with Sogou, confirm that the Overlay displays `候选：1.…` directly above the chat field, including brackets around the selected word. Select candidates with number keys, Space and normal IME paging; the fallback is display-only and intentionally does not simulate keys or mouse selection.
 7. Press Escape during an unfinished composition, reopen with `Y`, and type `我是` again. No pending lead byte, old composition or candidate window may leak into the new input session.
 8. In the online room, press Enter and confirm the other client receives the message.
-9. Have the second client send a free-text reply. Confirm it appears once in the Overlay history.
+9. Have the second client send a free-text reply. Confirm it appears once in the Overlay history and uses that client's real online display name, not `Player 00000000`, `Player 00000001`, `Player 00000002` or `Player 00000003`.
 10. Confirm the local message appears once as `You`; a server echo with identical text should not add a duplicate line.
 11. While the input field is open, press movement and combat keys. The game should not respond to them.
 12. Press Escape. The input field should close, and controls should resume after held keys have been released.
@@ -72,6 +73,7 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 - If Chinese characters render as boxes, record the `CJK font loaded before DX11 hook initialization` line and Windows display language. If they become Latin-1 text such as `ÎÒ`, preserve the new `Win32 IME compatibility active` line, input-method name and complete Reloaded-II log.
 - If composition text appears but the in-overlay candidate row does not, preserve either `candidate notification did not expose a readable IMM32 list` or `composition ended without an IMM32 candidate list`. Their presence distinguishes an IMM32 parsing error from a TSF/Qt-only input method.
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.
+- If an incoming line still uses `Player XXXXXXXX`, preserve the one-time `Relink player-name resolver could not map sender ...` line and record the sender's slot, displayed in-game name and current lobby/quest transition state. The fallback is intentional and must not crash or drop the message.
 - Hashed quick-chat/stamp records are intentionally ignored by the incoming bridge until their text resolver is hooked.
 
 ## Party lifecycle foundation

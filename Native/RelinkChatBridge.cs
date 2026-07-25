@@ -21,6 +21,7 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
 
     private IHook<SendMessageDelegate>? _sendHook;
     private IHook<RpcMessageDelegate>? _rpcHook;
+    private RelinkPlayerNameResolver? _playerNameResolver;
     private bool _initialized;
     private bool _suspended;
     private int _incomingCount;
@@ -55,6 +56,10 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
             GameContext = gameContext;
             try
             {
+                _playerNameResolver = RelinkPlayerNameResolver.CreateForCurrentProcess(
+                    moduleBase,
+                    rvas,
+                    _log);
                 _sendHook = _hooks.CreateHook<SendMessageDelegate>(
                     SendMessage,
                     moduleBase + rvas.SendMessage);
@@ -69,6 +74,11 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                 _log(
                     $"Relink 2.0.2 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
                     $"receive=0x{(nuint)(moduleBase + rvas.RpcMessage):X}.");
+                _log(
+                    $"Relink incoming player-name resolver attached: senderSlot=0x" +
+                    $"{(nuint)(moduleBase + rvas.SenderSlotResolver):X}, memberLookup=0x" +
+                    $"{(nuint)(moduleBase + rvas.LobbyMemberLookup):X}; empty RPC sender labels now use " +
+                    $"the verified four-slot lobby member table.");
             }
             catch
             {
@@ -76,6 +86,7 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                 _sendHook?.Disable();
                 _rpcHook = null;
                 _sendHook = null;
+                _playerNameResolver = null;
                 GameContext = null;
                 throw;
             }
@@ -180,12 +191,17 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
     {
         IncomingChatMessage pending = default;
         var decoded = false;
+        var hasExplicitSenderLabel = false;
         try
         {
             if (chat != nint.Zero)
             {
                 var packet = new ReadOnlySpan<byte>((void*)chat, RelinkChatPacketDecoder.PacketBytesToCopy);
-                decoded = RelinkChatPacketDecoder.TryDecode(packet, DateTimeOffset.UtcNow, out pending);
+                decoded = RelinkChatPacketDecoder.TryDecode(
+                    packet,
+                    DateTimeOffset.UtcNow,
+                    out pending,
+                    out hasExplicitSenderLabel);
             }
         }
         catch (Exception exception)
@@ -204,8 +220,16 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
             return;
         }
 
-        if (decoded && !_echoSuppressor.TryConsume(pending.Text, pending.ReceivedAt))
-            EnqueueIncoming(pending);
+        if (!decoded || _echoSuppressor.TryConsume(pending.Text, pending.ReceivedAt))
+            return;
+
+        if (!hasExplicitSenderLabel &&
+            _playerNameResolver?.TryResolve(pending.SenderId, out var playerName) == true)
+        {
+            pending = pending with { Sender = playerName };
+        }
+
+        EnqueueIncoming(pending);
     }
 
     private void EnqueueIncoming(IncomingChatMessage message)

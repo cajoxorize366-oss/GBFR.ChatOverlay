@@ -70,5 +70,13 @@ public sealed class RelinkGameContextProbeTests
                 throw Exception;
             return Pointers.TryGetValue(address, out value);
         }
+
+        public bool TryReadBytes(nint address, Span<byte> destination)
+        {
+            ReadCount++;
+            if (Exception is not null)
+                throw Exception;
+            return false;
+        }
     }
 }

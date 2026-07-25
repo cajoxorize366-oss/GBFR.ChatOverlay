@@ -5,6 +5,8 @@ namespace GBFR.ChatOverlay.Native;
 internal interface IRelinkMemoryReader
 {
     bool TryReadPointer(nint address, out nint value);
+
+    bool TryReadBytes(nint address, Span<byte> destination);
 }
 
 /// <summary>
@@ -32,6 +34,25 @@ internal sealed class CurrentProcessRelinkMemoryReader : IRelinkMemoryReader
 
         value = nint.Zero;
         return false;
+    }
+
+    public unsafe bool TryReadBytes(nint address, Span<byte> destination)
+    {
+        if (address == nint.Zero)
+            return false;
+        if (destination.IsEmpty)
+            return true;
+
+        fixed (byte* buffer = destination)
+        {
+            return ReadProcessMemory(
+                       CurrentProcessPseudoHandle,
+                       address,
+                       buffer,
+                       (nuint)destination.Length,
+                       out var bytesRead) &&
+                   bytesRead == (nuint)destination.Length;
+        }
     }
 
     private static unsafe bool TryRead<T>(nint address, out T value)

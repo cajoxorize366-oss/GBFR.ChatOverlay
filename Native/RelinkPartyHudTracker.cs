@@ -343,23 +343,15 @@ internal sealed class RelinkPartyHudTracker
                 continue;
             }
 
-            // A valid party-row icon remains small relative to the current game
-            // viewport. Reject effect/animation transforms instead of clamping a
-            // bad scale into a still-huge 96 px icon at the edge of the screen.
-            var maximumIconSize = Math.Clamp(viewportHeight * 0.05f, 32.0f, 96.0f);
-            if (iconSize > maximumIconSize)
-            {
-                projectionFailed = true;
-                continue;
-            }
-
-            var minimumIconSize = Math.Clamp(viewportHeight * 0.012f, 12.0f, 24.0f);
-            iconSize = Math.Max(iconSize, minimumIconSize);
-            var radius = iconSize * 0.5f;
-            if (center.X < viewportX + radius ||
-                center.X > viewportX + viewportWidth - radius ||
-                center.Y < viewportY + radius ||
-                center.Y > viewportY + viewportHeight - radius)
+            // Gauge transforms can temporarily report a large logical scale while
+            // their parent HUD animation settles. Keep the native center, clamp
+            // only the drawn glyph, and allow an edge-adjacent row instead of
+            // hiding every otherwise valid battle anchor.
+            iconSize = Math.Clamp(iconSize, 18.0f, 64.0f);
+            if (center.X < viewportX - iconSize ||
+                center.X > viewportX + viewportWidth + iconSize ||
+                center.Y < viewportY - iconSize ||
+                center.Y > viewportY + viewportHeight + iconSize)
             {
                 projectionFailed = true;
                 continue;

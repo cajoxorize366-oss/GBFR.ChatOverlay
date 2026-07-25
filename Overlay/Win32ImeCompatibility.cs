@@ -22,9 +22,7 @@ internal static class Win32ImeCompatibility
 
     private const uint LocaleIDefaultAnsiCodePage = 0x00001004;
     private const uint MbErrInvalidChars = 0x00000008;
-    private const uint CfsForcePosition = 0x0020;
-    private const uint CfsExclude = 0x0080;
-    private const uint IaceDefault = 0x0010;
+    private const nuint IscShowUiAllCandidateWindow = 0x0000000F;
 
     internal static bool IsImeUiMessage(uint message) =>
         message is WmImeStartComposition or
@@ -36,6 +34,20 @@ internal static class Win32ImeCompatibility
             WmImeCompositionFull or
             WmImeSelect or
             WmImeRequest;
+
+    /// <summary>
+    /// Relink's ANSI window can activate an IME context without requesting its
+    /// candidate UI. The overlay delegates that UI to IMM32, so explicitly keep
+    /// all candidate lists enabled while the chat field owns the active context.
+    /// Deactivation and unrelated messages must be forwarded byte-for-byte.
+    /// </summary>
+    internal static nint PrepareImeUiLParam(uint message, nint wParam, nint lParam)
+    {
+        if (message != WmImeSetContext || wParam == nint.Zero)
+            return lParam;
+
+        return unchecked((nint)((nuint)lParam | IscShowUiAllCandidateWindow));
+    }
 
     internal static bool IsUnicodeWindow(nint windowHandle) => IsWindowUnicode(windowHandle);
 
@@ -147,73 +159,6 @@ internal static class Win32ImeCompatibility
         return TryDecode(singleByte, codePage, out text);
     }
 
-    internal static bool UpdateCandidatePlacement(
-        nint windowHandle,
-        float screenLeft,
-        float screenTop,
-        float screenRight,
-        float screenBottom,
-        out bool attachedDefaultContext)
-    {
-        attachedDefaultContext = false;
-        if (windowHandle == nint.Zero)
-            return false;
-
-        // Dear ImGui documents GetItemRectMin/Max as screen-space coordinates;
-        // IMM32 expects both forms in game-window client coordinates.
-        var topLeft = new NativePoint((int)MathF.Round(screenLeft), (int)MathF.Round(screenTop));
-        var bottomRight = new NativePoint((int)MathF.Round(screenRight), (int)MathF.Round(screenBottom));
-        if (!ScreenToClient(windowHandle, ref topLeft) ||
-            !ScreenToClient(windowHandle, ref bottomRight))
-        {
-            return false;
-        }
-
-        var inputContext = ImmGetContext(windowHandle);
-        if (inputContext == nint.Zero)
-        {
-            attachedDefaultContext = ImmAssociateContextEx(windowHandle, nint.Zero, IaceDefault);
-            inputContext = ImmGetContext(windowHandle);
-            if (inputContext == nint.Zero)
-            {
-                if (attachedDefaultContext)
-                    ImmAssociateContextEx(windowHandle, nint.Zero, 0);
-                attachedDefaultContext = false;
-                return false;
-            }
-        }
-
-        try
-        {
-            var composition = new CompositionForm
-            {
-                Style = CfsForcePosition,
-                CurrentPosition = new NativePoint(topLeft.X + 4, topLeft.Y + 4),
-            };
-            var candidate = new CandidateForm
-            {
-                Index = 0,
-                Style = CfsExclude,
-                CurrentPosition = new NativePoint(topLeft.X, bottomRight.Y + 2),
-                Area = new NativeRect(topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y),
-            };
-
-            var compositionUpdated = ImmSetCompositionWindow(inputContext, ref composition);
-            var candidateUpdated = ImmSetCandidateWindow(inputContext, ref candidate);
-            return compositionUpdated || candidateUpdated;
-        }
-        finally
-        {
-            ImmReleaseContext(windowHandle, inputContext);
-        }
-    }
-
-    internal static void DetachDefaultContext(nint windowHandle)
-    {
-        if (windowHandle != nint.Zero)
-            ImmAssociateContextEx(windowHandle, nint.Zero, 0);
-    }
-
     private static bool TryDecode(ReadOnlySpan<byte> bytes, uint codePage, out string text)
     {
         Span<char> characters = stackalloc char[4];
@@ -241,46 +186,9 @@ internal static class Win32ImeCompatibility
         return false;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativePoint(int x, int y)
-    {
-        internal int X = x;
-        internal int Y = y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeRect(int left, int top, int right, int bottom)
-    {
-        internal int Left = left;
-        internal int Top = top;
-        internal int Right = right;
-        internal int Bottom = bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CompositionForm
-    {
-        internal uint Style;
-        internal NativePoint CurrentPosition;
-        internal NativeRect Area;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct CandidateForm
-    {
-        internal uint Index;
-        internal uint Style;
-        internal NativePoint CurrentPosition;
-        internal NativeRect Area;
-    }
-
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowUnicode(nint windowHandle);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ScreenToClient(nint windowHandle, ref NativePoint point);
 
     [DllImport("user32.dll")]
     private static extern nint DefWindowProcA(nint hWnd, uint message, nint wParam, nint lParam);
@@ -314,22 +222,4 @@ internal static class Win32ImeCompatibility
         char* wideText,
         int wideCharacterCount);
 
-    [DllImport("imm32.dll")]
-    private static extern nint ImmGetContext(nint windowHandle);
-
-    [DllImport("imm32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ImmReleaseContext(nint windowHandle, nint inputContext);
-
-    [DllImport("imm32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ImmAssociateContextEx(nint windowHandle, nint inputContext, uint flags);
-
-    [DllImport("imm32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ImmSetCompositionWindow(nint inputContext, ref CompositionForm compositionForm);
-
-    [DllImport("imm32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ImmSetCandidateWindow(nint inputContext, ref CandidateForm candidateForm);
 }

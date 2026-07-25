@@ -23,6 +23,7 @@ The ImGui backend and Relink's native chat manager may both initialize before an
 
 ```text
 [gbfr.qol.chatoverlay] Relink online Party room became active; overlay rendering and Y/U/I hotkeys are now enabled.
+[gbfr.qol.chatoverlay] Dear ImGui platform IME bridge bound to game window 0x...; platform callback available=True; IMM32 composition and candidate positioning follow the active text caret.
 ```
 
 Calling `PartyNetworkLeaveNetwork`, or observing the matching endpoint, local user, Network or Party manager being destroyed, must hide the Overlay again and release any open composer or held voice/local-monitor input.
@@ -33,7 +34,7 @@ After the chat field first becomes active, the log should also contain exactly o
 [gbfr.qol.chatoverlay] Win32 IME compatibility active for the ANSI/code page 936 game window; committed text is normalized to UTF-8 and candidate placement follows the chat input.
 ```
 
-`Unicode` is also a valid window-kind result. On a Chinese ANSI window using Sogou or Microsoft Pinyin, code page `936` is expected.
+`Unicode` is also a valid window-kind result. On a Chinese ANSI window using Sogou or Microsoft Pinyin, code page `936` is expected. If Windows reactivates the game IME context while the chat field is open, one additional `Win32 IME candidate UI enabled ...` line is expected; its forwarded `WM_IME_SETCONTEXT` value must end with candidate bits `F`. It is supplementary evidence, not required on every chat open because the game keeps one top-level HWND active.
 
 ## Visual and input checks
 

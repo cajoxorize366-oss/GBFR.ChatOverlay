@@ -14,9 +14,10 @@
 4. Reloaded-II 配置会动态列出当前 Windows 活跃的录音和播放端点，可分别选择麦克风与耳机/扬声器；配置保存稳定 endpoint ID，失效选择会在启动时记录日志并回退到 Windows 默认通信设备。`I` 本地监听复用这两个选择，默认 35% 音量并硬性限制在 50% 以内。
 5. `I` 和 `U` 互斥，`U` 优先；如果 `U` 打断了正在按住的 `I`，必须松开后再按 `I` 才会重新监听。聊天框顶部会显示本地监听、检测到输入信号、等待房间、等待队友、已就绪、正在语音、断开和 fail-closed 状态。
 6. 语音调试包会记录原生输入/输出状态、所选设备、静音回读、双方 ChatIndicator、权限回读、接收静音与渲染音量，并在退出时给出按远端成员隔离的判定摘要。真正的联机通过要求讲话端出现 `localIndicator=Talking`、对端出现 `remoteIndicator=Talking`，并实际听到声音。手柄按键与成员音量/静音仍待后续实现。
-7. Preview.12 在 ANSI 游戏窗口边界重组并按当前输入法代码页解码 DBCS 提交字符，避免 CP936 的 `我`（`CE D2`）被 ImGui 当作 `ÎÒ`；输入框激活时同时维护 IMM32 组合与候选窗位置，以兼容搜狗等第三方中文输入法。聊天缓冲内部、原生聊天桥和网络收发仍统一使用 UTF-8。
+7. Preview.12 在 ANSI 游戏窗口边界重组并按当前输入法代码页解码 DBCS 提交字符，避免 CP936 的 `我`（`CE D2`）被 ImGui 当作 `ÎÒ`。聊天缓冲内部、原生聊天桥和网络收发仍统一使用 UTF-8。
 8. Preview.13 在捕获现有 Party manager 后读取 Party 的 `Audio`/`Networking` work mode。`Audio=Automatic` 时完全交给 Party 内部线程；只有 `Audio=Manual` 时才由 Mod 在独立高优先级线程每 40 ms 调用一次 `PartyDoWork(Audio)`，且绝不调用 `PartySetWorkMode`。这修复了 Windows 本地 `I` 自检通过、Party 输入/输出也显示 Initialized，但 `U` 始终停在 `NoAudioInput` 的宿主工作模式断层。
 9. Preview.14 不再猜测 Relink 的标题、选档、加载或城镇 UI 状态。Overlay 生命周期直接绑定游戏现有的 PlayFab Party 联机房间：同一 Network/LocalUser 完成认证并成功创建本地 gameplay endpoint 后显示并开放 `Y/U/I`，不要求远端玩家已经加入；调用 LeaveNetwork、端点/用户/Network 被销毁或 PartyCleanup 后立即隐藏并释放输入。标题、单机城镇和加载流程自然保持关闭，原生聊天 manager 只继续作为发送函数参数。
+10. Preview.15 把游戏 HWND 显式绑定到 Dear ImGui 1.88 的标准平台 IME 回调，由它在输入框激活/失活时管理 IMM32 上下文，并用真实文字光标位置驱动组合窗和 `CFS_CANDIDATEPOS` 候选窗；移除了每帧用输入框矩形覆盖候选位置的旧逻辑。同时为活动 `WM_IME_SETCONTEXT` 保留原标志并开启全部候选窗 UI。搜狗等第三方输入法仍由系统窗口负责绘制，ANSI/DBCS 解码和 UTF-8 提交链路不变。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则保持禁用。
 
@@ -38,7 +39,7 @@ dotnet test tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj
 ## 设计边界
 
 - ImGui 负责聊天窗口、文字输入和交互状态。
-- Win32 输入边界负责区分 ANSI/Unicode 窗口、把 `WM_IME_CHAR`/DBCS `WM_CHAR` 规范化为 UTF-8，并仅在输入框激活期间维护输入法上下文与候选窗位置。
+- Win32 输入边界负责区分 ANSI/Unicode 窗口、把 `WM_IME_CHAR`/DBCS `WM_CHAR` 规范化为 UTF-8，并仅在输入框激活期间维护输入法上下文、系统候选窗显示标志与候选窗位置。
 - Relink 桥接层负责调用游戏原生聊天发送函数并观察接收消息。
 - `GBFR.ChatOverlay.ConfiguratorUI.dll` 只在 Reloaded-II 启动器中提供麦克风/播放设备 ComboBox；游戏侧主 DLL 不引用 HandyControl 或 WPF。
 - `I` 使用独立的 NAudio/WASAPI 共享模式本地路径，不申请 Party 权限、不连接网络，也不改变 `U` 的 ChatControl 路由。建议戴耳机测试，避免扬声器到麦克风形成声反馈。

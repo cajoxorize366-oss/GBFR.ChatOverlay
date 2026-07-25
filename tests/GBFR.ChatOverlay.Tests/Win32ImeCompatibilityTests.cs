@@ -92,4 +92,37 @@ public sealed class Win32ImeCompatibilityTests
     {
         Assert.False(Win32ImeCompatibility.IsImeUiMessage(Win32ImeCompatibility.WmImeChar));
     }
+
+    [Fact]
+    public void ActiveImeContextEnablesEveryCandidateWindowWithoutClearingExistingFlags()
+    {
+        var forwarded = Win32ImeCompatibility.PrepareImeUiLParam(
+            Win32ImeCompatibility.WmImeSetContext,
+            1,
+            unchecked((nint)0x80000040u));
+
+        Assert.Equal(unchecked((nint)0x8000004Fu), forwarded);
+    }
+
+    [Fact]
+    public void InactiveImeContextPreservesTheOriginalFlags()
+    {
+        var forwarded = Win32ImeCompatibility.PrepareImeUiLParam(
+            Win32ImeCompatibility.WmImeSetContext,
+            nint.Zero,
+            unchecked((nint)0x80000040u));
+
+        Assert.Equal(unchecked((nint)0x80000040u), forwarded);
+    }
+
+    [Fact]
+    public void NonContextImeMessagePreservesTheOriginalFlags()
+    {
+        var forwarded = Win32ImeCompatibility.PrepareImeUiLParam(
+            Win32ImeCompatibility.WmImeNotify,
+            1,
+            0x40);
+
+        Assert.Equal((nint)0x40, forwarded);
+    }
 }

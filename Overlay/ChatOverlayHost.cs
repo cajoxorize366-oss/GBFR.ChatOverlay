@@ -41,13 +41,14 @@ public sealed class ChatOverlayHost
     private int _swallowActivationKeyUntilRelease;
     private int _wndProcFailureLogged;
     private int _imeCompatibilityLogged;
+    private int _imeCandidateUiLogged;
     private int _imeDecodeFailureLogged;
+    private int _platformImeBridgeLogged;
     private int _renderThreadLogged;
     private int _onlineRoomGateFailureLogged;
     private int _onlineRoomWasInactive = 1;
     private int _releaseCaptureFrames;
     private int _pendingAnsiLeadByte = -1;
-    private int _attachedDefaultImeContext;
     private nint _windowHandle;
     private bool _focusInputNextFrame;
     private bool _windowOpen = true;
@@ -130,7 +131,6 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-        DetachDefaultImeContextIfOwned();
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
@@ -165,6 +165,8 @@ public sealed class ChatOverlayHost
                 return;
             }
 
+            BindPlatformImeWindow();
+
             if (previousOnlineRoomInactive != 0)
             {
                 LogSafely(
@@ -188,7 +190,6 @@ public sealed class ChatOverlayHost
                 _session.Composer.Cancel();
                 _releaseCaptureFrames = 2;
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-                DetachDefaultImeContextIfOwned();
                 _statusText = null;
             }
 
@@ -314,8 +315,6 @@ public sealed class ChatOverlayHost
                 nint.Zero);
         }
 
-        UpdateImeCandidatePlacement();
-
         _session.Composer.SetDraft(ReadInputBuffer());
         if (submitRequested)
         {
@@ -325,7 +324,6 @@ public sealed class ChatOverlayHost
                 Array.Clear(_inputBuffer);
                 _releaseCaptureFrames = 2;
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-                DetachDefaultImeContextIfOwned();
                 _statusText = null;
             }
             else
@@ -463,47 +461,24 @@ public sealed class ChatOverlayHost
             ImGui.ImGuiIO_AddInputCharactersUTF8(ImguiHook.IO, text);
     }
 
-    private void UpdateImeCandidatePlacement()
+    private void BindPlatformImeWindow()
     {
-        if (!ImGui.IsItemActive())
-            return;
-
         var windowHandle = Volatile.Read(ref _windowHandle);
         if (windowHandle == nint.Zero)
             return;
 
-        using var itemMinimum = new ImVec2();
-        using var itemMaximum = new ImVec2();
-        ImGui.GetItemRectMin(itemMinimum);
-        ImGui.GetItemRectMax(itemMaximum);
-        var placementUpdated = Win32ImeCompatibility.UpdateCandidatePlacement(
-            windowHandle,
-            itemMinimum.X,
-            itemMinimum.Y,
-            itemMaximum.X,
-            itemMaximum.Y,
-            out var attachedDefaultContext);
-        if (attachedDefaultContext)
-            Interlocked.Exchange(ref _attachedDefaultImeContext, 1);
+        var viewport = ImGui.GetMainViewport();
+        if (viewport.PlatformHandleRaw != windowHandle)
+            viewport.PlatformHandleRaw = windowHandle;
 
-        if (placementUpdated)
+        if (Interlocked.Exchange(ref _platformImeBridgeLogged, 1) == 0)
         {
-            LogImeCompatibility(
-                windowHandle,
-                Win32ImeCompatibility.IsUnicodeWindow(windowHandle)
-                    ? 0
-                    : Win32ImeCompatibility.GetActiveInputCodePage());
+            var platformCallbackAvailable = ImguiHook.IO.SetPlatformImeDataFn is not null;
+            LogSafely(
+                $"Dear ImGui platform IME bridge bound to game window 0x{unchecked((nuint)windowHandle):X}; " +
+                $"platform callback available={platformCallbackAvailable}; " +
+                "IMM32 composition and candidate positioning follow the active text caret.");
         }
-    }
-
-    private void DetachDefaultImeContextIfOwned()
-    {
-        if (Interlocked.Exchange(ref _attachedDefaultImeContext, 0) == 0)
-            return;
-
-        var windowHandle = Volatile.Read(ref _windowHandle);
-        if (windowHandle != nint.Zero)
-            Win32ImeCompatibility.DetachDefaultContext(windowHandle);
     }
 
     private bool IsOnlineRoomActive()
@@ -532,7 +507,6 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-        DetachDefaultImeContextIfOwned();
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
@@ -563,6 +537,17 @@ public sealed class ChatOverlayHost
         LogSafely(
             $"Win32 IME compatibility active for the {windowKind} game window; " +
             "committed text is normalized to UTF-8 and candidate placement follows the chat input.");
+    }
+
+    private void LogImeCandidateUi(nint originalLParam, nint forwardedLParam)
+    {
+        if (Interlocked.Exchange(ref _imeCandidateUiLogged, 1) != 0)
+            return;
+
+        LogSafely(
+            "Win32 IME candidate UI enabled for the active chat context: " +
+            $"WM_IME_SETCONTEXT lParam 0x{unchecked((nuint)originalLParam):X} -> " +
+            $"0x{unchecked((nuint)forwardedLParam):X}.");
     }
 
     private void LogImeDecodeFailure(uint rawCharacter, uint codePage)
@@ -629,7 +614,19 @@ public sealed class ChatOverlayHost
                 // ANSI/Unicode default window proc own composition and candidate
                 // lifecycle messages instead of Relink's chat WndProc.
                 if (host.ShouldRouteImeUiToDefault(message))
-                    return Win32ImeCompatibility.CallDefaultWindowProc(hWnd, message, wParam, lParam);
+                {
+                    var forwardedLParam = Win32ImeCompatibility.PrepareImeUiLParam(
+                        message,
+                        wParam,
+                        lParam);
+                    if (message == Win32ImeCompatibility.WmImeSetContext && wParam != nint.Zero)
+                        host.LogImeCandidateUi(lParam, forwardedLParam);
+                    return Win32ImeCompatibility.CallDefaultWindowProc(
+                        hWnd,
+                        message,
+                        wParam,
+                        forwardedLParam);
+                }
             }
 
             ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);

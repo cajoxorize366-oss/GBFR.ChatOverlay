@@ -20,6 +20,7 @@
 10. Preview.15 把游戏 HWND 显式绑定到 Dear ImGui 1.88 的标准平台 IME 回调，由它在输入框激活/失活时管理 IMM32 上下文，并用真实文字光标位置驱动组合窗和 `CFS_CANDIDATEPOS` 候选窗；同时为活动 `WM_IME_SETCONTEXT` 保留原标志并开启全部候选窗 UI。实机日志确认平台回调可用且 Windows 原始标志已经是 `0xC000000F`，但搜狗的 Qt 外部候选窗仍可能不可见。
 11. Preview.16 不再依赖第三方外部候选窗：在 `IMN_OPEN/CHANGE/SETCANDIDATEPOS` 和 `WM_IME_COMPOSITION` 时读取 `ImmGetCandidateListW`，把不可变候选快照发布给渲染线程，并在聊天输入框上方绘制当前页、选中项和数字键编号。数字键、空格、翻页和最终提交仍完全由输入法处理；可在 Reloaded-II 中关闭 `Overlay IME Candidate Fallback`。候选读取失败会明确区分“没有 IMM32 列表”和“缓冲区损坏”，方便判断输入法是否只暴露 TSF/Qt UI。
 12. Preview.17 修复联机自由文字消息把队友显示为 `Player 00000000`～`Player 00000003`：当 RPC 的短 sender label 为空时，先把 sender ID 映射到当前四人联机槽位，再读取游戏 UI 同一份 `member_name`。原生非空标签仍优先；任何签名、槽位、成员状态或 UTF-8 校验失败都会保留稳定的 `Player XXXXXXXX` 回退，不访问或修改网络包。
+13. Preview.18 修复候选 fallback 出现后聊天框底部突然多出一行空白：历史区不再为候选硬编码预留 46px，而是用 Dear ImGui 对当前候选文本的实际换行高度精确让位。同一帧的高度计算与绘制共享一份候选快照，短候选不再浪费空间，长候选换行也不会挤压输入框。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则保持禁用。
 

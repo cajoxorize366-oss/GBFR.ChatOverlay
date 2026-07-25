@@ -2,7 +2,7 @@
   "ModId": "gbfr.qol.chatoverlay",
   "ModName": "GBFR Chat Overlay",
   "ModAuthor": "Kuro",
-  "ModVersion": "0.3.0-preview.17",
+  "ModVersion": "0.3.0-preview.18",
   "ModDescription": "Online-room-gated MMO-style UTF-8/IME chat overlay with verified lobby player names, in-overlay candidate fallback, PlayFab Party push-to-talk and local microphone monitoring.",
   "ModDll": "GBFR.ChatOverlay.dll",
   "ModIcon": "Preview.png",

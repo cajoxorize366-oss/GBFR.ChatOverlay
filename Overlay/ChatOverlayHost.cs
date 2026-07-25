@@ -24,6 +24,7 @@ public sealed class ChatOverlayHost
     private const uint WmActivate = 0x0006;
     private const uint WmActivateApp = 0x001C;
     private const int InputBufferSize = 2_048;
+    private const float ComposerReservedHeight = 58.0f;
 
     private static ChatOverlayHost? s_activeHost;
     private static int s_hasOriginalWndProc;
@@ -250,10 +251,13 @@ public sealed class ChatOverlayHost
             if (!began)
                 return;
 
+            var imeCandidateText = composerOpen
+                ? GetImeCandidateFallbackText(configuration.EnableImeCandidateFallback)
+                : null;
             DrawVoiceStatus();
-            DrawHistory(composerOpen, configuration.EnableImeCandidateFallback);
+            DrawHistory(composerOpen, imeCandidateText);
             if (composerOpen)
-                DrawComposer(openedThisFrame);
+                DrawComposer(openedThisFrame, imeCandidateText);
         }
         finally
         {
@@ -271,13 +275,10 @@ public sealed class ChatOverlayHost
         ImGui.Separator();
     }
 
-    private void DrawHistory(bool composerOpen, bool imeCandidateFallbackEnabled)
+    private void DrawHistory(bool composerOpen, string? imeCandidateText)
     {
-        var candidateVisible = imeCandidateFallbackEnabled &&
-                               Volatile.Read(ref _imeCandidateSnapshot)?.Count > 0;
-        var childHeight = composerOpen
-            ? candidateVisible ? -104.0f : -58.0f
-            : 0.0f;
+        var candidateHeight = MeasureWrappedTextItemHeight(imeCandidateText);
+        var childHeight = CalculateHistoryChildHeight(composerOpen, candidateHeight);
         using var childSize = CreateVector2(0.0f, childHeight);
         var began = ImGui.BeginChildStr(
             "##GBFRChatHistory",
@@ -308,10 +309,41 @@ public sealed class ChatOverlayHost
         }
     }
 
-    private unsafe void DrawComposer(bool openedThisFrame)
+    internal static float CalculateHistoryChildHeight(bool composerOpen, float candidateHeight)
+    {
+        if (!composerOpen)
+            return 0.0f;
+
+        var safeCandidateHeight = float.IsFinite(candidateHeight) && candidateHeight > 0.0f
+            ? candidateHeight
+            : 0.0f;
+        return -(ComposerReservedHeight + safeCandidateHeight);
+    }
+
+    private static float MeasureWrappedTextItemHeight(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0.0f;
+
+        using var available = CreateVector2(0.0f, 0.0f);
+        ImGui.GetContentRegionAvail(available);
+        using var textSize = CreateVector2(0.0f, 0.0f);
+        ImGui.CalcTextSize(
+            textSize,
+            text,
+            null!,
+            false,
+            Math.Max(1.0f, available.X));
+        var itemSpacing = Math.Max(
+            0.0f,
+            ImGui.GetTextLineHeightWithSpacing() - ImGui.GetTextLineHeight());
+        return Math.Max(0.0f, textSize.Y) + itemSpacing;
+    }
+
+    private unsafe void DrawComposer(bool openedThisFrame, string? imeCandidateText)
     {
         ImGui.Separator();
-        DrawImeCandidateFallback();
+        DrawImeCandidateFallback(imeCandidateText);
         if (_focusInputNextFrame && !openedThisFrame)
         {
             ImGui.SetKeyboardFocusHere(0);
@@ -579,16 +611,21 @@ public sealed class ChatOverlayHost
         }
     }
 
-    private void DrawImeCandidateFallback()
+    private string? GetImeCandidateFallbackText(bool enabled)
     {
-        if (!_getConfiguration().EnableImeCandidateFallback)
-            return;
+        if (!enabled)
+            return null;
 
         var snapshot = Volatile.Read(ref _imeCandidateSnapshot);
         if (snapshot is null)
-            return;
+            return null;
 
         var displayText = snapshot.BuildDisplayText();
+        return string.IsNullOrEmpty(displayText) ? null : displayText;
+    }
+
+    private static void DrawImeCandidateFallback(string? displayText)
+    {
         if (!string.IsNullOrEmpty(displayText))
             ImGui.TextWrapped(displayText);
     }

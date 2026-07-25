@@ -38,8 +38,13 @@ public sealed class ChatOverlayHost
     private int _captureKeyboard;
     private int _swallowActivationKeyUntilRelease;
     private int _wndProcFailureLogged;
+    private int _imeCompatibilityLogged;
+    private int _imeDecodeFailureLogged;
     private int _renderThreadLogged;
     private int _releaseCaptureFrames;
+    private int _pendingAnsiLeadByte = -1;
+    private int _attachedDefaultImeContext;
+    private nint _windowHandle;
     private bool _focusInputNextFrame;
     private bool _windowOpen = true;
     private bool _initialized;
@@ -68,6 +73,7 @@ public sealed class ChatOverlayHost
             return false;
 
         Interlocked.Exchange(ref _captureKeyboard, 1);
+        Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
         Interlocked.Exchange(ref _openRequested, 1);
         return true;
     }
@@ -111,6 +117,8 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _openRequested, 0);
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
+        Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+        DetachDefaultImeContextIfOwned();
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
@@ -138,6 +146,8 @@ public sealed class ChatOverlayHost
                 _session.Composer.Cancel();
                 Interlocked.Exchange(ref _openRequested, 0);
                 Interlocked.Exchange(ref _captureKeyboard, 0);
+                Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+                DetachDefaultImeContextIfOwned();
                 return;
             }
 
@@ -157,6 +167,8 @@ public sealed class ChatOverlayHost
             {
                 _session.Composer.Cancel();
                 _releaseCaptureFrames = 2;
+                Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+                DetachDefaultImeContextIfOwned();
                 _statusText = null;
             }
 
@@ -167,6 +179,8 @@ public sealed class ChatOverlayHost
             _session.Composer.Cancel();
             Interlocked.Exchange(ref _openRequested, 0);
             Interlocked.Exchange(ref _captureKeyboard, 0);
+            Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+            DetachDefaultImeContextIfOwned();
             LogSafely($"Render callback recovered from an exception: {exception}");
         }
     }
@@ -284,6 +298,8 @@ public sealed class ChatOverlayHost
                 nint.Zero);
         }
 
+        UpdateImeCandidatePlacement();
+
         _session.Composer.SetDraft(ReadInputBuffer());
         if (submitRequested)
         {
@@ -292,6 +308,8 @@ public sealed class ChatOverlayHost
             {
                 Array.Clear(_inputBuffer);
                 _releaseCaptureFrames = 2;
+                Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+                DetachDefaultImeContextIfOwned();
                 _statusText = null;
             }
             else
@@ -331,12 +349,175 @@ public sealed class ChatOverlayHost
                message is WmKeyDown or WmKeyUp or WmChar or WmSysKeyDown or WmSysKeyUp or WmSysChar;
     }
 
+    private bool IsCapturingTextInput() =>
+        _getConfiguration().EnableOverlay &&
+        Volatile.Read(ref _captureKeyboard) != 0 &&
+        _session.Composer.IsOpen;
+
+    private bool ShouldIgnoreUnactivateBeforeBackend(uint message, nint wParam) =>
+        IsCapturingTextInput() &&
+        ImguiHook.Options?.IgnoreWindowUnactivate == true &&
+        (message == WmKillFocus ||
+         ((message is WmActivate or WmActivateApp) && wParam == nint.Zero));
+
+    private bool TryHandleImeCharacter(nint windowHandle, uint message, nint wParam)
+    {
+        if (!IsCapturingTextInput())
+        {
+            Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+            return false;
+        }
+
+        var unicodeWindow = Win32ImeCompatibility.IsUnicodeWindow(windowHandle);
+        if (message == Win32ImeCompatibility.WmImeChar)
+        {
+            Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+            if (unicodeWindow)
+            {
+                ImGui.ImGuiIO_AddInputCharacterUTF16(
+                    ImguiHook.IO,
+                    unchecked((ushort)wParam));
+                LogImeCompatibility(windowHandle, 0);
+                return true;
+            }
+
+            var codePage = Win32ImeCompatibility.GetActiveInputCodePage();
+            if (Win32ImeCompatibility.TryDecodePackedAnsiCharacter(
+                    unchecked((uint)wParam),
+                    codePage,
+                    out var committedText))
+            {
+                AddUtf8Input(committedText);
+                LogImeCompatibility(windowHandle, codePage);
+            }
+            else
+            {
+                LogImeDecodeFailure(unchecked((uint)wParam), codePage);
+            }
+
+            // Do not let DefWindowProcA split a DBCS WM_IME_CHAR into two
+            // Latin-1-looking WM_CHAR messages (for example CE D2 -> ÎÒ).
+            return true;
+        }
+
+        if (message != WmChar || unicodeWindow)
+            return false;
+
+        var activeCodePage = Win32ImeCompatibility.GetActiveInputCodePage();
+        var pendingLeadByte = Volatile.Read(ref _pendingAnsiLeadByte);
+        if (Win32ImeCompatibility.TryConsumeAnsiWindowCharacter(
+                unchecked((uint)wParam),
+                activeCodePage,
+                ref pendingLeadByte,
+                out var text))
+        {
+            Volatile.Write(ref _pendingAnsiLeadByte, pendingLeadByte);
+            AddUtf8Input(text);
+            LogImeCompatibility(windowHandle, activeCodePage);
+        }
+        else
+        {
+            Volatile.Write(ref _pendingAnsiLeadByte, -1);
+            LogImeDecodeFailure(unchecked((uint)wParam), activeCodePage);
+        }
+
+        // The ANSI message has either been queued as UTF-8 or retained as a
+        // DBCS lead byte. In both cases the stock ImGui WM_CHAR path must not run.
+        return true;
+    }
+
+    private bool ShouldRouteImeUiToDefault(uint message)
+    {
+        if (!IsCapturingTextInput() || !Win32ImeCompatibility.IsImeUiMessage(message))
+            return false;
+
+        if (message == Win32ImeCompatibility.WmImeEndComposition)
+            Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+        return true;
+    }
+
+    private static void AddUtf8Input(string text)
+    {
+        if (!string.IsNullOrEmpty(text))
+            ImGui.ImGuiIO_AddInputCharactersUTF8(ImguiHook.IO, text);
+    }
+
+    private void UpdateImeCandidatePlacement()
+    {
+        if (!ImGui.IsItemActive())
+            return;
+
+        var windowHandle = Volatile.Read(ref _windowHandle);
+        if (windowHandle == nint.Zero)
+            return;
+
+        using var itemMinimum = new ImVec2();
+        using var itemMaximum = new ImVec2();
+        ImGui.GetItemRectMin(itemMinimum);
+        ImGui.GetItemRectMax(itemMaximum);
+        var placementUpdated = Win32ImeCompatibility.UpdateCandidatePlacement(
+            windowHandle,
+            itemMinimum.X,
+            itemMinimum.Y,
+            itemMaximum.X,
+            itemMaximum.Y,
+            out var attachedDefaultContext);
+        if (attachedDefaultContext)
+            Interlocked.Exchange(ref _attachedDefaultImeContext, 1);
+
+        if (placementUpdated)
+        {
+            LogImeCompatibility(
+                windowHandle,
+                Win32ImeCompatibility.IsUnicodeWindow(windowHandle)
+                    ? 0
+                    : Win32ImeCompatibility.GetActiveInputCodePage());
+        }
+    }
+
+    private void DetachDefaultImeContextIfOwned()
+    {
+        if (Interlocked.Exchange(ref _attachedDefaultImeContext, 0) == 0)
+            return;
+
+        var windowHandle = Volatile.Read(ref _windowHandle);
+        if (windowHandle != nint.Zero)
+            Win32ImeCompatibility.DetachDefaultContext(windowHandle);
+    }
+
+    private void LogImeCompatibility(nint windowHandle, uint codePage)
+    {
+        if (Interlocked.Exchange(ref _imeCompatibilityLogged, 1) != 0)
+            return;
+
+        var windowKind = Win32ImeCompatibility.IsUnicodeWindow(windowHandle)
+            ? "Unicode"
+            : $"ANSI/code page {codePage}";
+        LogSafely(
+            $"Win32 IME compatibility active for the {windowKind} game window; " +
+            "committed text is normalized to UTF-8 and candidate placement follows the chat input.");
+    }
+
+    private void LogImeDecodeFailure(uint rawCharacter, uint codePage)
+    {
+        if (Interlocked.Exchange(ref _imeDecodeFailureLogged, 1) != 0)
+            return;
+
+        LogSafely(
+            $"Win32 IME discarded an undecodable ANSI character 0x{rawCharacter:X4} " +
+            $"from code page {codePage}; further decode failures are suppressed.");
+    }
+
     private void SyncInputBufferFromDraft()
     {
         Array.Clear(_inputBuffer);
-        var bytes = Encoding.UTF8.GetBytes(_session.Composer.Draft);
-        var count = Math.Min(bytes.Length, _inputBuffer.Length - 1);
-        bytes.AsSpan(0, count).CopyTo(_inputBuffer);
+        Encoding.UTF8.GetEncoder().Convert(
+            _session.Composer.Draft.AsSpan(),
+            _inputBuffer.AsSpan(0, _inputBuffer.Length - 1),
+            true,
+            out _,
+            out _,
+            out _);
     }
 
     private string ReadInputBuffer()
@@ -365,6 +546,25 @@ public sealed class ChatOverlayHost
         var originalStarted = false;
         try
         {
+            if (host is not null)
+            {
+                Volatile.Write(ref host._windowHandle, hWnd);
+
+                // Some third-party IME candidate windows transiently take OS
+                // focus. Preserve ImGui's active InputText while that UI is up.
+                if (host.ShouldIgnoreUnactivateBeforeBackend(message, wParam))
+                    return nint.Zero;
+
+                if (host.TryHandleImeCharacter(hWnd, message, wParam))
+                    return nint.Zero;
+
+                // The overlay does not paint an IME UI itself. Let the proper
+                // ANSI/Unicode default window proc own composition and candidate
+                // lifecycle messages instead of Relink's chat WndProc.
+                if (host.ShouldRouteImeUiToDefault(message))
+                    return Win32ImeCompatibility.CallDefaultWindowProc(hWnd, message, wParam, lParam);
+            }
+
             ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
             if (ImguiHook.Options?.IgnoreWindowUnactivate == true)
             {
@@ -393,7 +593,7 @@ public sealed class ChatOverlayHost
                 return s_originalWndProc.Value.Invoke(hWnd, message, wParam, lParam);
             }
 
-            return DefWindowProcW(hWnd, message, wParam, lParam);
+            return Win32ImeCompatibility.CallDefaultWindowProc(hWnd, message, wParam, lParam);
         }
         catch (Exception exception)
         {
@@ -410,7 +610,7 @@ public sealed class ChatOverlayHost
                 }
             }
 
-            return DefWindowProcW(hWnd, message, wParam, lParam);
+            return Win32ImeCompatibility.CallDefaultWindowProc(hWnd, message, wParam, lParam);
         }
     }
 
@@ -434,7 +634,7 @@ public sealed class ChatOverlayHost
         try
         {
             _log(
-                "Custom WndProc recovered through DefWindowProcW after an exception: " +
+                "Custom WndProc recovered through the ANSI/Unicode default procedure after an exception: " +
                 $"{exception.GetType().Name} (0x{unchecked((uint)exception.HResult):X8}): " +
                 $"{exception.Message}.");
         }
@@ -443,9 +643,6 @@ public sealed class ChatOverlayHost
             // A logger must not let an exception cross an unmanaged callback.
         }
     }
-
-    [DllImport("user32.dll")]
-    private static extern nint DefWindowProcW(nint hWnd, uint message, nint wParam, nint lParam);
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();

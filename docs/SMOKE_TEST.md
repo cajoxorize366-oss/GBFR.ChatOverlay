@@ -19,17 +19,27 @@ The Reloaded-II log should contain messages equivalent to:
 
 The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after the game initializes DirectInput.
 
+After the chat field first becomes active, the log should also contain exactly one line equivalent to:
+
+```text
+[gbfr.qol.chatoverlay] Win32 IME compatibility active for the ANSI/code page 936 game window; committed text is normalized to UTF-8 and candidate placement follows the chat input.
+```
+
+`Unicode` is also a valid window-kind result. On a Chinese ANSI window using Sogou or Microsoft Pinyin, code page `936` is expected.
+
 ## Visual and input checks
 
 1. Confirm that the lower-left system message says the native Relink 2.0.2 bridge is connected.
 2. Press `Y` once. The input field should open without inserting the activation key itself.
-3. Enter Latin and Chinese text. The IME candidate window and final text should remain usable in borderless and fullscreen modes.
-4. In an online lobby or party, press Enter and confirm a second vanilla client receives the message.
-5. Have the second client send a free-text reply. Confirm it appears once in the Overlay history.
-6. Confirm the local message appears once as `You`; a server echo with identical text should not add a duplicate line.
-7. While the input field is open, press movement and combat keys. The game should not respond to them.
-8. Press Escape. The input field should close, and controls should resume after held keys have been released.
-9. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
+3. Enter `ABC123`, then use Microsoft Pinyin and Sogou to commit `我是`. The field must contain exactly `ABC123我是` once: `我` must never become `ÎÒ`, and Latin characters must not duplicate.
+4. While composing with Sogou, confirm that its candidate window is visible beside/below the chat field and follows it in windowed, borderless and fullscreen modes. Select candidates with both number keys and mouse; composition must remain active instead of disappearing on the candidate window's transient focus change.
+5. Press Escape during an unfinished composition, reopen with `Y`, and type `我是` again. No pending lead byte, old composition or candidate window may leak into the new input session.
+6. In an online lobby or party, press Enter and confirm a second vanilla client receives the message.
+7. Have the second client send a free-text reply. Confirm it appears once in the Overlay history.
+8. Confirm the local message appears once as `You`; a server echo with identical text should not add a duplicate line.
+9. While the input field is open, press movement and combat keys. The game should not respond to them.
+10. Press Escape. The input field should close, and controls should resume after held keys have been released.
+11. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
 
 ## Failure handling
 
@@ -37,9 +47,9 @@ The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after
 - If the game fails before `DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path`, disable the Mod and preserve the Reloaded-II log.
 - If the log reaches `[WndProcHook]` but not `First Direct3D11 Present callback`, collect the Windows Application Error/WER entry. That boundary distinguishes native backend or WndProc initialization from managed Overlay rendering.
 - If `Render callback recovered from an exception` appears, preserve the complete line. The callback guard released chat input capture, but the visual Overlay is degraded for that session.
-- Do not mix individual DLLs from older packages. This build intentionally uses the same official `ImguiHookDx11`, prebuilt pinned CJK atlas, cached original WndProc and `DefWindowProcW` fallback as the proven Extra Sigil frontend.
+- Do not mix individual DLLs from older packages. This build intentionally uses the same official `ImguiHookDx11`, prebuilt pinned CJK atlas and cached original WndProc as the proven Extra Sigil frontend; its fallback now selects `DefWindowProcA` or `DefWindowProcW` to match the actual game window.
 - If the Overlay renders but controls still respond, preserve the three DirectInput log lines; their presence distinguishes a state-filter bug from a missed hook.
-- If Chinese characters render as boxes, record the `CJK font loaded before DX11 hook initialization` line and Windows display language.
+- If Chinese characters render as boxes, record the `CJK font loaded before DX11 hook initialization` line and Windows display language. If they become Latin-1 text such as `ÎÒ`, preserve the new `Win32 IME compatibility active` line, input-method name and complete Reloaded-II log.
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.
 - Hashed quick-chat/stamp records are intentionally ignored by the incoming bridge until their text resolver is hooked.
 
@@ -115,7 +125,7 @@ Local microphone monitor playback stopped after ... ms; PlaybackStopped event ob
 Local microphone monitor cleanup complete after ... ms.
 ```
 
-Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. Preview.11 keeps I as this separate WASAPI preflight, while U lets Party capture the configured endpoint directly. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
+Cleanup lines from the first and second holds may interleave because cleanup is deliberately asynchronous. If it exceeds two seconds, the log reports the exact phase (`requesting microphone stop`, `stopping local playback`, `draining audio callbacks`, or `disposing endpoints`); playback must nevertheless remain silent and another `I` hold must still start. No authenticated Party session, remote ChatControl or microphone permission is required for this check. If no signal is observed, fix the Windows privacy/input meter, selected microphone or gain before a two-client run. Preview.12 keeps I as this separate WASAPI preflight, while U lets Party capture the configured endpoint directly. Using speakers can create acoustic feedback; the self-monitor volume defaults to 35% and is capped at 50%.
 
 Prerequisites for `U`: both testers must use the exact same ZIP, leave both Party options enabled, keep `Experimental Voice (U Party / I Local Test)` enabled, select the intended microphone and playback device in the two Mod configuration lists, save, and restart before testing. The two choices may be different devices and do not have to be the Windows defaults. Use a private two-client room and label the saved logs as client A and client B. Do not begin the voice test unless each client has successful `SetChatAudio...Completed` lines with the expected `selectionType` (`1` for default or `3` for manual), initialized Party input/output states, and the startup line explicitly saying that no audio-manipulation capture stream is configured.
 

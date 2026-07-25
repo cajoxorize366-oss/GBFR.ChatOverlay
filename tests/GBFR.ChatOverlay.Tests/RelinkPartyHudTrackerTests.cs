@@ -8,7 +8,7 @@ public sealed class RelinkPartyHudTrackerTests
     public void BattleAnchor_PrefersActualHpFillGaugeOverNarrowMaskNode()
     {
         Assert.Equal(
-            [0x3B0, 0x3D0],
+            [0x370, 0x390],
             RelinkPartyHudTracker.BattleAnchorPointerOffsets.ToArray());
     }
 }

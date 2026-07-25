@@ -36,11 +36,12 @@ internal sealed class RelinkPartyHudTracker
     private const float NativeRightEdgeGap = 18.0f;
 
     private static readonly int[] TownTargetPointerOffsets = [0x1B8, 0x230];
-    // ControllerPlParameter01 object refs are 0x20 bytes each. The resolved
-    // pointers below are HpGauge01 and HpGauge02. HpGaugeMask is a narrow mask
-    // node near the name-side of the row and Root does not describe the HP
-    // bar's far-right edge, so neither is a safe fallback for this anchor.
-    private static readonly int[] BattleTargetPointerOffsets = [0x3B0, 0x3D0];
+    // ControllerPlParameter01 stores Root/Name at 0x160/0x180, then its Type
+    // integer at 0x1A0 before the remaining 0x20-byte object refs. Therefore
+    // HpGauge01/HpGauge02 resolve at 0x370/0x390. The old 0x3B0/0x3D0 pair was
+    // actually HpGaugeMask/HpGaugeEff01, which anchored beside the name and
+    // could expose an effect transform with a wildly oversized scale.
+    private static readonly int[] BattleTargetPointerOffsets = [0x370, 0x390];
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Action<string> _log;
@@ -342,11 +343,23 @@ internal sealed class RelinkPartyHudTracker
                 continue;
             }
 
-            iconSize = Math.Clamp(iconSize, 18.0f, 96.0f);
-            if (center.X < viewportX - iconSize ||
-                center.X > viewportX + viewportWidth + iconSize ||
-                center.Y < viewportY - iconSize ||
-                center.Y > viewportY + viewportHeight + iconSize)
+            // A valid party-row icon remains small relative to the current game
+            // viewport. Reject effect/animation transforms instead of clamping a
+            // bad scale into a still-huge 96 px icon at the edge of the screen.
+            var maximumIconSize = Math.Clamp(viewportHeight * 0.05f, 32.0f, 96.0f);
+            if (iconSize > maximumIconSize)
+            {
+                projectionFailed = true;
+                continue;
+            }
+
+            var minimumIconSize = Math.Clamp(viewportHeight * 0.012f, 12.0f, 24.0f);
+            iconSize = Math.Max(iconSize, minimumIconSize);
+            var radius = iconSize * 0.5f;
+            if (center.X < viewportX + radius ||
+                center.X > viewportX + viewportWidth - radius ||
+                center.Y < viewportY + radius ||
+                center.Y > viewportY + viewportHeight - radius)
             {
                 projectionFailed = true;
                 continue;

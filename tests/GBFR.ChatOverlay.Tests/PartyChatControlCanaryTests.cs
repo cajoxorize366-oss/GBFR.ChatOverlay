@@ -322,6 +322,12 @@ public sealed class PartyChatControlCanaryTests
         Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
         Assert.Contains("SetPermissions:7000:0x0005", api.Calls);
         Assert.DoesNotContain(api.Calls, call => call == "SetAudioInputMuted:False");
+        Assert.Contains(
+            logs,
+            line => line.Contains("no audio-manipulation capture stream is configured", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            logs,
+            line => line.Contains("capture sink was requested", StringComparison.Ordinal));
 
         api.Calls.Clear();
         canary.SetPushToTalkPressed(true);
@@ -337,6 +343,11 @@ public sealed class PartyChatControlCanaryTests
             api.Calls);
         Assert.Equal(PartyVoiceUiState.Speaking, canary.VoiceUiStatus.State);
         Assert.Contains(logs, line => line.Contains("microphone UNMUTED", StringComparison.Ordinal));
+        Assert.Contains(
+            logs,
+            line => line.Contains(
+                "Party is capturing the configured Windows microphone directly",
+                StringComparison.Ordinal));
 
         api.Calls.Clear();
         canary.SetPushToTalkPressed(false);

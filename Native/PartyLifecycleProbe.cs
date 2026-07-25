@@ -136,10 +136,7 @@ public sealed class PartyLifecycleProbe
                             EnqueueLog,
                             enableVoiceTest: _enableVoiceTest,
                             audioInputSelection: _audioInputSelection,
-                            audioOutputSelection: _audioOutputSelection,
-                            captureBackendFactory: _enableVoiceTest
-                                ? new WasapiPartyMicrophoneCaptureBackendFactory(EnqueueLog)
-                                : null);
+                            audioOutputSelection: _audioOutputSelection);
                     }
                     catch (Exception exception)
                     {
@@ -183,8 +180,9 @@ public sealed class PartyLifecycleProbe
                     ? $"Party lifecycle probe attached at 0x{(nuint)module:X}; observation only, no Party calls or sends."
                     : _enableVoiceTest
                         ? $"Party lifecycle/Stage 3 voice test attached at 0x{(nuint)module:X}; " +
-                          "one ChatControl may join the existing PartyNetwork. U uses the official Party capture sink " +
-                          "with the selected Windows microphone; input stays muted unless U is held."
+                          "one ChatControl may join the existing PartyNetwork. U unmutes Party's native selected " +
+                          "microphone path directly; no audio-manipulation capture stream is configured, and input " +
+                          "stays muted unless U is held."
                         : $"Party lifecycle/Stage 2 canary attached at 0x{(nuint)module:X}; " +
                           "one muted ChatControl may join the existing PartyNetwork, with no chat permissions granted.");
             }

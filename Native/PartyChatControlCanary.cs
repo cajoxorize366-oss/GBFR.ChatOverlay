@@ -1660,7 +1660,9 @@ internal sealed class PartyChatControlCanary : IDisposable
                     ? _useCaptureBridge
                         ? "the official Party capture sink was requested at 24 kHz mono float; " +
                           "microphone permissions remain None until a remote Mod ChatControl joins this network."
-                        : "microphone permissions remain None until a remote Mod ChatControl joins this network."
+                        : "Party's native selected microphone path remains active; no audio-manipulation capture " +
+                          "stream is configured, and microphone permissions remain None until a remote Mod " +
+                          "ChatControl joins this network."
                     : "PartyChatControlSetPermissions will not be called."));
         }
     }
@@ -1932,7 +1934,8 @@ internal sealed class PartyChatControlCanary : IDisposable
                     ? _useCaptureBridge
                         ? "Stage 3 push-to-talk microphone UNMUTED while U is held; " +
                           "Windows microphone frames are now feeding the official Party capture sink."
-                        : "Stage 3 push-to-talk microphone UNMUTED while U is held."
+                        : "Stage 3 push-to-talk microphone UNMUTED while U is held; Party is capturing the " +
+                          "configured Windows microphone directly."
                     : "Stage 3 push-to-talk microphone muted.");
             }
         }
@@ -2364,6 +2367,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             $"localIndicator={FormatDiagnostic(localIndicator, FormatEnum)}, " +
             $"inputDevice={FormatDiagnostic(inputDevice, FormatAudioDevice)}, " +
             $"outputDevice={FormatDiagnostic(outputDevice, FormatAudioDevice)}, " +
+            $"audioPath={(_useCaptureBridge ? "ManipulationCaptureSink" : "PartyNativeInput")}," +
             $"captureSink=enabled:{_useCaptureBridge},frames:{captureFramesSubmitted}," +
             $"signal:{captureSignalSubmitted},peak:{capturePeak:P0}, " +
             $"diagnosis={localDiagnosis}";
@@ -2692,6 +2696,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             $"partySelectedInput={(_diagnosticInputDevice is { } input ? FormatAudioDevice(input) : "NotRead")}, " +
             $"partySelectedOutput={(_diagnosticOutputDevice is { } output ? FormatAudioDevice(output) : "NotRead")}, " +
             $"localTalkingObserved={_diagnosticLocalTalkingObserved}, " +
+            $"audioPath={(_useCaptureBridge ? "ManipulationCaptureSink" : "PartyNativeInput")}, " +
             $"captureSinkEnabled={_useCaptureBridge}, captureFramesSubmitted={_captureFramesSubmitted}, " +
             $"captureSignalSubmitted={_captureSignalSubmitted}, capturePeak={_capturePeak:P0}, " +
             $"captureBackpressureDrops={_captureBackpressureFrames}, " +

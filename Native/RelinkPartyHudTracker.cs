@@ -31,6 +31,7 @@ internal sealed class RelinkPartyHudTracker
     private const int ObjectFinalTransformOffset = 0x120;
     private const int ObjectSizeOffset = 0x1BC;
     private const int ObjectActiveOffset = 0x1D0;
+    private const int ControllerVisibilityStateOffset = 0x188;
     private const int TownSlotOffset = 0x340;
     private const int BattleTypeOffset = 0x1A0;
     // Relink's 2560x1440 HUD transform uses a 2/3 scale here, so a 72-unit
@@ -85,9 +86,11 @@ internal sealed class RelinkPartyHudTracker
     internal bool IsGameMenuVisible =>
         IsInitialized &&
         !Volatile.Read(ref _suspended) &&
-        !_pauseTopControllers.IsEmpty;
+        IsAnyPauseTopControllerVisible();
 
     internal static ReadOnlySpan<int> BattleAnchorPointerOffsets => BattleTargetPointerOffsets;
+
+    internal static bool IsControllerVisibilityStateVisible(int state) => state != 0;
 
     internal void Initialize()
     {
@@ -442,6 +445,29 @@ internal sealed class RelinkPartyHudTracker
         controller != nint.Zero &&
         _memoryReader.TryReadPointer(controller, out var vtable) &&
         vtable == _pauseTopVtable;
+
+    private bool IsAnyPauseTopControllerVisible()
+    {
+        foreach (var controller in _pauseTopControllers.Keys)
+        {
+            if (!IsPauseTopController(controller))
+            {
+                _pauseTopControllers.TryRemove(controller, out _);
+                continue;
+            }
+
+            // ControllerPauseTop is pooled and can outlive the visible menu. Relink's
+            // own controller base reports visibility from this state machine field:
+            // 0 = closed, 1 = opening, 2 = open, 3 = closing.
+            if (TryReadInt32(controller + ControllerVisibilityStateOffset, out var state) &&
+                IsControllerVisibilityStateVisible(state))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private bool TryReadByte(nint address, out byte value)
     {

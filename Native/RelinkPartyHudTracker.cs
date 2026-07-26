@@ -26,7 +26,6 @@ internal sealed class RelinkPartyHudTracker
 {
     private const int TownVtableRva = 0x05A53978;
     private const int BattleVtableRva = 0x05A62E28;
-    private const int PauseTopVtableRva = 0x05C725A8;
     private const int FactoryResultControllerOffset = 0x18;
     private const int ObjectFinalTransformOffset = 0x120;
     private const int ObjectSizeOffset = 0x1BC;
@@ -54,18 +53,14 @@ internal sealed class RelinkPartyHudTracker
     private readonly IRelinkMemoryReader _memoryReader;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentDictionary<nint, PartyHudLayout> _controllers = new();
-    private readonly ConcurrentDictionary<nint, byte> _pauseTopControllers = new();
 
     private IHook<HudFactoryDelegate>? _townFactoryHook;
     private IHook<HudDestructorDelegate>? _townDestructorHook;
     private IHook<HudFactoryDelegate>? _battleFactoryHook;
     private IHook<HudDestructorDelegate>? _battleDestructorHook;
-    private IHook<HudFactoryDelegate>? _pauseTopFactoryHook;
-    private IHook<HudDestructorDelegate>? _pauseTopDestructorHook;
     private nint _moduleBase;
     private nint _townVtable;
     private nint _battleVtable;
-    private nint _pauseTopVtable;
     private bool _initialized;
     private bool _suspended;
     private int _firstAnchorLogged;
@@ -82,11 +77,6 @@ internal sealed class RelinkPartyHudTracker
     }
 
     internal bool IsInitialized => Volatile.Read(ref _initialized);
-
-    internal bool IsGameMenuVisible =>
-        IsInitialized &&
-        !Volatile.Read(ref _suspended) &&
-        IsAnyPauseTopControllerVisible();
 
     internal static ReadOnlySpan<int> BattleAnchorPointerOffsets => BattleTargetPointerOffsets;
 
@@ -106,7 +96,6 @@ internal sealed class RelinkPartyHudTracker
             _moduleBase = mainModule.BaseAddress;
             _townVtable = _moduleBase + TownVtableRva;
             _battleVtable = _moduleBase + BattleVtableRva;
-            _pauseTopVtable = _moduleBase + PauseTopVtableRva;
 
             try
             {
@@ -126,31 +115,20 @@ internal sealed class RelinkPartyHudTracker
                     BattleDestructor,
                     _moduleBase + rvas.BattleDestructor);
                 _battleDestructorHook.Activate();
-                _pauseTopFactoryHook = _hooks.CreateHook<HudFactoryDelegate>(
-                    PauseTopFactory,
-                    _moduleBase + rvas.PauseTopFactory);
-                _pauseTopFactoryHook.Activate();
-                _pauseTopDestructorHook = _hooks.CreateHook<HudDestructorDelegate>(
-                    PauseTopDestructor,
-                    _moduleBase + rvas.PauseTopDestructor);
-                _pauseTopDestructorHook.Activate();
-
                 Volatile.Write(ref _initialized, true);
                 SafeLog(
                     "Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, " +
-                    "resolution, aspect ratio and HUD scale now follow the game's live UI node transforms; " +
-                    "ControllerPauseTop visibility suppresses indicators behind the game menu.");
+                    "resolution, aspect ratio and HUD scale now follow the game's live UI node transforms. " +
+                    "Microphone anchors are emitted only while the native party-HUD controller is visible.");
             }
             catch
             {
                 DisableHooks();
                 ClearHooks();
                 _controllers.Clear();
-                _pauseTopControllers.Clear();
                 _moduleBase = nint.Zero;
                 _townVtable = nint.Zero;
                 _battleVtable = nint.Zero;
-                _pauseTopVtable = nint.Zero;
                 throw;
             }
         }
@@ -249,8 +227,6 @@ internal sealed class RelinkPartyHudTracker
                 _townDestructorHook?.Enable();
                 _battleFactoryHook?.Enable();
                 _battleDestructorHook?.Enable();
-                _pauseTopFactoryHook?.Enable();
-                _pauseTopDestructorHook?.Enable();
                 Volatile.Write(ref _suspended, false);
             }
             catch
@@ -276,13 +252,6 @@ internal sealed class RelinkPartyHudTracker
         return result;
     }
 
-    private nint PauseTopFactory(nint context, nint resultStorage)
-    {
-        var result = _pauseTopFactoryHook!.OriginalFunction(context, resultStorage);
-        TryRegisterPauseTopFactoryResult(result, resultStorage);
-        return result;
-    }
-
     private nint TownDestructor(nint controller, int deleteFlag)
     {
         _controllers.TryRemove(controller, out _);
@@ -293,12 +262,6 @@ internal sealed class RelinkPartyHudTracker
     {
         _controllers.TryRemove(controller, out _);
         return _battleDestructorHook!.OriginalFunction(controller, deleteFlag);
-    }
-
-    private nint PauseTopDestructor(nint controller, int deleteFlag)
-    {
-        _pauseTopControllers.TryRemove(controller, out _);
-        return _pauseTopDestructorHook!.OriginalFunction(controller, deleteFlag);
     }
 
     private void TryRegisterFactoryResult(
@@ -325,24 +288,6 @@ internal sealed class RelinkPartyHudTracker
         }
     }
 
-    private void TryRegisterPauseTopFactoryResult(nint result, nint resultStorage)
-    {
-        try
-        {
-            var wrapper = result != nint.Zero ? result : resultStorage;
-            if (_memoryReader.TryReadPointer(wrapper + FactoryResultControllerOffset, out var controller) &&
-                IsPauseTopController(controller))
-            {
-                _pauseTopControllers[controller] = 0;
-            }
-        }
-        catch
-        {
-            // Menu creation must never fail because the visibility-only probe raced
-            // the wrapper publication. The next menu factory call can repopulate it.
-        }
-    }
-
     private bool TryCreateAnchor(
         nint controller,
         PartyHudLayout layout,
@@ -360,6 +305,15 @@ internal sealed class RelinkPartyHudTracker
         if (!IsExpectedController(controller, layout))
         {
             stale = true;
+            return false;
+        }
+
+        // Whitelist rendering by the party HUD itself. Child HP nodes can remain
+        // active while their controller is closed (menus, results and transitions),
+        // so an anchor is valid only while Relink's native HUD state is visible.
+        if (!TryReadInt32(controller + ControllerVisibilityStateOffset, out var controllerState) ||
+            !IsControllerVisibilityStateVisible(controllerState))
+        {
             return false;
         }
 
@@ -441,34 +395,6 @@ internal sealed class RelinkPartyHudTracker
         return vtable == (layout == PartyHudLayout.OnlineLobby ? _townVtable : _battleVtable);
     }
 
-    private bool IsPauseTopController(nint controller) =>
-        controller != nint.Zero &&
-        _memoryReader.TryReadPointer(controller, out var vtable) &&
-        vtable == _pauseTopVtable;
-
-    private bool IsAnyPauseTopControllerVisible()
-    {
-        foreach (var controller in _pauseTopControllers.Keys)
-        {
-            if (!IsPauseTopController(controller))
-            {
-                _pauseTopControllers.TryRemove(controller, out _);
-                continue;
-            }
-
-            // ControllerPauseTop is pooled and can outlive the visible menu. Relink's
-            // own controller base reports visibility from this state machine field:
-            // 0 = closed, 1 = opening, 2 = open, 3 = closing.
-            if (TryReadInt32(controller + ControllerVisibilityStateOffset, out var state) &&
-                IsControllerVisibilityStateVisible(state))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     private bool TryReadByte(nint address, out byte value)
     {
         Span<byte> bytes = stackalloc byte[1];
@@ -536,8 +462,6 @@ internal sealed class RelinkPartyHudTracker
 
     private void DisableHooks()
     {
-        _pauseTopDestructorHook?.Disable();
-        _pauseTopFactoryHook?.Disable();
         _battleDestructorHook?.Disable();
         _battleFactoryHook?.Disable();
         _townDestructorHook?.Disable();
@@ -546,8 +470,6 @@ internal sealed class RelinkPartyHudTracker
 
     private void ClearHooks()
     {
-        _pauseTopDestructorHook = null;
-        _pauseTopFactoryHook = null;
         _battleDestructorHook = null;
         _battleFactoryHook = null;
         _townDestructorHook = null;

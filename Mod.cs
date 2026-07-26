@@ -224,7 +224,6 @@ public class Mod : ModBase // <= Do not Remove.
             _chatSession,
             () => _configuration,
             IsOnlineRoomActive,
-            IsGameMenuVisible,
             ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
             GetPartyHudAnchors,
@@ -321,9 +320,6 @@ public class Mod : ModBase // <= Do not Remove.
 
     private bool IsOnlineRoomActive() =>
         _partyLifecycleProbe?.IsOnlineRoomActive == true;
-
-    private bool IsGameMenuVisible() =>
-        _partyHudTracker?.IsGameMenuVisible == true;
 
     private IReadOnlyList<PartyHudAnchor> GetPartyHudAnchors(
         float viewportX,

@@ -64,6 +64,9 @@ public sealed class ChatOverlayHost
     private int _imeCandidateCapturedInComposition;
     private int _platformImeBridgeLogged;
     private int _renderThreadLogged;
+    private int _voiceStatusFailureLogged;
+    private int _voiceIndicatorFailureLogged;
+    private int _settingsUiFailureLogged;
     private int _onlineRoomGateFailureLogged;
     private int _onlineRoomWasInactive = 1;
     private int _graphicsFailureHandled;
@@ -151,24 +154,23 @@ public sealed class ChatOverlayHost
         if (Interlocked.CompareExchange(ref s_activeHost, this, null) is not null)
             throw new InvalidOperationException("Only one GBFR chat overlay host can be active.");
 
-        SDK.Init(hooks, message => _log($"ImGui: {message}"));
-
-        var options = new ImguiHookOptions
-        {
-            EnableViewports = false,
-            IgnoreWindowUnactivate = true,
-            CustomWndProcHandlerPointer = GetCustomWndProcPointer(),
-            Implementations = new List<IImguiHook>
-            {
-                new CjkConfiguredDx11Hook(_log, HandlePermanentGraphicsFailure),
-            },
-        };
-
         try
         {
+            SDK.Init(hooks, message => LogSafely($"ImGui: {message}"));
+            var options = new ImguiHookOptions
+            {
+                EnableViewports = false,
+                IgnoreWindowUnactivate = true,
+                CustomWndProcHandlerPointer = GetCustomWndProcPointer(),
+                Implementations = new List<IImguiHook>
+                {
+                    new CjkConfiguredDx11Hook(_log, HandlePermanentGraphicsFailure),
+                },
+            };
+
             await ImguiHook.Create(Render, options).ConfigureAwait(false);
             Volatile.Write(ref _initialized, true);
-            _log(
+            LogSafely(
                 "DirectX 11 ImGui hook initialized with the Extra Sigil Present-only " +
                 "hook-chain and native SEH compatibility path.");
         }
@@ -220,9 +222,9 @@ public sealed class ChatOverlayHost
                 onlineRoomActive ? 0 : 1);
             if (!onlineRoomActive && previousOnlineRoomInactive == 0)
                 NotifyOnlineRoomUnavailable();
-            var voiceUiStatus = _getVoiceUiStatus();
+            var voiceUiStatus = GetVoiceUiStatusSafely();
             if (onlineRoomActive || configuration.ShowAllVoiceIndicatorSlots)
-                VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
+                DrawVoiceIndicatorsSafely(configuration, voiceUiStatus);
 
             if ((Interlocked.Exchange(ref _settingsToggleRequested, 0) & 1) != 0)
                 SetSettingsMenuOpen(Volatile.Read(ref _settingsMenuOpen) == 0);
@@ -239,7 +241,7 @@ public sealed class ChatOverlayHost
             if (settingsOpen)
             {
                 _mouseInteractionGate.Observe(MouseButtonStateTracker.PressedButtons != 0);
-                DrawSettingsMenu();
+                DrawSettingsMenuSafely();
                 if (!_settingsWindowOpen)
                 {
                     SetSettingsMenuOpen(false);
@@ -296,6 +298,58 @@ public sealed class ChatOverlayHost
         {
             ResetInteractionState();
             LogSafely($"Render callback recovered from an exception: {exception}");
+        }
+    }
+
+    private PartyVoiceUiStatus GetVoiceUiStatusSafely()
+    {
+        try
+        {
+            return _getVoiceUiStatus();
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _voiceStatusFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    "Voice status polling failed; voice status is hidden while chat and F10 remain active: " +
+                    exception);
+            }
+            return PartyVoiceUiStatus.Unavailable;
+        }
+    }
+
+    private void DrawVoiceIndicatorsSafely(Config configuration, PartyVoiceUiStatus voiceUiStatus)
+    {
+        try
+        {
+            VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _voiceIndicatorFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    "Voice-indicator rendering failed; indicators are hidden while chat and F10 remain active: " +
+                    exception);
+            }
+        }
+    }
+
+    private void DrawSettingsMenuSafely()
+    {
+        try
+        {
+            DrawSettingsMenu();
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _settingsUiFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    "F10 settings rendering failed; chat rendering remains active and further settings errors " +
+                    "are suppressed: " + exception);
+            }
         }
     }
 

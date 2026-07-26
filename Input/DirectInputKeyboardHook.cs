@@ -16,6 +16,7 @@ public sealed unsafe class DirectInputKeyboardHook
     private const int GetDeviceDataVtableIndex = 10;
     private const int MaximumReasonableStateSize = 4_096;
     private const uint DigddPeek = 0x00000001;
+    private const int EFail = unchecked((int)0x80004005);
 
     private static readonly Guid SystemKeyboardGuid =
         new(0x6F1D2B61, 0xD5A0, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
@@ -43,6 +44,8 @@ public sealed unsafe class DirectInputKeyboardHook
     private nint _mouseDevice;
     private bool _initialized;
     private int _filterFailureLogged;
+    private int _deviceHookFailureLogged;
+    private int _bufferedMouseHookFailureLogged;
 
     public DirectInputKeyboardHook(
         ReloadedHooksApi hooks,
@@ -125,27 +128,45 @@ public sealed unsafe class DirectInputKeyboardHook
         nint output,
         nint outer)
     {
-        var result = _directInputCreateHook!.OriginalFunction(
-            instance,
-            version,
-            interfaceId,
-            output,
-            outer);
+        int result;
+        try
+        {
+            result = _directInputCreateHook!.OriginalFunction(
+                instance,
+                version,
+                interfaceId,
+                output,
+                outer);
+        }
+        catch (Exception exception)
+        {
+            LogDeviceHookFailure("DirectInput8Create original call failed", exception);
+            return EFail;
+        }
 
         if (result < 0 || output == nint.Zero || *(nint*)output == nint.Zero)
             return result;
 
-        lock (_hookSync)
+        try
         {
-            if (_createDeviceHook is null)
+            lock (_hookSync)
             {
-                var directInput = *(nint*)output;
-                var function = GetVtableFunction(directInput, CreateDeviceVtableIndex);
-                _createDeviceHook = _hooks
-                    .CreateHook<CreateDeviceDelegate>(CreateDevice, function)
-                    .Activate();
-                _log($"IDirectInput8::CreateDevice hooked (DirectInput {version:X4}).");
+                if (_createDeviceHook is null)
+                {
+                    var directInput = *(nint*)output;
+                    var function = GetVtableFunction(directInput, CreateDeviceVtableIndex);
+                    _createDeviceHook = _hooks
+                        .CreateHook<CreateDeviceDelegate>(CreateDevice, function)
+                        .Activate();
+                    LogSafely($"IDirectInput8::CreateDevice hooked (DirectInput {version:X4}).");
+                }
             }
+        }
+        catch (Exception exception)
+        {
+            LogDeviceHookFailure(
+                "IDirectInput8::CreateDevice hook could not be installed; Win32 input remains available",
+                exception);
         }
 
         return result;
@@ -153,7 +174,16 @@ public sealed unsafe class DirectInputKeyboardHook
 
     private int CreateDevice(nint self, nint deviceGuid, nint output, nint outer)
     {
-        var result = _createDeviceHook!.OriginalFunction(self, deviceGuid, output, outer);
+        int result;
+        try
+        {
+            result = _createDeviceHook!.OriginalFunction(self, deviceGuid, output, outer);
+        }
+        catch (Exception exception)
+        {
+            LogDeviceHookFailure("IDirectInput8::CreateDevice original call failed", exception);
+            return EFail;
+        }
         if (result < 0 || deviceGuid == nint.Zero || output == nint.Zero || *(nint*)output == nint.Zero)
             return result;
 
@@ -162,33 +192,56 @@ public sealed unsafe class DirectInputKeyboardHook
         if (guid == SystemKeyboardGuid)
         {
             Volatile.Write(ref _keyboardDevice, device);
-            _log("DirectInput system keyboard device detected.");
+            LogSafely("DirectInput system keyboard device detected.");
         }
         else if (guid == SystemMouseGuid)
         {
             Volatile.Write(ref _mouseDevice, device);
-            _log("DirectInput system mouse device detected.");
+            LogSafely("DirectInput system mouse device detected.");
         }
 
-        lock (_hookSync)
+        try
         {
-            if (_getDeviceStateHook is null)
+            lock (_hookSync)
             {
-                var function = GetVtableFunction(device, GetDeviceStateVtableIndex);
-                _getDeviceStateHook = _hooks
-                    .CreateHook<GetDeviceStateDelegate>(GetDeviceState, function)
-                    .Activate();
-                _log("IDirectInputDevice8::GetDeviceState hooked.");
-            }
+                if (_getDeviceStateHook is null)
+                {
+                    var function = GetVtableFunction(device, GetDeviceStateVtableIndex);
+                    _getDeviceStateHook = _hooks
+                        .CreateHook<GetDeviceStateDelegate>(GetDeviceState, function)
+                        .Activate();
+                    LogSafely("IDirectInputDevice8::GetDeviceState hooked.");
+                }
 
-            if (_getDeviceDataHook is null)
-            {
-                var function = GetVtableFunction(device, GetDeviceDataVtableIndex);
-                _getDeviceDataHook = _hooks
-                    .CreateHook<GetDeviceDataDelegate>(GetDeviceData, function)
-                    .Activate();
-                _log("IDirectInputDevice8::GetDeviceData hooked.");
+                // Buffered data is relevant to the mouse only. Installing this detour from an
+                // unrelated DirectInput device adds risk without helping settings-menu capture.
+                if (guid == SystemMouseGuid && _getDeviceDataHook is null)
+                {
+                    try
+                    {
+                        var function = GetVtableFunction(device, GetDeviceDataVtableIndex);
+                        _getDeviceDataHook = _hooks
+                            .CreateHook<GetDeviceDataDelegate>(GetDeviceData, function)
+                            .Activate();
+                        LogSafely("IDirectInput mouse GetDeviceData hooked.");
+                    }
+                    catch (Exception exception)
+                    {
+                        if (Interlocked.Exchange(ref _bufferedMouseHookFailureLogged, 1) == 0)
+                        {
+                            LogSafely(
+                                "Buffered DirectInput mouse interception is unavailable; state and Win32 " +
+                                $"capture remain active: {exception}");
+                        }
+                    }
+                }
             }
+        }
+        catch (Exception exception)
+        {
+            LogDeviceHookFailure(
+                "IDirectInput device-state hook could not be installed; Win32 input remains available",
+                exception);
         }
 
         return result;
@@ -196,7 +249,16 @@ public sealed unsafe class DirectInputKeyboardHook
 
     private int GetDeviceState(nint self, int byteCount, nint state)
     {
-        var result = _getDeviceStateHook!.OriginalFunction(self, byteCount, state);
+        int result;
+        try
+        {
+            result = _getDeviceStateHook!.OriginalFunction(self, byteCount, state);
+        }
+        catch (Exception exception)
+        {
+            LogDeviceHookFailure("IDirectInputDevice8::GetDeviceState original call failed", exception);
+            return EFail;
+        }
         if (result < 0 || state == nint.Zero || byteCount <= 0 || byteCount > MaximumReasonableStateSize)
             return result;
 
@@ -226,7 +288,7 @@ public sealed unsafe class DirectInputKeyboardHook
             _voiceInputModeCoordinator.ReportLocalMonitor(false);
             if (Interlocked.Exchange(ref _filterFailureLogged, 1) == 0)
             {
-                _log(
+                LogSafely(
                     "DirectInput filtering failed; push-to-talk was forced muted, local monitoring " +
                     $"stopped, and further errors are suppressed: {exception.Message}");
             }
@@ -242,23 +304,58 @@ public sealed unsafe class DirectInputKeyboardHook
         uint flags)
     {
         var isMouse = self == Volatile.Read(ref _mouseDevice);
-        var suppress = isMouse && (_shouldCapture() || _mouseStateFilter.IsSuppressing);
+        var suppress = false;
+        try
+        {
+            suppress = isMouse && (_shouldCapture() || _mouseStateFilter.IsSuppressing);
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _filterFailureLogged, 1) == 0)
+                LogSafely($"Buffered DirectInput mouse filtering failed open: {exception}");
+        }
         var effectiveFlags = suppress ? flags & ~DigddPeek : flags;
-        var result = _getDeviceDataHook!.OriginalFunction(
-            self,
-            objectDataSize,
-            objectData,
-            objectCount,
-            effectiveFlags);
-        if (result >= 0 && suppress && objectCount != nint.Zero)
-            *(uint*)objectCount = 0;
-        return result;
+        try
+        {
+            var result = _getDeviceDataHook!.OriginalFunction(
+                self,
+                objectDataSize,
+                objectData,
+                objectCount,
+                effectiveFlags);
+            if (result >= 0 && suppress && objectCount != nint.Zero)
+                *(uint*)objectCount = 0;
+            return result;
+        }
+        catch (Exception exception)
+        {
+            LogDeviceHookFailure("IDirectInput mouse GetDeviceData callback failed", exception);
+            return EFail;
+        }
     }
 
     private static nint GetVtableFunction(nint instance, int index)
     {
         var vtable = *(nint**)instance;
         return vtable[index];
+    }
+
+    private void LogDeviceHookFailure(string message, Exception exception)
+    {
+        if (Interlocked.Exchange(ref _deviceHookFailureLogged, 1) == 0)
+            LogSafely($"{message}: {exception}");
+    }
+
+    private void LogSafely(string message)
+    {
+        try
+        {
+            _log(message);
+        }
+        catch
+        {
+            // Never allow logging to unwind through a native DirectInput callback.
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]

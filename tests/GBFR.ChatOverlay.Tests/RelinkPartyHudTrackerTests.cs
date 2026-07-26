@@ -26,6 +26,16 @@ public sealed class RelinkPartyHudTrackerTests
     }
 
     [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(3, true)]
+    public void ChainburstBlacklist_MatchesNativeNonzeroVisibilityQuery(int state, bool expected)
+    {
+        Assert.Equal(expected, RelinkPartyHudTracker.IsChainburstBlockingState(state));
+    }
+
+    [Theory]
     [InlineData(1504.0f, 197.33334f, 136.00002f, 722.6667f)]
     [InlineData(816.0f, 181.33334f, 288.0f, 477.33334f)]
     public void BattleAnchor_LiveRelinkSnapshotProjectsToHpBarRightEdge(

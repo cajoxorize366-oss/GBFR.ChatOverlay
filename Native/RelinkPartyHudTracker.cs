@@ -26,6 +26,7 @@ internal sealed class RelinkPartyHudTracker
 {
     private const int TownVtableRva = 0x05A53978;
     private const int BattleVtableRva = 0x05A62E28;
+    private const int ChainburstVtableRva = 0x05A68938;
     private const int FactoryResultControllerOffset = 0x18;
     private const int ObjectFinalTransformOffset = 0x120;
     private const int ObjectSizeOffset = 0x1BC;
@@ -53,18 +54,23 @@ internal sealed class RelinkPartyHudTracker
     private readonly IRelinkMemoryReader _memoryReader;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentDictionary<nint, PartyHudLayout> _controllers = new();
+    private readonly ConcurrentDictionary<nint, byte> _chainburstControllers = new();
 
     private IHook<HudFactoryDelegate>? _townFactoryHook;
     private IHook<HudDestructorDelegate>? _townDestructorHook;
     private IHook<HudFactoryDelegate>? _battleFactoryHook;
     private IHook<HudDestructorDelegate>? _battleDestructorHook;
+    private IHook<HudFactoryDelegate>? _chainburstFactoryHook;
+    private IHook<HudDestructorDelegate>? _chainburstDestructorHook;
     private nint _moduleBase;
     private nint _townVtable;
     private nint _battleVtable;
+    private nint _chainburstVtable;
     private bool _initialized;
     private bool _suspended;
     private int _firstAnchorLogged;
     private int _projectionFailureLogged;
+    private int _chainburstSuppressionLogged;
 
     internal RelinkPartyHudTracker(
         ReloadedHooksApi hooks,
@@ -82,6 +88,8 @@ internal sealed class RelinkPartyHudTracker
 
     internal static bool IsControllerVisibilityStateVisible(int state) => state == 2;
 
+    internal static bool IsChainburstBlockingState(int state) => state != 0;
+
     internal void Initialize()
     {
         lock (_lifecycleSync)
@@ -96,6 +104,7 @@ internal sealed class RelinkPartyHudTracker
             _moduleBase = mainModule.BaseAddress;
             _townVtable = _moduleBase + TownVtableRva;
             _battleVtable = _moduleBase + BattleVtableRva;
+            _chainburstVtable = _moduleBase + ChainburstVtableRva;
 
             try
             {
@@ -115,20 +124,31 @@ internal sealed class RelinkPartyHudTracker
                     BattleDestructor,
                     _moduleBase + rvas.BattleDestructor);
                 _battleDestructorHook.Activate();
+                _chainburstFactoryHook = _hooks.CreateHook<HudFactoryDelegate>(
+                    ChainburstFactory,
+                    _moduleBase + rvas.ChainburstFactory);
+                _chainburstFactoryHook.Activate();
+                _chainburstDestructorHook = _hooks.CreateHook<HudDestructorDelegate>(
+                    ChainburstDestructor,
+                    _moduleBase + rvas.ChainburstDestructor);
+                _chainburstDestructorHook.Activate();
                 Volatile.Write(ref _initialized, true);
                 SafeLog(
                     "Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, " +
                     "resolution, aspect ratio and HUD scale now follow the game's live UI node transforms. " +
-                    "Microphone anchors are emitted only while the native party-HUD controller is visible.");
+                    "Microphone anchors are emitted only while the native party-HUD controller is visible, " +
+                    "with the Full Chain illustration explicitly blacklisted.");
             }
             catch
             {
                 DisableHooks();
                 ClearHooks();
                 _controllers.Clear();
+                _chainburstControllers.Clear();
                 _moduleBase = nint.Zero;
                 _townVtable = nint.Zero;
                 _battleVtable = nint.Zero;
+                _chainburstVtable = nint.Zero;
                 throw;
             }
         }
@@ -142,6 +162,16 @@ internal sealed class RelinkPartyHudTracker
     {
         if (!IsInitialized || Volatile.Read(ref _suspended))
             return Array.Empty<PartyHudAnchor>();
+
+        // Full Chain keeps the party HP rows rendered beneath its illustration.
+        // Preserve the HP-HUD whitelist as the default rule, then explicitly ban
+        // this one native overlay for its complete opening/visible/closing lifetime.
+        if (IsChainburstOverlayActive())
+        {
+            if (Interlocked.Exchange(ref _chainburstSuppressionLogged, 1) == 0)
+                SafeLog("Full Chain overlay active; native party-HUD microphone anchors are suppressed.");
+            return Array.Empty<PartyHudAnchor>();
+        }
 
         var candidates = new List<AnchorCandidate>(4);
         var sawProjectionFailure = false;
@@ -227,6 +257,8 @@ internal sealed class RelinkPartyHudTracker
                 _townDestructorHook?.Enable();
                 _battleFactoryHook?.Enable();
                 _battleDestructorHook?.Enable();
+                _chainburstFactoryHook?.Enable();
+                _chainburstDestructorHook?.Enable();
                 Volatile.Write(ref _suspended, false);
             }
             catch
@@ -252,6 +284,13 @@ internal sealed class RelinkPartyHudTracker
         return result;
     }
 
+    private nint ChainburstFactory(nint context, nint resultStorage)
+    {
+        var result = _chainburstFactoryHook!.OriginalFunction(context, resultStorage);
+        TryRegisterChainburstFactoryResult(result, resultStorage);
+        return result;
+    }
+
     private nint TownDestructor(nint controller, int deleteFlag)
     {
         _controllers.TryRemove(controller, out _);
@@ -262,6 +301,12 @@ internal sealed class RelinkPartyHudTracker
     {
         _controllers.TryRemove(controller, out _);
         return _battleDestructorHook!.OriginalFunction(controller, deleteFlag);
+    }
+
+    private nint ChainburstDestructor(nint controller, int deleteFlag)
+    {
+        _chainburstControllers.TryRemove(controller, out _);
+        return _chainburstDestructorHook!.OriginalFunction(controller, deleteFlag);
     }
 
     private void TryRegisterFactoryResult(
@@ -286,6 +331,51 @@ internal sealed class RelinkPartyHudTracker
             // The UI can be destroyed while its factory result is being published.
             // The next valid factory call will repopulate the tracker.
         }
+    }
+
+    private void TryRegisterChainburstFactoryResult(nint result, nint resultStorage)
+    {
+        if (Volatile.Read(ref _suspended))
+            return;
+
+        try
+        {
+            var wrapper = result != nint.Zero ? result : resultStorage;
+            if (_memoryReader.TryReadPointer(wrapper + FactoryResultControllerOffset, out var controller) &&
+                IsExpectedChainburstController(controller))
+            {
+                _chainburstControllers[controller] = 0;
+            }
+        }
+        catch
+        {
+            // The transient illustration can be destroyed while the factory result
+            // is being published. Its next valid construction repopulates the set.
+        }
+    }
+
+    private bool IsChainburstOverlayActive()
+    {
+        foreach (var entry in _chainburstControllers)
+        {
+            var controller = entry.Key;
+            if (!IsExpectedChainburstController(controller))
+            {
+                _chainburstControllers.TryRemove(controller, out _);
+                continue;
+            }
+
+            // ControllerChainburst's own visibility query is exactly state != 0.
+            // If a live, correctly typed controller cannot be read for one frame,
+            // fail closed so its full-screen illustration never leaks HUD glyphs.
+            if (!TryReadInt32(controller + ControllerVisibilityStateOffset, out var state) ||
+                IsChainburstBlockingState(state))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private bool TryCreateAnchor(
@@ -395,6 +485,13 @@ internal sealed class RelinkPartyHudTracker
         return vtable == (layout == PartyHudLayout.OnlineLobby ? _townVtable : _battleVtable);
     }
 
+    private bool IsExpectedChainburstController(nint controller)
+    {
+        return controller != nint.Zero &&
+               _memoryReader.TryReadPointer(controller, out var vtable) &&
+               vtable == _chainburstVtable;
+    }
+
     private bool TryReadByte(nint address, out byte value)
     {
         Span<byte> bytes = stackalloc byte[1];
@@ -462,6 +559,8 @@ internal sealed class RelinkPartyHudTracker
 
     private void DisableHooks()
     {
+        _chainburstDestructorHook?.Disable();
+        _chainburstFactoryHook?.Disable();
         _battleDestructorHook?.Disable();
         _battleFactoryHook?.Disable();
         _townDestructorHook?.Disable();
@@ -470,6 +569,8 @@ internal sealed class RelinkPartyHudTracker
 
     private void ClearHooks()
     {
+        _chainburstDestructorHook = null;
+        _chainburstFactoryHook = null;
         _battleDestructorHook = null;
         _battleFactoryHook = null;
         _townDestructorHook = null;

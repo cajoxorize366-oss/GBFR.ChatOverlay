@@ -12,7 +12,8 @@ The Reloaded-II log should contain messages equivalent to:
 [gbfr.qol.chatoverlay] Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
 [gbfr.qol.chatoverlay] DirectInput8 keyboard interception initialized.
 [gbfr.qol.chatoverlay] CJK font loaded before DX11 hook initialization: ..., 9 glyph ranges.
-[gbfr.qol.chatoverlay] DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path.
+[gbfr.qol.chatoverlay] DX11 Present-only backend enabled with a native original-Present boundary; frame-local render targets replace the ResizeBuffers hook.
+[gbfr.qol.chatoverlay] DirectX 11 ImGui hook initialized with the Extra Sigil Present-only hook-chain and native SEH compatibility path.
 [gbfr.qol.chatoverlay] IDirectInput8::CreateDevice hooked (...).
 [gbfr.qol.chatoverlay] DirectInput system keyboard device detected.
 [gbfr.qol.chatoverlay] IDirectInputDevice8::GetDeviceState hooked.
@@ -76,14 +77,24 @@ The 0.4.0 release validates HUD placement without requiring another player. `Ena
 
 Remote per-slot talking state and Mod capability negotiation remain deferred until the native placements are approved. Automatic lobby/battle detection is already supplied by the two controller types. Record the game resolution, HUD scale, reported native layout/row count and a screenshot for every position correction. A real platform icon should remain in the portrait/name/badge region because the microphone anchors use the party-info/HP right edge; if it overlaps, preserve the log and screenshot before changing the selected child node.
 
+## 0.5.0-preview.1 RTSS compatibility
+
+This preview replaces the stock Reloaded DX11 implementation with the Present-only compatibility path proven by GBFR Extra Sigil Slots. It does not install a `ResizeBuffers` hook. Start RTSS before Reloaded-II and keep the same RTSS profile/overlay settings that previously reproduced the conflict.
+
+1. Launch with RTSS active. If RTSS already owns an entry jump, confirm a line such as `DX11 Present hook chaining followed ... existing entry jump(s); installing at chain tail ...` appears before the Present-only enabled line. Zero existing jumps is valid only when RTSS did not patch this DXGI entry.
+2. Enter town, resize or switch window mode if available, open/close the main menu, then enter and leave a quest. The chat and microphone UI must render normally whenever their own room/HUD gates allow it; RTSS must keep rendering and the game must not hang or crash.
+3. Confirm no log mentions installing or recovering a `ResizeBuffers` hook. The backend uses frame-local render targets, so swap-chain resize does not require a second managed hook chain.
+4. If the native original-Present boundary catches `SEH 0xC0000005`, preserve the complete log. It must be followed by `overlay hook disabled after a native Present failure` and `Overlay graphics backend failed closed`. The game and RTSS should continue; `Y` must no longer be captured and no chat/voice UI may remain for that session.
+5. Repeat once with RTSS disabled. Both runs must reach `First Direct3D11 Present callback`; behavior outside the graphics compatibility layer must remain identical.
+
 ## Failure handling
 
 - If `Native chat bridge validation failed` appears, preserve the reported executable SHA-256. The Overlay should remain usable as a local preview.
 - If `Native party-HUD anchor tracking unavailable` appears, preserve the complete signature-validation error. Chat and voice transport may continue, but microphone icons must remain hidden rather than fall back to screenshot coordinates.
-- If the game fails before `DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path`, disable the Mod and preserve the Reloaded-II log.
+- If the game fails before `DirectX 11 ImGui hook initialized with the Extra Sigil Present-only hook-chain and native SEH compatibility path`, disable the Mod and preserve the Reloaded-II log.
 - If the log reaches `[WndProcHook]` but not `First Direct3D11 Present callback`, collect the Windows Application Error/WER entry. That boundary distinguishes native backend or WndProc initialization from managed Overlay rendering.
 - If `Render callback recovered from an exception` appears, preserve the complete line. The callback guard released chat input capture, but the visual Overlay is degraded for that session.
-- Do not mix individual DLLs from older packages. This build intentionally uses the same official `ImguiHookDx11`, prebuilt pinned CJK atlas and cached original WndProc as the proven Extra Sigil frontend; its fallback now selects `DefWindowProcA` or `DefWindowProcW` to match the actual game window.
+- Do not mix individual DLLs from older packages. `GBFR.ChatOverlay.Native.dll`, `GBFR.ChatOverlay.dll` and the remaining dependencies must come from the same archive. The current backend ports Extra Sigil's Present-only hook-chain/SEH boundary while retaining the prebuilt pinned CJK atlas and cached ANSI/Unicode WndProc fallback.
 - If the Overlay renders but controls still respond, preserve the three DirectInput log lines; their presence distinguishes a state-filter bug from a missed hook.
 - If Chinese characters render as boxes, record the `CJK font loaded before DX11 hook initialization` line and Windows display language. If they become Latin-1 text such as `ÎÒ`, preserve the new `Win32 IME compatibility active` line, input-method name and complete Reloaded-II log.
 - If composition text appears but the in-overlay candidate row does not, preserve either `candidate notification did not expose a readable IMM32 list` or `composition ended without an IMM32 candidate list`. Their presence distinguishes an IMM32 parsing error from a TSF/Qt-only input method.

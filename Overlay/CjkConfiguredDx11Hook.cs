@@ -2,7 +2,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DearImguiSharp;
 using Reloaded.Imgui.Hook;
-using Reloaded.Imgui.Hook.Direct3D11;
 using Reloaded.Imgui.Hook.Implementations;
 
 namespace GBFR.ChatOverlay.Overlay;
@@ -15,16 +14,17 @@ namespace GBFR.ChatOverlay.Overlay;
 /// </summary>
 internal sealed unsafe class CjkConfiguredDx11Hook : IImguiHook
 {
-    private readonly ImguiHookDx11 _inner = new();
+    private readonly RtssSafeImguiHookDx11 _inner;
     private readonly Action<string> _log;
     private ushort[]? _glyphRanges;
     private GCHandle _glyphRangesHandle;
     private ImFont? _font;
     private bool _disposed;
 
-    internal CjkConfiguredDx11Hook(Action<string> log)
+    internal CjkConfiguredDx11Hook(Action<string> log, Action onPermanentFailure)
     {
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _inner = new RtssSafeImguiHookDx11(_log, onPermanentFailure);
     }
 
     public bool IsApiSupported() => _inner.IsApiSupported();
@@ -97,15 +97,24 @@ internal sealed unsafe class CjkConfiguredDx11Hook : IImguiHook
 
     internal static ushort[] BuildGlyphRanges() =>
     [
-        0x0020, 0x00FF, // Basic Latin and Latin-1 Supplement
-        0x2000, 0x206F, // General Punctuation
-        0x3000, 0x30FF, // CJK Symbols, Hiragana and Katakana
-        0x31F0, 0x31FF, // Katakana Phonetic Extensions
-        0x3400, 0x4DBF, // CJK Unified Ideographs Extension A
-        0x4E00, 0x9FFF, // CJK Unified Ideographs
-        0xF900, 0xFAFF, // CJK Compatibility Ideographs
-        0xFF00, 0xFFEF, // Halfwidth and Fullwidth Forms
-        0xFFFD, 0xFFFD, // Replacement character
+        0x0020,
+        0x00FF, // Basic Latin and Latin-1 Supplement
+        0x2000,
+        0x206F, // General Punctuation
+        0x3000,
+        0x30FF, // CJK Symbols, Hiragana and Katakana
+        0x31F0,
+        0x31FF, // Katakana Phonetic Extensions
+        0x3400,
+        0x4DBF, // CJK Unified Ideographs Extension A
+        0x4E00,
+        0x9FFF, // CJK Unified Ideographs
+        0xF900,
+        0xFAFF, // CJK Compatibility Ideographs
+        0xFF00,
+        0xFFEF, // Halfwidth and Fullwidth Forms
+        0xFFFD,
+        0xFFFD, // Replacement character
         0,
     ];
 

@@ -30,6 +30,7 @@
     <None Remove="ModConfig.json" />
     <None Remove="Publish.ps1" />
     <None Remove="BuildLinked.ps1" />
+    <None Remove="build-native-bridge.ps1" />
     <None Remove="Reloaded.Trimming.targets" />
     <None Remove="Reloaded.Checks.targets" />
     <Compile Remove="ConfiguratorUI/**/*.cs" />
@@ -52,6 +53,11 @@
     <None Update="licenses/NAudio-LICENSE.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="NativeBridge/bin/Release/GBFR.ChatOverlay.Native.dll"
+          Link="GBFR.ChatOverlay.Native.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 
   <ItemGroup>
@@ -72,6 +78,12 @@
   <PropertyGroup>
     <ConfiguratorUiTargetPath>$(MSBuildProjectDirectory)/ConfiguratorUI/bin/$(Configuration)/GBFR.ChatOverlay.ConfiguratorUI.dll</ConfiguratorUiTargetPath>
   </PropertyGroup>
+
+  <Target Name="BuildNativePresentBridge"
+          BeforeTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\build-native-bridge.ps1&quot; -Configuration Release" />
+  </Target>
 
   <Target Name="CopyConfiguratorUiToBuildOutput" AfterTargets="Build">
     <Copy SourceFiles="$(ConfiguratorUiTargetPath)"

@@ -264,17 +264,13 @@ function Build {
 
     # Build
     dotnet restore $ProjectPath
-    dotnet clean $ProjectPath
+    # Never inherit RELOADEDIIMODS here: the game may be running and locking the
+    # installed Mod. Clean only the isolated temporary build directory.
+    dotnet clean $ProjectPath /p:OutputPath="$TempDirectoryBuild/clean"
 
     if ($BuildR2R) {
-        dotnet publish $ProjectPath -c Release -r win-x86 --self-contained false -o "$publishBuildDirectory/x86" /p:PublishReadyToRun=true /p:OutputPath="$TempDirectoryBuild/x86"
-        dotnet publish $ProjectPath -c Release -r win-x64 --self-contained false -o "$publishBuildDirectory/x64" /p:PublishReadyToRun=true /p:OutputPath="$TempDirectoryBuild/x64"
-
-        # Remove Redundant Files
-        Move-Item -Path "$publishBuildDirectory/x86/ModConfig.json" -Destination "$publishBuildDirectory/ModConfig.json" -ErrorAction SilentlyContinue
-        Move-Item -Path "$publishBuildDirectory/x86/Preview.png" -Destination "$publishBuildDirectory/Preview.png" -ErrorAction SilentlyContinue
-        Remove-Item "$publishBuildDirectory/x64/Preview.png" -ErrorAction SilentlyContinue
-        Remove-Item "$publishBuildDirectory/x64/ModConfig.json" -ErrorAction SilentlyContinue
+        # Granblue Fantasy: Relink and the native Present bridge are x64-only.
+        dotnet publish $ProjectPath -c Release -r win-x64 --self-contained false -o "$publishBuildDirectory" /p:PublishReadyToRun=true /p:OutputPath="$TempDirectoryBuild/x64"
     }
     else {
         dotnet publish $ProjectPath -c Release --self-contained false -o "$publishBuildDirectory" /p:OutputPath="$TempDirectoryBuild"
@@ -288,6 +284,39 @@ function Build {
 	
     Get-ChildItem $publishBuildDirectory -Include *.pdb -Recurse | Remove-Item -Force -Recurse
     Get-ChildItem $publishBuildDirectory -Include *.xml -Recurse | Remove-Item -Force -Recurse
+
+    $nativeBridgePath = Join-Path $publishBuildDirectory 'GBFR.ChatOverlay.Native.dll'
+    if (-not (Test-Path -LiteralPath $nativeBridgePath -PathType Leaf)) {
+        throw "Native Present bridge is missing from the publish output: $nativeBridgePath"
+    }
+
+    $stream = [System.IO.File]::OpenRead($nativeBridgePath)
+    try {
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($stream.Length -lt 64) {
+                throw "Native Present bridge is not a valid PE image: $nativeBridgePath"
+            }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadInt32()
+            if ($peOffset -lt 0 -or $peOffset + 6 -gt $stream.Length) {
+                throw "Native Present bridge has an invalid PE header: $nativeBridgePath"
+            }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "Native Present bridge has no PE signature: $nativeBridgePath"
+            }
+            if ($reader.ReadUInt16() -ne 0x8664) {
+                throw "Native Present bridge must be x64: $nativeBridgePath"
+            }
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
 }
 
 function Get-Last-Version {
@@ -344,7 +373,25 @@ function Publish-Common {
 	$arguments = "$(Get-Common-Publish-Args -AllowDeltas $AllowDeltas) --outputfolder `"$Directory`" --publishtarget $PublishTarget"
 	$command = "$reloadedToolPath $arguments"
 	Write-Host "$command`r`n`r`n"
-	Invoke-Expression $command
+        $previousRollForward = $env:DOTNET_ROLL_FORWARD
+        try {
+            # Reloaded.Publisher currently targets .NET 5. Permit it to run on
+            # the installed newer desktop runtime instead of silently producing
+            # no package when the exact end-of-life runtime is absent.
+            $env:DOTNET_ROLL_FORWARD = 'Major'
+            Invoke-Expression $command
+            if ($LASTEXITCODE -ne 0) {
+                throw "Reloaded.Publisher failed with exit code $LASTEXITCODE."
+            }
+        }
+        finally {
+            if ($null -eq $previousRollForward) {
+                Remove-Item Env:DOTNET_ROLL_FORWARD -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:DOTNET_ROLL_FORWARD = $previousRollForward
+            }
+        }
 }
 
 function Publish-GameBanana {

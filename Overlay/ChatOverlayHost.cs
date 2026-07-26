@@ -55,6 +55,7 @@ public sealed class ChatOverlayHost
     private int _renderThreadLogged;
     private int _onlineRoomGateFailureLogged;
     private int _onlineRoomWasInactive = 1;
+    private int _graphicsFailureHandled;
     private int _releaseCaptureFrames;
     private int _pendingAnsiLeadByte = -1;
     private nint _windowHandle;
@@ -101,6 +102,7 @@ public sealed class ChatOverlayHost
     }
 
     public bool ShouldCaptureKeyboard() =>
+        Volatile.Read(ref _initialized) &&
         _getConfiguration().EnableOverlay &&
         IsOnlineRoomActive() &&
         Volatile.Read(ref _captureKeyboard) != 0;
@@ -119,14 +121,19 @@ public sealed class ChatOverlayHost
             EnableViewports = false,
             IgnoreWindowUnactivate = true,
             CustomWndProcHandlerPointer = GetCustomWndProcPointer(),
-            Implementations = new List<IImguiHook> { new CjkConfiguredDx11Hook(_log) },
+            Implementations = new List<IImguiHook>
+            {
+                new CjkConfiguredDx11Hook(_log, HandlePermanentGraphicsFailure),
+            },
         };
 
         try
         {
             await ImguiHook.Create(Render, options).ConfigureAwait(false);
             Volatile.Write(ref _initialized, true);
-            _log("DirectX 11 ImGui hook initialized with the Extra Sigil compatibility path.");
+            _log(
+                "DirectX 11 ImGui hook initialized with the Extra Sigil Present-only " +
+                "hook-chain and native SEH compatibility path.");
         }
         catch
         {
@@ -716,6 +723,19 @@ public sealed class ChatOverlayHost
         }
     }
 
+    private void HandlePermanentGraphicsFailure()
+    {
+        if (Interlocked.Exchange(ref _graphicsFailureHandled, 1) != 0)
+            return;
+
+        Volatile.Write(ref _initialized, false);
+        ResetInteractionState();
+        NotifyOnlineRoomUnavailable();
+        LogSafely(
+            "Overlay graphics backend failed closed; chat/voice UI and input capture are disabled " +
+            "while the game continues through its native Present path.");
+    }
+
     private void LogImeCompatibility(nint windowHandle, uint codePage)
     {
         if (Interlocked.Exchange(ref _imeCompatibilityLogged, 1) != 0)
@@ -788,7 +808,7 @@ public sealed class ChatOverlayHost
         var originalStarted = false;
         try
         {
-            if (host is not null)
+            if (host is not null && host.IsInitialized)
             {
                 Volatile.Write(ref host._windowHandle, hWnd);
 
@@ -818,19 +838,18 @@ public sealed class ChatOverlayHost
                         wParam,
                         forwardedLParam);
                 }
-            }
+                ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
+                if (ImguiHook.Options?.IgnoreWindowUnactivate == true)
+                {
+                    if (message == WmKillFocus)
+                        return nint.Zero;
+                    if ((message is WmActivate or WmActivateApp) && wParam == nint.Zero)
+                        return nint.Zero;
+                }
 
-            ImGui.ImplWin32_WndProcHandler((void*)hWnd, message, wParam, lParam);
-            if (ImguiHook.Options?.IgnoreWindowUnactivate == true)
-            {
-                if (message == WmKillFocus)
-                    return nint.Zero;
-                if ((message is WmActivate or WmActivateApp) && wParam == nint.Zero)
+                if (host.ShouldCaptureWindowMessage(message, wParam))
                     return nint.Zero;
             }
-
-            if (host?.ShouldCaptureWindowMessage(message, wParam) is true)
-                return nint.Zero;
 
             var hook = WndProcHook.Instance;
             if (hook is not null)

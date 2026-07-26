@@ -7,16 +7,16 @@
 - 仓库：`C:\Users\Kuro\Documents\Codex\2026-07-23\new-chat\outputs\gbfr-chat-overlay`
 - GitHub：`https://github.com/cajoxorize366-oss/GBFR.ChatOverlay.git`
 - 分支：`main`
-- 本文创建前的源码 HEAD：`7c43f74 fix: render IMM32 candidate fallback`
-- Mod 版本：`0.3.0-preview.16`
+- 当前稳定 release 提交：`21e7998 release: finalize 0.4.0 voice indicators`（尚待与 0.5.0 提交一起推送时，以实际 `git log` 为准）
+- 当前开发版本：`0.5.0-preview.1`
 - 已验证游戏：Granblue Fantasy: Relink PC 版 `2.0.2`
 - 已验证 Party：游戏自带 `PartyWin.dll`，产品版本 `1.10.12`
-- 最新本地完整包（被 `.gitignore` 排除，不会随 Git 推送）：
-  `artifacts\GBFR.ChatOverlay-preview16-ime-candidate-fallback-7c43f74-full.zip`
-- ZIP SHA-256：`D7EE1398FF38169A3C3A3FCCFE9F120E3E829F3A27DE20C4B0D1B207F45C698F`
-- 本文创建前最后一次实测：Release 隔离目录构建成功，`245/245` 测试通过；新会话修改代码后必须重新运行，不能把这个数字当作永久保证。
+- 最新稳定完整包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.4.0-release\Generic\GBFR.ChatOverlay0.4.0.7z`
+- 0.4.0 ZIP SHA-256：`8AD2FB002FB4F3B5B86F6E98A223FE8EC103300687C36F89C7F2DC342908A281`
+- 0.5.0-preview.1 包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.5.0-preview.1-publish\Generic\GBFR.ChatOverlay0.5.0-preview.1.7z`
+- 0.5.0-preview.1 SHA-256：`4E278E234BBCE6249A17CC555D7EE6331DFCD8CFE64722ADC8303F642E7BA1C9`；Release 隔离测试 `287/287`，7-Zip 完整性测试通过，包内 native DLL 为 x64 且包含两个预期导出。
 
-本文自身会作为 `7c43f74` 之后的独立提交推送。进入新会话后，以 `git log -1 --oneline` 显示的实际 HEAD 为准。
+进入新会话后，以 `git log -1 --oneline` 和 `git status --short` 显示的实际状态为准；`Publish/` 仍是忽略提交的本地生成物。
 
 ## 2. 用户真正要做的产品
 
@@ -90,13 +90,19 @@
 
 这解决了启动画面过早显示 Overlay 的问题。
 
-### 3.7 中文输入与当前未闭环问题
+### 3.7 中文输入、玩家名与候选布局已经闭环
 
 - Preview.12：修复 ANSI/CP936 窗口的 DBCS 提交，把 `WM_IME_CHAR`/`WM_CHAR` 规范化为 UTF-8；`我` 不再变成 `ÎÒ`。
 - Preview.15：绑定 Dear ImGui 平台 IME 回调并保留全部候选 UI 标志。实机日志确认回调存在，而且 Windows 原始 `WM_IME_SETCONTEXT` 已经是 `0xC000000F`；继续调位置或 OR 标志不会解决搜狗 Qt 外部候选窗不可见。
 - Preview.16：调用 `ImmGetCandidateListW` 读取 `CANDIDATELIST`，把不可变候选快照跨线程发布，在聊天输入框上方直接画 `候选：1.我   [2.窝] ...`。数字键、空格、翻页和提交仍由输入法拥有，不模拟键鼠。
+- Preview.17：当原生 RPC sender label 为空时，用已验证四人成员表读取真正联机用户名；失败仍回退 `Player XXXXXXXX`。
+- Preview.18：候选行按 Dear ImGui 实际换行高度占位，修复短候选下方突然空一行。用户已实机确认候选功能正常。
 
-用户在本会话结束前只测试了 Preview.15，反馈仍无外部候选窗；Preview.16 包刚生成，尚未收到实机结果。因此，**下一会话的第一项任务就是接收并判断 Preview.16 的测试结果**。
+### 3.8 0.4.0 HUD 图标与 0.5.0 RTSS 路线
+
+- 0.4.0 已完成语音麦克风图标：位置来自 `ControllerPlParameterTown` / `ControllerPlParameter01` 的实时 HP 行变换；2560×1440 约 48px，中心在 HP 末端外约 32px。菜单、加载、结算走 HUD 白名单，Full Chain 以 `ControllerChainburst` 单独列入黑名单。
+- 0.5.0 只允许参考用户的 `GBFR-Extra-Sigil-Slots`（因子槽/扩容因子）仓库，禁止参考 Luma。
+- 当前移植的是因子槽已经证明的 Present-only 方案：沿 DXGI Present 入口跳板到链尾、不 Hook ResizeBuffers、每帧临时 RTV/BackBuffer、原始 Present 经过 x64 native SEH 边界，访问冲突后在图形回调线程外停钩并让 Overlay/输入 fail-closed。
 
 ## 4. 当前运行架构
 
@@ -113,6 +119,8 @@ Mod.cs
 ├─ LocalMicrophoneMonitor（I，本地 WASAPI）
 ├─ VoiceInputModeCoordinator（U/I 互斥）
 ├─ DirectInputKeyboardHook（Y/U/I）
+├─ RelinkPartyHudTracker（原生 HUD 行变换与 Full Chain 黑名单）
+├─ DxgiPresentBridge（x64 跳板链解析与原始 Present SEH 边界）
 └─ ChatOverlayHost
    ├─ 历史与输入框
    ├─ 在线房间显示门控
@@ -127,6 +135,8 @@ Mod.cs
 | `Mod.cs` | 组合根、配置、Hook/音频/Overlay 生命周期 |
 | `Core/ChatSession.cs` | 历史、草稿、发送状态机 |
 | `Native/RelinkChatBridge.cs` | 游戏原生文字发送与接收 |
+| `Native/DxgiPresentBridge.cs` | 显式加载 x64 native bridge、Present 跳板链与 SEH P/Invoke |
+| `NativeBridge/dxgi_present_bridge.cpp` | 原生跳板解析和只捕获访问冲突的 Present 调用边界 |
 | `Native/PartyLifecycleProbe.cs` | 不消费宿主事件的 Party 观察层 |
 | `Native/PartyRoomSessionTracker.cs` | 真实在线房间门控 |
 | `Native/PartyChatControlCanary.cs` | Stage 2/3 ChatControl、权限、静音与诊断 |
@@ -135,6 +145,7 @@ Mod.cs
 | `Audio/VoiceInputModeCoordinator.cs` | `U/I` 互斥和抢占 |
 | `ConfiguratorUI/AudioEndpointPropertyEditors.cs` | Reloaded-II 麦克风/播放设备下拉列表 |
 | `Overlay/ChatOverlayHost.cs` | ImGui、输入捕获、IME WndProc、候选绘制 |
+| `Overlay/RtssSafeImguiHookDx11.cs` | 因子槽来源的 Present-only/RTSS-safe DX11 后端 |
 | `Overlay/Win32ImeCompatibility.cs` | ANSI/Unicode、CP936/DBCS 和默认窗口过程 |
 | `Overlay/Win32ImeCandidateReader.cs` | IMM32 候选列表读取 |
 | `Overlay/ImeCandidateSnapshot.cs` | 候选缓冲解析、不可变快照与显示文本 |
@@ -175,44 +186,22 @@ Mod.cs
 - `U`：远端 Mod ChatControl 就绪后，按住 Party PTT。
 - `I`：按住本地麦克风监听。
 
-## 7. 下一会话第一步：Preview.16 判定树
+## 7. 下一会话第一步：0.5.0 RTSS 实机判定
 
-让用户完整替换 Preview.16 ZIP，不要混用旧 DLL。打开联机房间，按 `Y`，用搜狗输入 `wo`。
+先确认用户完整替换 `0.5.0-preview.1` 包，且 `GBFR.ChatOverlay.Native.dll` 与主 DLL 来自同一包。RTSS 必须在游戏前启动，并保持此前能复现兼容问题的同一 profile。
 
-### A. Overlay 出现 `候选：1.…`
-
-说明 IMM32 fallback 成功。继续验证：
-
-- 当前选中项有方括号；
-- 1–9、0、Space 和翻页仍由搜狗正常处理；
-- Escape 后重新打开不会残留旧候选；
-- 提交的 `我是` 仍然是 UTF-8 且不重复。
-
-确认后不要再改 IME，转入用户提出的下一个独立功能问题并单独提交。
-
-### B. 日志有 `candidate fallback captured list ...`，但界面没有候选行
-
-候选读取已成功，问题在 Overlay 状态/布局。优先核验：
-
-- `ChatOverlayHost.DrawHistory` 是否为候选行保留高度；
-- `DrawImeCandidateFallback` 是否在 `DrawComposer` 内被调用；
-- `_imeCandidateSnapshot` 是否被错误地提前清空；
-- 配置中的 `Overlay IME Candidate Fallback` 是否为 true。
-
-不要去改 IMM32 P/Invoke 或候选窗口位置。
-
-### C. 日志出现以下任一行
+健康启动应出现：
 
 ```text
-Win32 IME candidate notification did not expose a readable IMM32 list: ...
-Win32 IME composition ended without an IMM32 candidate list. ... TSF/Qt UI.
+DX11 Present hook chaining followed ... existing entry jump(s); installing at chain tail ...
+DX11 Present-only backend enabled with a native original-Present boundary; frame-local render targets replace the ResizeBuffers hook.
+DirectX 11 ImGui hook initialized with the Extra Sigil Present-only hook-chain and native SEH compatibility path.
+First Direct3D11 Present callback: OS TID ...
 ```
 
-说明该搜狗版本可能只通过 TSF/Qt 暴露候选，IMM32 没有可读列表。下一步应先研究并设计 TSF UI Element 路线（`ITfUIElementMgr` / `ITfCandidateListUIElement`），再做一个隔离诊断实现。不要继续重复调整 `WM_IME_SETCONTEXT`、`CFS_CANDIDATEPOS` 或 HWND 位置；Preview.15 已经排除了这些因素。
+如果 RTSS 未在该入口留下跳板，第一行可以没有；后面三行必须存在。随后回归大厅、战斗、主菜单、窗口模式切换、进出副本和结算，确认 RTSS 与 Overlay 都正常。
 
-### D. 崩溃或卡死
-
-收集完整 Reloaded-II 日志和 Windows WER/Application Error，先确定最后一条日志位于 DX11/WndProc、候选解析还是游戏原始窗口过程。所有新的候选读取错误必须 fail-closed，不能跨 unmanaged WndProc。
+若出现 `native boundary caught SEH 0xC0000005`，必须继续看到 off-thread hook disable 与 Overlay/input fail-closed 日志；游戏应继续运行，`Y` 不再被捕获。若直接崩溃，收集 Reloaded-II 完整日志、WER/Application Error 和 RTSS profile，不要恢复 ResizeBuffers Hook，也不要切换到 Luma/ReShade 方案。
 
 ## 8. 构建、测试与打包
 
@@ -226,7 +215,7 @@ dotnet test .\GBFR.ChatOverlay.sln `
   -p:RELOADEDIIMODS="$isolatedMods"
 ```
 
-本文创建前的隔离实测结果为 `245/245`；下一会话应以重新执行该命令的结果为准。
+0.5.0-preview.1 本地 Debug 隔离测试预期为 `287/287`；Release 发布前必须重新执行并以实际输出为准。
 
 本次改动文件的格式检查可用：
 
@@ -251,17 +240,17 @@ git diff --check
 - `docs/VOICE_TRANSPORT.md`
 - `docs/VOICE_TROUBLESHOOTING_MATRIX.md`
 
-打包后至少检查 ZIP 内：主 DLL、ConfiguratorUI DLL、ModConfig 版本、win-x64 cimgui、上述文档、条目数和 SHA-256。
+打包后至少检查 ZIP 内：主 DLL、`GBFR.ChatOverlay.Native.dll`、ConfiguratorUI DLL、ModConfig 版本、win-x64 cimgui、上述文档、条目数和 SHA-256。native DLL 必须是 PE machine `0x8664`（x64）；`Publish.ps1` 已在构建后强制检查。
 
 ## 9. 当前已知限制与后续功能
 
-- Preview.16 的搜狗候选 fallback 尚待用户第一次实机确认。
+- 0.5.0-preview.1 的 RTSS Present 链兼容仍待用户第一次实机确认；自动测试只证明 native 调用/SEH/跳板解析，不能替代真实 RTSS Hook 顺序。
 - 手柄 PTT 尚未实现；早期 STT 阶段的 XInput 代码已经随 STT 撤回，不能直接假定可复用。
 - 尚无按成员的语音音量、静音和 UI 控件。
 - 快捷聊天/印章的哈希文本尚未解析，接收桥目前只保留自由文字。
 - 每位要参加 Party 语音的玩家都必须安装相同 Mod；原版客户端没有 ChatControl 能力协商。
 - Party/游戏版本升级后必须重新验证 hash、ABI 和签名，不能放宽 fail-closed。
-- `artifacts/` 约有大量历史测试包并被 Git 忽略；不要把它们整目录提交到 GitHub。
+- `Publish/` 和 native `bin/obj` 是本地生成物；不要把它们整目录提交到 GitHub。
 
 ## 10. 验证文档入口
 
@@ -332,13 +321,14 @@ e72bf83 fix: use Party native microphone for push to talk
 9d125fc fix: drive manual Party audio work
 ```
 
-### 联机门控与 IME
+### 联机门控、IME、用户名与 0.4.0 HUD
 
 ```text
 e29d1cf fix: support ANSI game-window IME input
 184fa0c fix: gate overlay on online Party rooms
 36ee04e fix: restore third-party IME candidate windows
 7c43f74 fix: render IMM32 candidate fallback
+21e7998 release: finalize 0.4.0 voice indicators
 ```
 
 ## 12. 新会话建议开场指令
@@ -348,7 +338,8 @@ e29d1cf fix: support ANSI game-window IME input
 ```text
 请先完整阅读 docs/SESSION_HANDOFF_2026-07-25.md、README.md 和
 docs/SMOKE_TEST.md。保持一个问题一个 commit，不恢复 STT，不放宽
-Relink/Party 的 fail-closed 边界。当前第一任务是判断用户对 Preview.16
-搜狗候选 fallback 的实机结果；按交接文档 A/B/C/D 分支继续。构建和
+Relink/Party 的 fail-closed 边界。0.5.0 的 RTSS 兼容只允许参考
+GBFR-Extra-Sigil-Slots（因子槽/扩容因子），禁止参考 Luma。当前第一任务
+是判断 0.5.0-preview.1 的 RTSS 实机结果；按交接文档第 7 节继续。构建和
 测试必须把 RELOADEDIIMODS 指向隔离临时目录，避免运行中的游戏锁文件。
 ```

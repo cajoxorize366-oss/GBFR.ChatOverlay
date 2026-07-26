@@ -220,6 +220,18 @@ public class Mod : ModBase // <= Do not Remove.
             return;
         }
 
+        try
+        {
+            DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId));
+        }
+        catch (Exception exception)
+        {
+            _logger.WriteLine(
+                $"[{_modConfig.ModId}] Native Present compatibility bridge unavailable; " +
+                $"overlay and input interception are disabled (fail-closed): {exception}");
+            return;
+        }
+
         _overlay = new ChatOverlayHost(
             _chatSession,
             () => _configuration,

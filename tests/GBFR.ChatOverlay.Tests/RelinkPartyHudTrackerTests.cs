@@ -42,12 +42,12 @@ public sealed class RelinkPartyHudTrackerTests
 
         Assert.True(RelinkUiProjection.TryMeasureLogicalLength(
             transform,
-            36.0f,
+            RelinkPartyHudTracker.NativeIconLogicalSize,
             0.0f,
             0.0f,
             2560.0f,
             1440.0f,
             out var iconSize));
-        Assert.InRange(iconSize, 23.99f, 24.01f);
+        Assert.InRange(iconSize, 63.99f, 64.01f);
     }
 }

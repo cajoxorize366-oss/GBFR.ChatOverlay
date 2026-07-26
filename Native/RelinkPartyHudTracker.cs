@@ -32,7 +32,10 @@ internal sealed class RelinkPartyHudTracker
     private const int ObjectActiveOffset = 0x1D0;
     private const int TownSlotOffset = 0x340;
     private const int BattleTypeOffset = 0x1A0;
-    private const float NativeIconSize = 36.0f;
+    // Relink's 2560x1440 HUD transform uses a 2/3 scale here, so a 96-unit
+    // glyph renders at the requested 64 px while still following native HUD
+    // scaling at other resolutions.
+    internal const float NativeIconLogicalSize = 96.0f;
     private const float NativeRightEdgeGap = 18.0f;
 
     private static readonly int[] TownTargetPointerOffsets = [0x1B8, 0x230];
@@ -333,7 +336,7 @@ internal sealed class RelinkPartyHudTracker
                     out var center) ||
                 !RelinkUiProjection.TryMeasureLogicalLength(
                     finalTransform,
-                    NativeIconSize,
+                    NativeIconLogicalSize,
                     viewportX,
                     viewportY,
                     viewportWidth,

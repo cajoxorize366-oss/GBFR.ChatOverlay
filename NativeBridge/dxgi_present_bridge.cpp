@@ -235,6 +235,23 @@ JumpDecodeResult DecodeEntryJump(uintptr_t address, uintptr_t* targetOut) noexce
         }
         return JumpDecodeResult::Resolved;
     }
+    if (prefix[0] == 0xFF && prefix[1] == 0x24)
+    {
+        uint8_t sib = 0;
+        if (!TryReadValueAtOffset(address, 2, &sib))
+            return JumpDecodeResult::Invalid;
+        if (sib == 0x25)
+        {
+            int32_t absoluteDisplacement = 0;
+            if (!TryReadValueAtOffset(address, 3, &absoluteDisplacement))
+                return JumpDecodeResult::Invalid;
+            pointerSlot = static_cast<uintptr_t>(
+                static_cast<intptr_t>(absoluteDisplacement));
+            if (!TryReadValue(pointerSlot, targetOut))
+                return JumpDecodeResult::Invalid;
+            return JumpDecodeResult::Resolved;
+        }
+    }
     if (prefix[0] == 0xFF && (prefix[1] & 0x38u) == 0x20u)
         return JumpDecodeResult::Unsupported;
 

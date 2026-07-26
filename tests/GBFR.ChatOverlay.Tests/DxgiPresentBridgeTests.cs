@@ -99,6 +99,31 @@ public sealed class DxgiPresentBridgeTests
     }
 
     [Fact]
+    public void ResolveHookChainTargetFollowsAbsoluteIndirectSibJump()
+    {
+        using var code = ExecutableMemory.Allocate(64);
+        using var pointerSlot = ExecutableMemory.AllocateBelowTwoGigabytes((nuint)nuint.Size);
+        var target = code.Address + 48;
+        Marshal.WriteIntPtr(pointerSlot.Address, target);
+
+        var absoluteSlotAddress = checked((int)pointerSlot.Address);
+        code.Write(
+            0,
+            [0xFF, 0x24, 0x25, .. BitConverter.GetBytes(absoluteSlotAddress)]);
+        code.Write(48, [0xC3, 0x90]);
+
+        var resolved = DxgiPresentBridge.ResolveHookChainTarget(
+            unchecked((ulong)code.Address),
+            16,
+            out var jumpCount,
+            out var status);
+
+        Assert.Equal(unchecked((ulong)target), resolved);
+        Assert.Equal(1u, jumpCount);
+        Assert.Equal(DxgiPresentBridge.HookChainResolveStatus.Ok, status);
+    }
+
+    [Fact]
     public void ResolveHookChainTargetRejectsInvalidArguments()
     {
         var resolved = DxgiPresentBridge.ResolveHookChainTarget(
@@ -138,6 +163,23 @@ public sealed class DxgiPresentBridgeTests
             if (address == nint.Zero)
                 throw new InvalidOperationException($"VirtualAlloc failed: {Marshal.GetLastWin32Error()}.");
             return new ExecutableMemory(address);
+        }
+
+        internal static ExecutableMemory AllocateBelowTwoGigabytes(nuint size)
+        {
+            for (long candidate = 0x10000000; candidate <= 0x70000000; candidate += 0x01000000)
+            {
+                var address = VirtualAlloc(
+                    new nint(candidate),
+                    size,
+                    MemCommit | MemReserve,
+                    PageExecuteReadWrite);
+                if (address != nint.Zero)
+                    return new ExecutableMemory(address);
+            }
+
+            throw new InvalidOperationException(
+                $"VirtualAlloc could not reserve a test pointer slot below 2 GB: {Marshal.GetLastWin32Error()}.");
         }
 
         internal void Write(int offset, byte[] bytes) =>

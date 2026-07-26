@@ -7,8 +7,8 @@
 - 仓库：`C:\Users\Kuro\Documents\Codex\2026-07-23\new-chat\outputs\gbfr-chat-overlay`
 - GitHub：`https://github.com/cajoxorize366-oss/GBFR.ChatOverlay.git`
 - 分支：`main`
-- 当前已推送提交：以 `git log -1 --oneline` 为准。
-- 当前开发版本：`0.5.0-preview.3`
+- 当前已推送提交：`56cfcf5 fix: add RTSS-safe Present backend`
+- 当前开发版本：`0.5.0-preview.2`
 - 已验证游戏：Granblue Fantasy: Relink PC 版 `2.0.2`
 - 已验证 Party：游戏自带 `PartyWin.dll`，产品版本 `1.10.12`
 - 最新稳定完整包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.4.0-release\Generic\GBFR.ChatOverlay0.4.0.7z`
@@ -17,8 +17,6 @@
 - 0.5.0-preview.1 SHA-256：`4E278E234BBCE6249A17CC555D7EE6331DFCD8CFE64722ADC8303F642E7BA1C9`；Release 隔离测试 `287/287`，7-Zip 完整性测试通过，包内 native DLL 为 x64 且包含两个预期导出。
 - 0.5.0-preview.2 包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.5.0-preview.2-publish\Generic\GBFR.ChatOverlay0.5.0-preview.2.7z`
 - 0.5.0-preview.2 SHA-256：`2BAC2A09FB527BE28427EBFD37AC87B8F2584D0CE751728BD9E28B9094BFFBAC`；Release 隔离测试 `297/297`，格式检查与 7-Zip 完整性测试通过。
-- 0.5.0-preview.3 包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.5.0-preview.3-publish\Generic\GBFR.ChatOverlay0.5.0-preview.3.7z`
-- 0.5.0-preview.3 SHA-256：`8B90775D2BAB34ED3415F05ACE19D00B58BC6A02F46AF7F7BE79067AC4B86CFF`；修复设置功能导致基础 Overlay/F10 一起失效的失败域耦合，Release 隔离测试 `297/297`，格式检查与 7-Zip 完整性测试通过。
 
 进入新会话后，以 `git log -1 --oneline` 和 `git status --short` 显示的实际状态为准；`Publish/` 仍是忽略提交的本地生成物。
 
@@ -200,7 +198,7 @@ Mod.cs
 
 ## 7. 下一会话第一步：0.5.0 F10 菜单实机判定
 
-先确认用户完整替换 `0.5.0-preview.3` 包，且主 DLL、native DLL 和 `ModConfig.json` 来自同一包。游戏无需进入联机房间即可按 F10。依次确认：
+先确认用户完整替换 `0.5.0-preview.2` 包，且主 DLL、native DLL 和 `ModConfig.json` 来自同一包。游戏无需进入联机房间即可按 F10。依次确认：
 
 1. 菜单打开时鼠标、键盘、镜头和角色不响应游戏，F10 与 Esc 都能关闭；按住任意键或鼠标按钮关闭时，不会把残留操作泄漏给游戏，物理释放后恢复正常。
 2. 麦克风与扬声器下拉能列出 Windows 活跃设备；本地测试按钮可开始/停止回放，输入电平随说话连续变化。调整音量滑块不应反复重启设备。
@@ -235,7 +233,7 @@ dotnet test .\GBFR.ChatOverlay.sln `
   -p:RELOADEDIIMODS="$isolatedMods"
 ```
 
-0.5.0-preview.3 本地 Release 隔离测试预期至少为 `297/297`；Release 发布前必须重新执行并以实际输出为准。
+0.5.0-preview.2 本地 Release 隔离测试预期为 `297/297`；Release 发布前必须重新执行并以实际输出为准。
 
 本次改动文件的格式检查可用：
 

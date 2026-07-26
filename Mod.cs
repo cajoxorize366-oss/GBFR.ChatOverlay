@@ -84,26 +84,17 @@ public class Mod : ModBase // <= Do not Remove.
         var audioOutputSelection = ResolvedAudioEndpointSelection.SystemDefault();
         if (_configuration.EnableMutedPartyChatControlCanary || _configuration.EnableVoiceInput)
         {
-            try
-            {
-                var audioCatalog = new WindowsAudioEndpointCatalog();
-                audioInputSelection = AudioEndpointSelectionResolver.Resolve(
-                    _configuration.VoiceMicrophoneDeviceId,
-                    AudioEndpointFlow.Capture,
-                    audioCatalog,
-                    moduleLog);
-                audioOutputSelection = AudioEndpointSelectionResolver.Resolve(
-                    _configuration.VoicePlaybackDeviceId,
-                    AudioEndpointFlow.Render,
-                    audioCatalog,
-                    moduleLog);
-            }
-            catch (Exception exception)
-            {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Party audio endpoint selection unavailable; " +
-                    $"falling back to Windows defaults without disabling the Overlay: {exception}");
-            }
+            var audioCatalog = new WindowsAudioEndpointCatalog();
+            audioInputSelection = AudioEndpointSelectionResolver.Resolve(
+                _configuration.VoiceMicrophoneDeviceId,
+                AudioEndpointFlow.Capture,
+                audioCatalog,
+                moduleLog);
+            audioOutputSelection = AudioEndpointSelectionResolver.Resolve(
+                _configuration.VoicePlaybackDeviceId,
+                AudioEndpointFlow.Render,
+                audioCatalog,
+                moduleLog);
         }
 
         if (_hooks is not null)
@@ -252,34 +243,29 @@ public class Mod : ModBase // <= Do not Remove.
             ForceReleaseVoiceInputs,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
-        // Start the visual/WndProc path before the optional DirectInput layer. A keyboard or mouse
-        // hook failure must never prevent the chat Overlay (and its Win32 F10 fallback) from loading.
-        _ = InitializeOverlayAsync();
-
+        _directInputKeyboard = new DirectInputKeyboardHook(
+            _hooks,
+            _overlay.TryRequestOpen,
+            _overlay.ShouldCaptureKeyboard,
+            () => IsOnlineRoomActive() &&
+                  _configuration.EnableVoiceInput &&
+                  _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
+            pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
+            () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
+            () => _overlay.IsInitialized,
+            _overlay.ObserveSettingsMenuKey,
+            pressed => _audioSettings?.SetSelfTestPressed(pressed),
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
-            var directInputKeyboard = new DirectInputKeyboardHook(
-                _hooks,
-                _overlay.TryRequestOpen,
-                _overlay.ShouldCaptureKeyboard,
-                () => IsOnlineRoomActive() &&
-                      _configuration.EnableVoiceInput &&
-                      _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
-                pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
-                () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
-                () => _overlay.IsInitialized,
-                _overlay.ObserveSettingsMenuKey,
-                pressed => _audioSettings?.SetSelfTestPressed(pressed),
-                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
-            directInputKeyboard.Initialize();
-            _directInputKeyboard = directInputKeyboard;
+            _directInputKeyboard.Initialize();
         }
         catch (Exception exception)
         {
-            _logger.WriteLine(
-                $"[{_modConfig.ModId}] DirectInput interception unavailable; the Overlay and " +
-                $"Win32 F10 fallback remain active: {exception}");
+            _logger.WriteLine($"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
         }
+
+        _ = InitializeOverlayAsync();
     }
 
     #region Standard Overrides

@@ -165,8 +165,6 @@ Stage 2 ChatControlJoinedNetwork (remote/other): network=0x..., chatControl=0x..
 
 ## Stage 3 two-client realtime voice test
 
-`0.5.0-preview.3` 起，先确认基础 Overlay 独立于可选输入/音频层启动。即使日志出现 `Party audio endpoint selection unavailable`、`DirectInput interception unavailable`、`device-state hook could not be installed` 或 `Buffered DirectInput mouse interception is unavailable`，联机房间里的聊天框仍必须显示，且 Win32 能收到 F10 时设置菜单仍可打开；对应失败只能降级设备枚举或 DirectInput 捕获，不能让整个 Overlay 消失。
-
 Before arranging a second tester, wear headphones and press `F10` from the main menu. Confirm the settings window captures both keyboard and mouse: game selection, camera and character controls must not react while it is open. Select a microphone and speaker, then click `麦克风测试`, speak, and confirm the live input-level bar moves. Click `停止麦克风测试`, then immediately start it a second time without waiting for endpoint cleanup. Local playback must stop immediately on each stop and the second test must not remain stuck at `正在启动所选音频设备`. The old `I` key must pass through to the game and must never start the self-test. Expected logs are:
 
 ```text

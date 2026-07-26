@@ -2,7 +2,7 @@
   "ModId": "gbfr.qol.chatoverlay",
   "ModName": "GBFR Chat Overlay",
   "ModAuthor": "Kuro",
-  "ModVersion": "0.4.0-preview.10",
+  "ModVersion": "0.4.0-preview.11",
   "ModDescription": "Online-room-gated MMO-style chat and Party voice overlay with native party-HUD-transform microphone indicators.",
   "ModDll": "GBFR.ChatOverlay.dll",
   "ModIcon": "Preview.png",

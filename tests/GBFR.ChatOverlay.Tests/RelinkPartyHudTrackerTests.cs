@@ -15,9 +15,11 @@ public sealed class RelinkPartyHudTrackerTests
 
     [Theory]
     [InlineData(0, false)]
-    [InlineData(1, true)]
+    [InlineData(1, false)]
     [InlineData(2, true)]
-    [InlineData(3, true)]
+    [InlineData(3, false)]
+    [InlineData(-1, false)]
+    [InlineData(4, false)]
     public void ControllerVisibilityState_MatchesRelinkStateMachine(int state, bool expected)
     {
         Assert.Equal(expected, RelinkPartyHudTracker.IsControllerVisibilityStateVisible(state));

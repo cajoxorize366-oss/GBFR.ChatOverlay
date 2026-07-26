@@ -80,7 +80,7 @@ internal sealed class RelinkPartyHudTracker
 
     internal static ReadOnlySpan<int> BattleAnchorPointerOffsets => BattleTargetPointerOffsets;
 
-    internal static bool IsControllerVisibilityStateVisible(int state) => state != 0;
+    internal static bool IsControllerVisibilityStateVisible(int state) => state == 2;
 
     internal void Initialize()
     {
@@ -308,9 +308,9 @@ internal sealed class RelinkPartyHudTracker
             return false;
         }
 
-        // Whitelist rendering by the party HUD itself. Child HP nodes can remain
-        // active while their controller is closed (menus, results and transitions),
-        // so an anchor is valid only while Relink's native HUD state is visible.
+        // Whitelist rendering by the fully visible party HUD itself. State 1 is
+        // opening, 2 is stable/visible and 3 is closing; accepting only state 2
+        // prevents early glyphs on load screens and hides them as soon as closing starts.
         if (!TryReadInt32(controller + ControllerVisibilityStateOffset, out var controllerState) ||
             !IsControllerVisibilityStateVisible(controllerState))
         {

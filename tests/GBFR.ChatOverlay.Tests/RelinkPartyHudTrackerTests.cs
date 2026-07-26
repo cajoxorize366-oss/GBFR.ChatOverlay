@@ -14,8 +14,8 @@ public sealed class RelinkPartyHudTrackerTests
     }
 
     [Theory]
-    [InlineData(1504.0f, 197.33334f, 136.00002f, 710.6667f)]
-    [InlineData(816.0f, 181.33334f, 288.0f, 465.33334f)]
+    [InlineData(1504.0f, 197.33334f, 136.00002f, 722.6667f)]
+    [InlineData(816.0f, 181.33334f, 288.0f, 477.33334f)]
     public void BattleAnchor_LiveRelinkSnapshotProjectsToHpBarRightEdge(
         float nativeWidth,
         float translationX,
@@ -27,7 +27,9 @@ public sealed class RelinkPartyHudTrackerTests
         transform.M22 = -0.6666667f;
         transform.M41 = translationX;
         transform.M42 = translationY;
-        var localRightEdge = new Vector2((nativeWidth * 0.5f) + 18.0f, 0.0f);
+        var localRightEdge = new Vector2(
+            (nativeWidth * 0.5f) + RelinkPartyHudTracker.NativeRightEdgeGap,
+            0.0f);
 
         Assert.True(RelinkUiProjection.TryProject(
             transform,
@@ -48,6 +50,6 @@ public sealed class RelinkPartyHudTrackerTests
             2560.0f,
             1440.0f,
             out var iconSize));
-        Assert.InRange(iconSize, 63.99f, 64.01f);
+        Assert.InRange(iconSize, 47.99f, 48.01f);
     }
 }

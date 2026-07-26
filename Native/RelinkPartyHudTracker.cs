@@ -36,12 +36,13 @@ internal sealed class RelinkPartyHudTracker
     private const float NativeRightEdgeGap = 18.0f;
 
     private static readonly int[] TownTargetPointerOffsets = [0x1B8, 0x230];
-    // ControllerPlParameter01 stores Root/Name at 0x160/0x180, then its Type
-    // integer at 0x1A0 before the remaining 0x20-byte object refs. Therefore
-    // HpGauge01/HpGauge02 resolve at 0x370/0x390. The old 0x3B0/0x3D0 pair was
-    // actually HpGaugeMask/HpGaugeEff01, which anchored beside the name and
-    // could expose an effect transform with a wildly oversized scale.
-    private static readonly int[] BattleTargetPointerOffsets = [0x370, 0x390];
+    // Live Relink 2.0.2 memory confirms these two resolved UIObject pointers are
+    // the normal/red full-width HP-row geometry. At 2560x1440 the local node is
+    // 1504 units wide and the remote nodes are 816 units wide; projecting their
+    // right edges lands at the native long/short bar endpoints. The animated
+    // HpGauge01/02/Mask objects at 0x3B0/0x3D0/0x3F0 are 0/512-unit child
+    // textures whose local transforms land near the name side instead.
+    private static readonly int[] BattleTargetPointerOffsets = [0x250, 0x270];
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Action<string> _log;

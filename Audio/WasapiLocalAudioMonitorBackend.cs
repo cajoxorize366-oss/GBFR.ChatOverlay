@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 namespace GBFR.ChatOverlay.Audio;
 
@@ -16,15 +17,21 @@ internal sealed class WasapiLocalAudioMonitorBackendFactory : ILocalAudioMonitor
     public ILocalAudioMonitorBackend Create(
         ResolvedAudioEndpointSelection inputSelection,
         ResolvedAudioEndpointSelection outputSelection,
-        float volume) =>
-        new WasapiLocalAudioMonitorBackend(inputSelection, outputSelection, volume, _log);
+        float inputGain,
+        float playbackVolume) =>
+        new WasapiLocalAudioMonitorBackend(
+            inputSelection,
+            outputSelection,
+            inputGain,
+            playbackVolume,
+            _log);
 }
 
 /// <summary>
 /// One-shot shared-mode WASAPI capture-to-render path. Release closes a lock-free playback gate
 /// synchronously, then moves every potentially blocking NAudio Stop/Dispose call to a dedicated
 /// background thread. A stuck endpoint cleanup can therefore neither keep audio audible nor block
-/// the next I hold or DirectInput polling.
+/// the next menu self-test or DirectInput polling.
 /// </summary>
 internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 {
@@ -33,7 +40,8 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 
     private readonly ResolvedAudioEndpointSelection _inputSelection;
     private readonly ResolvedAudioEndpointSelection _outputSelection;
-    private readonly float _volume;
+    private float _inputGain;
+    private float _playbackVolume;
     private readonly Action<string> _log;
     private readonly object _sync = new();
     private readonly object _callbackSync = new();
@@ -46,6 +54,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
     private WasapiCapture? _capture;
     private WasapiOut? _output;
     private GatedBufferedWaveProvider? _buffer;
+    private VolumeSampleProvider? _gainProvider;
     private Timer? _cleanupWatchdog;
     private string _cleanupPhase = "not started";
     private bool _started;
@@ -56,18 +65,19 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
     private int _stopping;
     private int _cleanupCompleted;
     private int _faultSignaled;
-    private int _peakSignaled;
     private int _playbackStoppedEventObserved;
 
     public WasapiLocalAudioMonitorBackend(
         ResolvedAudioEndpointSelection inputSelection,
         ResolvedAudioEndpointSelection outputSelection,
-        float volume,
+        float inputGain,
+        float playbackVolume,
         Action<string>? log = null)
     {
         _inputSelection = inputSelection;
         _outputSelection = outputSelection;
-        _volume = Math.Clamp(volume, 0f, 0.5f);
+        _inputGain = Math.Clamp(inputGain, 0f, 2.0f);
+        _playbackVolume = Math.Clamp(playbackVolume, 0f, 0.5f);
         _log = log ?? (_ => { });
     }
 
@@ -103,8 +113,12 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
             _capture.DataAvailable += OnDataAvailable;
             _capture.RecordingStopped += OnRecordingStopped;
             _output.PlaybackStopped += OnPlaybackStopped;
-            _output.Init(_buffer);
-            _output.Volume = _volume;
+            _gainProvider = new VolumeSampleProvider(_buffer.ToSampleProvider())
+            {
+                Volume = _inputGain,
+            };
+            _output.Init(_gainProvider.ToWaveProvider());
+            _output.Volume = _playbackVolume;
 
             try
             {
@@ -126,6 +140,19 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
         // copying and overwrites the output with zeroes, so at most the render quantum already
         // handed to WASAPI can remain audible.
         Volatile.Read(ref _buffer)?.Disable();
+    }
+
+    public void SetLevels(float inputGain, float playbackVolume)
+    {
+        lock (_sync)
+        {
+            _inputGain = Math.Clamp(inputGain, 0f, 2.0f);
+            _playbackVolume = Math.Clamp(playbackVolume, 0f, 0.5f);
+            if (_gainProvider is not null)
+                _gainProvider.Volume = _inputGain;
+            if (_output is not null)
+                _output.Volume = _playbackVolume;
+        }
     }
 
     public void Stop() => RequestStopAndDispose("stop requested");
@@ -268,7 +295,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
 
         // This is a disposable background thread. Waiting here is safer than disposing a native
         // endpoint under a callback; the watchdog identifies a pathological delay without ever
-        // blocking DirectInput, rendering, or a subsequent I hold.
+        // blocking DirectInput, rendering, or a subsequent menu self-test.
         _callbacksDrained.Wait();
     }
 
@@ -290,7 +317,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
             var peak = AudioSamplePeakMeter.Measure(
                 args.Buffer.AsSpan(0, args.BytesRecorded),
                 capture.WaveFormat);
-            PublishPeakOnce(peak);
+            PublishPeak(Math.Clamp(peak * Volatile.Read(ref _inputGain), 0.0f, 1.0f));
             buffer.AddSamples(args.Buffer, 0, args.BytesRecorded);
         }
         catch (Exception exception)
@@ -353,14 +380,10 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
             QueueManagedCallback(() => handler(exception));
     }
 
-    private void PublishPeakOnce(float peak)
+    private void PublishPeak(float peak)
     {
-        if (!float.IsFinite(peak) ||
-            peak < 0.01f ||
-            Interlocked.Exchange(ref _peakSignaled, 1) != 0)
-        {
+        if (!float.IsFinite(peak))
             return;
-        }
 
         var handler = PeakLevelChanged;
         if (handler is not null)
@@ -424,6 +447,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
         _output = null;
         _capture = null;
         _buffer = null;
+        _gainProvider = null;
         _renderDevice = null;
         _captureDevice = null;
         _enumerator = null;
@@ -447,7 +471,7 @@ internal sealed class WasapiLocalAudioMonitorBackend : ILocalAudioMonitorBackend
         SafeLog(
             $"Local microphone monitor cleanup is still running after " +
             $"{CleanupWarningDelay.TotalMilliseconds:0} ms at phase=\"{Volatile.Read(ref _cleanupPhase)}\". " +
-            "Playback remains gated off and another I hold is not blocked.");
+            "Playback remains gated off and another menu self-test is not blocked.");
     }
 
     private void SetCleanupPhase(string phase) => Volatile.Write(ref _cleanupPhase, phase);

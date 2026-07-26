@@ -7,14 +7,16 @@
 - 仓库：`C:\Users\Kuro\Documents\Codex\2026-07-23\new-chat\outputs\gbfr-chat-overlay`
 - GitHub：`https://github.com/cajoxorize366-oss/GBFR.ChatOverlay.git`
 - 分支：`main`
-- 当前稳定 release 提交：`21e7998 release: finalize 0.4.0 voice indicators`（尚待与 0.5.0 提交一起推送时，以实际 `git log` 为准）
-- 当前开发版本：`0.5.0-preview.1`
+- 当前已推送提交：`56cfcf5 fix: add RTSS-safe Present backend`
+- 当前开发版本：`0.5.0-preview.2`
 - 已验证游戏：Granblue Fantasy: Relink PC 版 `2.0.2`
 - 已验证 Party：游戏自带 `PartyWin.dll`，产品版本 `1.10.12`
 - 最新稳定完整包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.4.0-release\Generic\GBFR.ChatOverlay0.4.0.7z`
 - 0.4.0 ZIP SHA-256：`8AD2FB002FB4F3B5B86F6E98A223FE8EC103300687C36F89C7F2DC342908A281`
 - 0.5.0-preview.1 包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.5.0-preview.1-publish\Generic\GBFR.ChatOverlay0.5.0-preview.1.7z`
 - 0.5.0-preview.1 SHA-256：`4E278E234BBCE6249A17CC555D7EE6331DFCD8CFE64722ADC8303F642E7BA1C9`；Release 隔离测试 `287/287`，7-Zip 完整性测试通过，包内 native DLL 为 x64 且包含两个预期导出。
+- 0.5.0-preview.2 包：`C:\Users\Kuro\Documents\Codex\2026-07-25\docs-session-handoff-2026-07-25\outputs\gbfr-chat-overlay-0.5.0-preview.2-publish\Generic\GBFR.ChatOverlay0.5.0-preview.2.7z`
+- 0.5.0-preview.2 SHA-256：`2BAC2A09FB527BE28427EBFD37AC87B8F2584D0CE751728BD9E28B9094BFFBAC`；Release 隔离测试 `297/297`，格式检查与 7-Zip 完整性测试通过。
 
 进入新会话后，以 `git log -1 --oneline` 和 `git status --short` 显示的实际状态为准；`Publish/` 仍是忽略提交的本地生成物。
 
@@ -26,8 +28,8 @@
 - 按 `Y` 快速打开自由文字输入，保留队友聊天历史。
 - Enter 走游戏原生文字聊天发送函数，接收也从游戏原生 RPC Hook 进入 Overlay。
 - 按住 `U` 使用游戏现有 PlayFab Party 会话进行队友语音；松开立即静音。
-- 按住 `I` 只在本机监听所选麦克风，用于无需第二位测试者的设备自检。
-- 麦克风和播放设备必须在 Reloaded-II 配置中以动态下拉列表选择，且都有显式 `Default (Windows system default)`。
+- 按 `F10` 打开设置菜单，在菜单内选择设备并运行带实时输入电平的本地自检；`I` 不再被 Mod 占用。
+- 麦克风和播放设备必须在 Reloaded-II 配置及 F10 菜单中以动态下拉列表选择，且都有显式 `Default (Windows system default)`。
 - 中文输入必须保持 UTF-8，不能再把 `我` 变成 `ÎÒ`；搜狗等输入法还必须能看到候选字。
 - 一个问题一个提交，验证后再进入下一个问题。
 
@@ -104,6 +106,13 @@
 - 0.5.0 只允许参考用户的 `GBFR-Extra-Sigil-Slots`（因子槽/扩容因子）仓库，禁止参考 Luma。
 - 当前移植的是因子槽已经证明的 Present-only 方案：沿 DXGI Present 入口跳板到链尾、不 Hook ResizeBuffers、每帧临时 RTV/BackBuffer、原始 Present 经过 x64 native SEH 边界，访问冲突后在图形回调线程外停钩并让 Overlay/输入 fail-closed。
 
+### 3.9 0.5.0 F10 设置菜单
+
+- `F10` 在离线、联机房间和战斗中都可打开设置；WndProc 与 DirectInput 的双观察路径共享边沿去重，不会一次按键切换两次。
+- 菜单开启时参考因子槽成熟实现拦截 Win32 键鼠/IME、可分类的 Raw Input，以及 DirectInput `GetDeviceState` / 鼠标 `GetDeviceData`。关闭后继续吞掉仍按住的键和鼠标按钮，直到物理释放。
+- 本地自检从 `I` 迁入菜单。菜单可选择麦克风/扬声器、调节本地输入增益和回放音量，并从 WASAPI 连续 peak 回调显示实时电平。设备与本地自检立即生效；Party 的启动期安全设备选择仍需重启 Mod 才应用。
+- 设置模式强制显示聊天框预览。顶部青色边缘用于移动，右下角青色三角用于缩放；关闭菜单时把尺寸和按可用画面归一化的位置保存到 `Config.json`。
+
 ## 4. 当前运行架构
 
 ```text
@@ -116,13 +125,14 @@ Mod.cs
 │  ├─ PartyRoomSessionTracker（Overlay 门控）
 │  ├─ PartyChatControlCanary（Stage 2/3）
 │  └─ PartyAudioWorkPump（仅 Audio=Manual）
-├─ LocalMicrophoneMonitor（I，本地 WASAPI）
-├─ VoiceInputModeCoordinator（U/I 互斥）
-├─ DirectInputKeyboardHook（Y/U/I）
+├─ InGameAudioSettingsController / LocalMicrophoneMonitor（F10，本地 WASAPI）
+├─ VoiceInputModeCoordinator（U / 菜单自检互斥）
+├─ DirectInputKeyboardHook（Y/U/F10 + 键盘/鼠标完整捕获）
 ├─ RelinkPartyHudTracker（原生 HUD 行变换与 Full Chain 黑名单）
 ├─ DxgiPresentBridge（x64 跳板链解析与原始 Present SEH 边界）
 └─ ChatOverlayHost
    ├─ 历史与输入框
+   ├─ F10 语音设置与聊天框布局编辑
    ├─ 在线房间显示门控
    ├─ ANSI/Unicode/DBCS IME 桥
    └─ IMM32 候选列表 fallback
@@ -184,11 +194,19 @@ Mod.cs
 - Enter：发送草稿。
 - Escape：取消输入并释放捕获。
 - `U`：远端 Mod ChatControl 就绪后，按住 Party PTT。
-- `I`：按住本地麦克风监听。
+- `F10`：打开/关闭语音设置与聊天框布局菜单；`I` 已归还游戏。
 
-## 7. 下一会话第一步：0.5.0 RTSS 实机判定
+## 7. 下一会话第一步：0.5.0 F10 菜单实机判定
 
-先确认用户完整替换 `0.5.0-preview.1` 包，且 `GBFR.ChatOverlay.Native.dll` 与主 DLL 来自同一包。RTSS 必须在游戏前启动，并保持此前能复现兼容问题的同一 profile。
+先确认用户完整替换 `0.5.0-preview.2` 包，且主 DLL、native DLL 和 `ModConfig.json` 来自同一包。游戏无需进入联机房间即可按 F10。依次确认：
+
+1. 菜单打开时鼠标、键盘、镜头和角色不响应游戏，F10 与 Esc 都能关闭；按住任意键或鼠标按钮关闭时，不会把残留操作泄漏给游戏，物理释放后恢复正常。
+2. 麦克风与扬声器下拉能列出 Windows 活跃设备；本地测试按钮可开始/停止回放，输入电平随说话连续变化。调整音量滑块不应反复重启设备。
+3. `I` 不再触发自检。设备选择和音量在关闭并重开 F10 后保留；Party 语音设备仍需重启 Mod 后才使用新选择。
+4. 拖动聊天框顶部移动，拖右下角青色三角缩放；关闭再打开后保持尺寸/位置，在另一分辨率下相对位置不漂出画面。
+5. 带 RTSS 回归一次大厅、战斗、菜单、窗口模式切换和结算，确认此前 Present-only 兼容仍然成立。
+
+健康启动仍应出现：
 
 健康启动应出现：
 
@@ -199,7 +217,7 @@ DirectX 11 ImGui hook initialized with the Extra Sigil Present-only hook-chain a
 First Direct3D11 Present callback: OS TID ...
 ```
 
-如果 RTSS 未在该入口留下跳板，第一行可以没有；后面三行必须存在。随后回归大厅、战斗、主菜单、窗口模式切换、进出副本和结算，确认 RTSS 与 Overlay 都正常。
+如果 RTSS 未在该入口留下跳板，第一行可以没有；后面三行必须存在。
 
 若出现 `native boundary caught SEH 0xC0000005`，必须继续看到 off-thread hook disable 与 Overlay/input fail-closed 日志；游戏应继续运行，`Y` 不再被捕获。若直接崩溃，收集 Reloaded-II 完整日志、WER/Application Error 和 RTSS profile，不要恢复 ResizeBuffers Hook，也不要切换到 Luma/ReShade 方案。
 
@@ -215,7 +233,7 @@ dotnet test .\GBFR.ChatOverlay.sln `
   -p:RELOADEDIIMODS="$isolatedMods"
 ```
 
-0.5.0-preview.1 本地 Debug 隔离测试预期为 `287/287`；Release 发布前必须重新执行并以实际输出为准。
+0.5.0-preview.2 本地 Release 隔离测试预期为 `297/297`；Release 发布前必须重新执行并以实际输出为准。
 
 本次改动文件的格式检查可用：
 

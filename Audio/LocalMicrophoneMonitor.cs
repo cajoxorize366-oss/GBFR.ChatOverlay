@@ -21,6 +21,8 @@ internal interface ILocalAudioMonitorBackend : IDisposable
     /// <summary>Stops accepting/playing samples without waiting for endpoint teardown.</summary>
     void SilenceImmediately();
 
+    void SetLevels(float inputGain, float playbackVolume);
+
     void Stop();
 }
 
@@ -29,7 +31,8 @@ internal interface ILocalAudioMonitorBackendFactory
     ILocalAudioMonitorBackend Create(
         ResolvedAudioEndpointSelection inputSelection,
         ResolvedAudioEndpointSelection outputSelection,
-        float volume);
+        float inputGain,
+        float playbackVolume);
 }
 
 /// <summary>
@@ -43,7 +46,8 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
     private readonly ILocalAudioMonitorBackendFactory _backendFactory;
     private readonly ResolvedAudioEndpointSelection _inputSelection;
     private readonly ResolvedAudioEndpointSelection _outputSelection;
-    private readonly float _volume;
+    private float _inputGain;
+    private float _playbackVolume;
     private readonly Action<string> _log;
     private readonly Action<Action> _schedule;
     private readonly object _sync = new();
@@ -57,19 +61,22 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
     private bool _workScheduled;
     private bool _suspended;
     private bool _disposed;
+    private float _peakLevel;
 
     public LocalMicrophoneMonitor(
         ILocalAudioMonitorBackendFactory backendFactory,
         ResolvedAudioEndpointSelection inputSelection,
         ResolvedAudioEndpointSelection outputSelection,
-        float volume,
+        float inputGain,
+        float playbackVolume,
         Action<string> log,
         Action<Action>? schedule = null)
     {
         _backendFactory = backendFactory ?? throw new ArgumentNullException(nameof(backendFactory));
         _inputSelection = inputSelection;
         _outputSelection = outputSelection;
-        _volume = Math.Clamp(volume, 0f, 0.5f);
+        _inputGain = Math.Clamp(inputGain, 0f, 2.0f);
+        _playbackVolume = Math.Clamp(playbackVolume, 0f, 0.5f);
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _schedule = schedule ?? QueueBackground;
     }
@@ -90,6 +97,28 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             lock (_sync)
                 return _state;
         }
+    }
+
+    public float PeakLevel
+    {
+        get
+        {
+            lock (_sync)
+                return _peakLevel;
+        }
+    }
+
+    public void UpdateLevels(float inputGain, float playbackVolume)
+    {
+        ILocalAudioMonitorBackend? backend;
+        lock (_sync)
+        {
+            _inputGain = Math.Clamp(inputGain, 0f, 2.0f);
+            _playbackVolume = Math.Clamp(playbackVolume, 0f, 0.5f);
+            backend = _backend;
+        }
+
+        backend?.SetLevels(_inputGain, _playbackVolume);
     }
 
     public void SetPressed(bool pressed)
@@ -127,10 +156,12 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             {
                 _holdStarted = false;
                 _signalDetected = false;
+                _peakLevel = 0.0f;
                 _state = LocalMicrophoneMonitorState.Starting;
             }
             else if (!_suspended)
             {
+                _peakLevel = 0.0f;
                 _state = LocalMicrophoneMonitorState.Idle;
                 silenceBackend = _backend;
             }
@@ -213,6 +244,8 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
         {
             ILocalAudioMonitorBackend? stopBackend = null;
             long startGeneration = 0;
+            float inputGain = 1.0f;
+            float playbackVolume = 0.35f;
             var shouldCreate = false;
             lock (_sync)
             {
@@ -226,6 +259,8 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
                 {
                     shouldCreate = true;
                     startGeneration = _generation;
+                    inputGain = _inputGain;
+                    playbackVolume = _playbackVolume;
                 }
                 else
                 {
@@ -249,7 +284,8 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
                 candidate = _backendFactory.Create(
                     _inputSelection,
                     _outputSelection,
-                    _volume);
+                    inputGain,
+                    playbackVolume);
                 candidate.PeakLevelChanged += peak => OnPeakLevelChanged(candidate, startGeneration, peak);
                 candidate.Faulted += exception => OnBackendFaulted(candidate, startGeneration, exception);
 
@@ -295,7 +331,8 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
 
                 SafeLog(
                     $"Local microphone monitor started: input=\"{_inputSelection.DisplayName}\", " +
-                    $"output=\"{_outputSelection.DisplayName}\", volume={_volume:P0}. " +
+                    $"output=\"{_outputSelection.DisplayName}\", input gain={inputGain:P0}, " +
+                    $"playback volume={playbackVolume:P0}. " +
                     "Audio remains on this PC and is not sent through Party.");
             }
             catch (Exception exception)
@@ -332,16 +369,18 @@ internal sealed class LocalMicrophoneMonitor : IDisposable
             if (!ReferenceEquals(_backend, backend) ||
                 generation != _generation ||
                 !_desiredPressed ||
-                _signalDetected ||
-                !float.IsFinite(peak) ||
-                peak < SignalThreshold)
+                !float.IsFinite(peak))
             {
                 return;
             }
 
-            _signalDetected = true;
-            _state = LocalMicrophoneMonitorState.SignalDetected;
-            detected = true;
+            _peakLevel = Math.Clamp(peak, 0.0f, 1.0f);
+            if (!_signalDetected && _peakLevel >= SignalThreshold)
+            {
+                _signalDetected = true;
+                _state = LocalMicrophoneMonitorState.SignalDetected;
+                detected = true;
+            }
         }
 
         if (detected)

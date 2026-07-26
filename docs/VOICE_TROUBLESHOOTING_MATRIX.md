@@ -14,14 +14,14 @@ Each client records:
 - For every remote Mod ChatControl independently: permission readback, `GetChatIndicator`, incoming-audio mute and render volume.
 - A per-U native-input result and a terminal session summary. Online success requires the same remote ChatControl to reach `Talking`; evidence from different peers is never combined into one pass.
 
-The separate I monitor still uses local WASAPI capture and playback. It proves the selected Windows devices can capture and render locally, but it does not prove Party transport.
+The F10 menu's separate microphone self-test still uses local WASAPI capture and playback. It proves the selected Windows devices can capture and render locally, but it does not prove Party transport.
 
 ## One test run
 
 1. Install the exact same ZIP on client A and client B. Record the ZIP SHA-256. Do not mix the main and Configurator DLLs from different packages.
 2. On both clients, choose the intended `Voice Microphone` and `Voice Playback Device`, save, and restart. `Default` follows the Windows default communications endpoint; a named entry saves that endpoint ID.
 3. Before joining a room, each client wears headphones, holds `I`, speaks, and confirms it hears its own selected microphone. The overlay must reach `本地自检通过`; the log must contain `Local microphone monitor detected input signal` and a `result: PASS` line after release.
-4. Create a private room and wait until both overlays say `[VOICE] 已就绪 · U 队友通话 / I 本地监听`.
+4. Create a private room and wait until both overlays say `[VOICE] 已就绪 · U 队友通话 / F10 设置与自检`.
 5. A holds `U`, speaks continuously for at least three seconds, then releases it. B listens.
 6. B holds `U`, speaks continuously for at least three seconds, then releases it. A listens.
 7. Once, hold `U` and switch focus away from the game. Confirm the 350 ms watchdog forces mute, then return and complete one normal hold/release.
@@ -76,7 +76,7 @@ This pass means Party observed native local capture plus one specific remote pee
 | Input state other than `Initialized (1)` | Party native capture device | Party cannot establish the selected microphone. Use the state and translated `errorDetail`, then verify the endpoint and Windows privacy settings. |
 | Output state other than `Initialized (1)` | Party render device | The receiving client cannot establish its selected playback endpoint. Check the endpoint, exclusive use and format support. |
 | U held but `nativeInputUnmuted=False` or `inputMuted=True` | Push-to-talk mute transition | Party did not open the ChatControl input. Preserve the Set/Get mute logs and lifecycle immediately before U. |
-| U held and `localIndicator=NoAudioInput` after a healthy Automatic owner or active Manual pump | Party native input | Party still has no usable audio input on that ChatControl. Compare the logged selected device ID with Windows and the successful I endpoint. |
+| U held and `localIndicator=NoAudioInput` after a healthy Automatic owner or active Manual pump | Party native input | Party still has no usable audio input on that ChatControl. Compare the logged selected device ID with Windows and the successful F10 local self-test endpoint. |
 | U held and local remains `Silent` despite speech | Party native capture/signal | Party initialized and unmuted the input but did not detect voice. Verify mic gain/privacy and speak continuously for at least three seconds. |
 | U held and `localIndicator=Talking` | Local Party send evidence | Party is capturing the native microphone. This alone does not prove the remote client received it. |
 | Permission readback lacks send or receive microphone bits | Chat permission | The live local-to-remote relation is not `0x0005`; transport cannot be ready. |

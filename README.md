@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。按住 `I` 可把所选麦克风只回放到本机所选播放设备；双方安装相同测试包后，按住 `U` 会解除 Party 原生所选麦克风的静音，由 Party 自己完成采集、编码、传输与对端播放。
+项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。按 `F10` 可打开语音与聊天框设置菜单，选择麦克风/扬声器并运行带实时输入电平的本地自检；双方安装相同测试包后，按住 `U` 会解除 Party 原生所选麦克风的静音，由 Party 自己完成采集、编码、传输与对端播放。
 
 当前验证进度：
 
@@ -23,6 +23,7 @@
 13. Preview.18 修复候选 fallback 出现后聊天框底部突然多出一行空白：历史区不再为候选硬编码预留 46px，而是用 Dear ImGui 对当前候选文本的实际换行高度精确让位。同一帧的高度计算与绘制共享一份候选快照，短候选不再浪费空间，长候选换行也不会挤压输入框。
 14. `0.4.0` 已完成并作为队伍 HUD 语音图标的 release 基线。位置不使用截图坐标或参考分辨率缩放：Mod 通过唯一特征码跟踪游戏实际创建的 `ControllerPlParameterTown` / `ControllerPlParameter01`，读取角色信息区或 HP 槽的活动子节点、尺寸与最终 4×4 UI 变换，再投影到当前 Direct3D viewport。大厅/战斗自动随原生控制器切换，分辨率、超宽、安全区和 HUD 缩放由游戏矩阵决定。Preview.5 以实机只读内存快照纠正战斗节点：`0x250/0x270` 是正常/红血状态的完整 HP 行几何，本地宽 1504、队友宽 816，其右端投影与原生长/短 HP 条终点吻合；`0x370/0x390` 实为未激活的斜线节点，而 `0x3B0/0x3D0/0x3F0` 是局部动画/遮罩纹理，均不再作为位置锚点。Preview.7 按实机反馈把 2560×1440 图标直径调整为约 48px，并在 Preview.6 的位置基础上向血条右侧移动约 12px；正式 0.4.0 再向右移动 8px，最终中心位于血条右端外约 32px。其他分辨率仍随游戏原生 HUD 变换缩放，最终安全限制为 18–64px。Preview.11 保持严格的队伍 HUD 白名单，并把控制器条件收紧为仅接受 `state=2` 的稳定显示阶段；`state=1` 的进入动画不再提前出图标，`state=3` 的退出动画一开始便立即隐藏。对应 HP 行节点仍须处于活动状态，菜单、加载、结算及其他没有完整队伍 HP HUD 的画面默认都不绘制。Preview.12 保留这条白名单，并针对游戏仍在 Full Chain 插画下渲染 HP 条的特例，单独跟踪 `ControllerChainburst`；该控制器处于打开、显示或关闭状态时列入明确黑名单并压掉全部麦克风图标，演出结束后自动恢复。平台图标所在的名字/徽章区不作为锚点。图标空闲仍为 70% Alpha，并额外使用低亮度配色让待机/讲话区别清晰；讲话为 100%。`Voice Indicator Debug: Show All Slots` 默认在 CPU 队伍也显示所有活动 HUD 行；关闭后会 fail-closed 隐藏全部图标，直到远端 ChatControl 与游戏队伍槽的可靠身份映射完成，绝不把 CPU 或原版玩家误标为 Mod 语音成员。
 15. `0.5.0-preview.1` 直接移植因子槽（GBFR Extra Sigil Slots）已经实机证明的 RTSS 兼容边界：DX11 后端只安装 `Present` Hook，先解析 RTSS/其他 Overlay 留在入口处的跳板链并挂到链尾；不再安装 `ResizeBuffers` Hook。每帧仅在需要绘制时创建并释放 RTV/BackBuffer，调用下一个原始 `Present` 时进入单独的 x64 native SEH 边界。若该调用发生 `0xC0000005`，当前帧返回失败并在图形回调线程外停用本 Overlay Hook；后续帧回到游戏/既有 Hook 的 Present 路径，同时聊天、图标和输入捕获 fail-closed。这个实现只参考因子槽仓库，不使用 Luma/ReShade 路线。
+16. `0.5.0-preview.2` 新增 `F10` Discord 风格设置菜单。菜单打开时按因子槽的成熟边界拦截 Win32、Raw Input 与 DirectInput 键盘/鼠标，关闭后等待物理键和鼠标按钮松开再归还输入。菜单内可即时选择本地自检设备、调节输入增益/回放音量、查看实时输入电平；原 `I` 键不再被 Mod 占用。设置模式还会显示聊天框预览，可拖动顶部移动，并拖动右下角三角标记缩放；尺寸和按可用画面归一化的位置会写回 `Config.json`。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则保持禁用。
 

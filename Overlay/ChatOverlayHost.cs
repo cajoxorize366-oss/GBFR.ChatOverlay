@@ -2,8 +2,10 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using DearImguiSharp;
+using GBFR.ChatOverlay.Audio;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
+using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
 using Reloaded.Hooks.ReloadedII.Interfaces;
 using Reloaded.Imgui.Hook;
@@ -14,6 +16,7 @@ namespace GBFR.ChatOverlay.Overlay;
 public sealed class ChatOverlayHost
 {
     private const int VirtualKeyY = 0x59;
+    private const int VirtualKeyF10 = 0x79;
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
     private const uint WmChar = 0x0102;
@@ -36,10 +39,18 @@ public sealed class ChatOverlayHost
     private readonly Action _onOnlineRoomUnavailable;
     private readonly Func<PartyVoiceUiStatus> _getVoiceUiStatus;
     private readonly Func<float, float, float, float, IReadOnlyList<PartyHudAnchor>> _getPartyHudAnchors;
+    private readonly InGameAudioSettingsController? _audioSettings;
+    private readonly Action<Action<Config>> _updateConfiguration;
+    private readonly Action<bool> _setLocalSelfTestRequested;
+    private readonly Action _forceReleaseVoiceInputs;
     private readonly Action<string> _log;
+    private readonly MouseInteractionGate _mouseInteractionGate = new();
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private ImeCandidateSnapshot? _imeCandidateSnapshot;
     private int _openRequested;
+    private int _settingsToggleRequested;
+    private int _settingsToggleKeyDown;
+    private int _settingsMenuOpen;
     private int _captureKeyboard;
     private int _swallowActivationKeyUntilRelease;
     private int _wndProcFailureLogged;
@@ -61,7 +72,13 @@ public sealed class ChatOverlayHost
     private nint _windowHandle;
     private bool _focusInputNextFrame;
     private bool _windowOpen = true;
+    private bool _settingsWindowOpen = true;
     private bool _initialized;
+    private ChatOverlayRect? _editedChatRect;
+    private float _editWorkX;
+    private float _editWorkY;
+    private float _editWorkWidth;
+    private float _editWorkHeight;
     private long _lastRenderedSequence;
     private string? _statusText;
 
@@ -72,6 +89,10 @@ public sealed class ChatOverlayHost
         Action onOnlineRoomUnavailable,
         Func<PartyVoiceUiStatus> getVoiceUiStatus,
         Func<float, float, float, float, IReadOnlyList<PartyHudAnchor>> getPartyHudAnchors,
+        InGameAudioSettingsController? audioSettings,
+        Action<Action<Config>> updateConfiguration,
+        Action<bool> setLocalSelfTestRequested,
+        Action forceReleaseVoiceInputs,
         Action<string> log)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
@@ -81,6 +102,12 @@ public sealed class ChatOverlayHost
             throw new ArgumentNullException(nameof(onOnlineRoomUnavailable));
         _getVoiceUiStatus = getVoiceUiStatus ?? throw new ArgumentNullException(nameof(getVoiceUiStatus));
         _getPartyHudAnchors = getPartyHudAnchors ?? throw new ArgumentNullException(nameof(getPartyHudAnchors));
+        _audioSettings = audioSettings;
+        _updateConfiguration = updateConfiguration ?? throw new ArgumentNullException(nameof(updateConfiguration));
+        _setLocalSelfTestRequested = setLocalSelfTestRequested ??
+            throw new ArgumentNullException(nameof(setLocalSelfTestRequested));
+        _forceReleaseVoiceInputs = forceReleaseVoiceInputs ??
+            throw new ArgumentNullException(nameof(forceReleaseVoiceInputs));
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
@@ -103,9 +130,19 @@ public sealed class ChatOverlayHost
 
     public bool ShouldCaptureKeyboard() =>
         Volatile.Read(ref _initialized) &&
-        _getConfiguration().EnableOverlay &&
-        IsOnlineRoomActive() &&
-        Volatile.Read(ref _captureKeyboard) != 0;
+        (Volatile.Read(ref _settingsMenuOpen) != 0 ||
+         (_getConfiguration().EnableOverlay &&
+          IsOnlineRoomActive() &&
+          Volatile.Read(ref _captureKeyboard) != 0));
+
+    public void ObserveSettingsMenuKey(bool pressed)
+    {
+        if (!Volatile.Read(ref _initialized))
+            return;
+        var previous = Interlocked.Exchange(ref _settingsToggleKeyDown, pressed ? 1 : 0);
+        if (pressed && previous == 0)
+            Interlocked.Increment(ref _settingsToggleRequested);
+    }
 
     public async Task InitializeAsync(IReloadedHooks hooks)
     {
@@ -144,8 +181,11 @@ public sealed class ChatOverlayHost
 
     public void Suspend()
     {
+        SetSettingsMenuOpen(false);
         _session.Composer.Cancel();
         Interlocked.Exchange(ref _openRequested, 0);
+        Interlocked.Exchange(ref _settingsToggleRequested, 0);
+        Interlocked.Exchange(ref _settingsToggleKeyDown, 0);
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
@@ -183,18 +223,50 @@ public sealed class ChatOverlayHost
             var voiceUiStatus = _getVoiceUiStatus();
             if (onlineRoomActive || configuration.ShowAllVoiceIndicatorSlots)
                 VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
-            if (!configuration.EnableOverlay || !onlineRoomActive)
+
+            if ((Interlocked.Exchange(ref _settingsToggleRequested, 0) & 1) != 0)
+                SetSettingsMenuOpen(Volatile.Read(ref _settingsMenuOpen) == 0);
+            var settingsOpen = Volatile.Read(ref _settingsMenuOpen) != 0;
+            if (settingsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
             {
-                ResetInteractionState();
-                return;
+                SetSettingsMenuOpen(false);
+                settingsOpen = false;
             }
 
-            BindPlatformImeWindow();
+            if (settingsOpen || (configuration.EnableOverlay && onlineRoomActive))
+                BindPlatformImeWindow();
+
+            if (settingsOpen)
+            {
+                _mouseInteractionGate.Observe(MouseButtonStateTracker.PressedButtons != 0);
+                DrawSettingsMenu();
+                if (!_settingsWindowOpen)
+                {
+                    SetSettingsMenuOpen(false);
+                    settingsOpen = false;
+                }
+            }
+
+            if (!configuration.EnableOverlay || !onlineRoomActive)
+            {
+                ResetChatInteractionState();
+                if (settingsOpen)
+                    DrawChatWindow(configuration, openedThisFrame: false, voiceUiStatus, editMode: true);
+                return;
+            }
 
             if (previousOnlineRoomInactive != 0)
             {
                 LogSafely(
-                    "Relink online Party room became active; overlay rendering and Y/U/I hotkeys are now enabled.");
+                    "Relink online Party room became active; overlay rendering and Y/U hotkeys are now enabled. " +
+                    "F10 settings remain available in every scene.");
+            }
+
+            if (settingsOpen)
+            {
+                ResetChatInteractionState();
+                DrawChatWindow(configuration, openedThisFrame: false, voiceUiStatus, editMode: true);
+                return;
             }
 
             if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
@@ -218,7 +290,7 @@ public sealed class ChatOverlayHost
                 _statusText = null;
             }
 
-            DrawChatWindow(configuration, openedThisFrame, voiceUiStatus);
+            DrawChatWindow(configuration, openedThisFrame, voiceUiStatus, editMode: false);
         }
         catch (Exception exception)
         {
@@ -230,24 +302,39 @@ public sealed class ChatOverlayHost
     private void DrawChatWindow(
         Config configuration,
         bool openedThisFrame,
-        PartyVoiceUiStatus voiceUiStatus)
+        PartyVoiceUiStatus voiceUiStatus,
+        bool editMode)
     {
         var viewport = ImGui.GetMainViewport();
         var workPosition = viewport.WorkPos;
         var workSize = viewport.WorkSize;
-        var width = Math.Clamp(configuration.OverlayWidth, 320, 1_200);
-        var height = Math.Clamp(configuration.OverlayHeight, 160, 800);
-        var x = workPosition.X + 24.0f;
-        var y = workPosition.Y + Math.Max(0.0f, workSize.Y - height - 24.0f);
+        var rect = editMode && _editedChatRect is { } edited
+            ? edited
+            : ChatOverlayLayout.Resolve(
+                configuration,
+                workPosition.X,
+                workPosition.Y,
+                workSize.X,
+                workSize.Y);
+        if (editMode)
+        {
+            _editedChatRect = rect;
+            _editWorkX = workPosition.X;
+            _editWorkY = workPosition.Y;
+            _editWorkWidth = workSize.X;
+            _editWorkHeight = workSize.Y;
+        }
 
-        using var position = CreateVector2(x, y);
-        using var size = CreateVector2(width, height);
+        using var position = CreateVector2(rect.X, rect.Y);
+        using var size = CreateVector2(rect.Width, rect.Height);
         using var pivot = CreateVector2(0.0f, 0.0f);
         ImGui.SetNextWindowPos(position, (int)ImGuiCond.Always, pivot);
         ImGui.SetNextWindowSize(size, (int)ImGuiCond.Always);
 
         var composerOpen = _session.Composer.IsOpen;
-        var opacity = composerOpen
+        var opacity = editMode
+            ? Math.Clamp((float)configuration.BackgroundOpacity, 0.25f, 1.0f)
+            : composerOpen
             ? Math.Clamp((float)configuration.BackgroundOpacity, 0.0f, 1.0f)
             : Math.Clamp((float)configuration.BackgroundOpacity * 0.45f, 0.0f, 1.0f);
         ImGui.SetNextWindowBgAlpha(opacity);
@@ -258,7 +345,7 @@ public sealed class ChatOverlayHost
                     ImGuiWindowFlags.NoFocusOnAppearing |
                     ImGuiWindowFlags.NoMove |
                     ImGuiWindowFlags.NoResize;
-        if (!composerOpen)
+        if (!composerOpen && !editMode)
             flags |= ImGuiWindowFlags.NoInputs;
 
         var began = ImGui.Begin("GBFR Chat##GBFRChatOverlay", ref _windowOpen, (int)flags);
@@ -274,11 +361,279 @@ public sealed class ChatOverlayHost
             DrawHistory(composerOpen, imeCandidateText);
             if (composerOpen)
                 DrawComposer(openedThisFrame, imeCandidateText);
+            if (editMode)
+            {
+                DrawChatEditHandles(
+                    viewport,
+                    ref rect,
+                    workPosition.X,
+                    workPosition.Y,
+                    workSize.X,
+                    workSize.Y);
+                _editedChatRect = rect;
+            }
         }
         finally
         {
             ImGui.End();
         }
+    }
+
+    private void DrawSettingsMenu()
+    {
+        var viewport = ImGui.GetMainViewport();
+        var workPosition = viewport.WorkPos;
+        var workSize = viewport.WorkSize;
+        var width = Math.Min(900.0f, Math.Max(1.0f, workSize.X - 48.0f));
+        var height = Math.Min(610.0f, Math.Max(1.0f, workSize.Y - 48.0f));
+        using var position = CreateVector2(
+            workPosition.X + Math.Max(0.0f, (workSize.X - width) * 0.5f),
+            workPosition.Y + Math.Max(0.0f, (workSize.Y - height) * 0.5f));
+        using var size = CreateVector2(width, height);
+        using var pivot = CreateVector2(0.0f, 0.0f);
+        ImGui.SetNextWindowPos(position, (int)ImGuiCond.Always, pivot);
+        ImGui.SetNextWindowSize(size, (int)ImGuiCond.Always);
+        ImGui.SetNextWindowBgAlpha(0.96f);
+
+        var flags = ImGuiWindowFlags.NoDocking |
+                    ImGuiWindowFlags.NoSavedSettings |
+                    ImGuiWindowFlags.NoCollapse |
+                    ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoResize;
+        var began = ImGui.Begin("语音与聊天框设置  [F10]##GBFRSettings", ref _settingsWindowOpen, (int)flags);
+        try
+        {
+            if (!began)
+                return;
+
+            ImGui.BeginDisabled(!_mouseInteractionGate.IsArmed);
+            try
+            {
+                ImGui.Text("语音");
+                ImGui.Separator();
+                if (_audioSettings is null)
+                {
+                    ImGui.TextWrapped("本机语音自检不可用；请确认实验语音功能已启用后重启 Mod。");
+                }
+                else
+                {
+                    var snapshot = _audioSettings.GetSnapshot();
+                    if (DrawEndpointCombo(
+                            "麦克风##GBFRMicrophone",
+                            snapshot.MicrophoneDeviceId,
+                            snapshot.Microphones,
+                            out var microphoneId))
+                    {
+                        _setLocalSelfTestRequested(false);
+                        _audioSettings.SelectMicrophone(microphoneId);
+                    }
+
+                    if (DrawEndpointCombo(
+                            "扬声器##GBFRSpeaker",
+                            snapshot.SpeakerDeviceId,
+                            snapshot.Speakers,
+                            out var speakerId))
+                    {
+                        _setLocalSelfTestRequested(false);
+                        _audioSettings.SelectSpeaker(speakerId);
+                    }
+
+                    var inputGainPercent = snapshot.MicrophoneInputGain * 100.0f;
+                    if (ImGui.SliderFloat(
+                            "麦克风音量（本地测试输入增益）##GBFRMicGain",
+                            ref inputGainPercent,
+                            0.0f,
+                            200.0f,
+                            "%.0f%%",
+                            0))
+                    {
+                        _audioSettings.SetMicrophoneInputGain(inputGainPercent / 100.0f);
+                    }
+
+                    var speakerVolumePercent = snapshot.SpeakerVolume * 100.0f;
+                    if (ImGui.SliderFloat(
+                            "扬声器音量（本地测试回放）##GBFRSpeakerVolume",
+                            ref speakerVolumePercent,
+                            0.0f,
+                            50.0f,
+                            "%.0f%%",
+                            0))
+                    {
+                        _audioSettings.SetSpeakerVolume(speakerVolumePercent / 100.0f);
+                    }
+
+                    using var testButtonSize = CreateVector2(150.0f, 42.0f);
+                    var selfTesting = snapshot.IsSelfTestRequested &&
+                                      snapshot.SelfTestState is not LocalMicrophoneMonitorState.Faulted;
+                    if (ImGui.Button(selfTesting ? "停止麦克风测试" : "麦克风测试", testButtonSize))
+                        _setLocalSelfTestRequested(!selfTesting);
+
+                    ImGui.TextWrapped(DescribeSelfTest(snapshot.SelfTestState));
+                    using var meterSize = CreateVector2(-1.0f, 26.0f);
+                    ImGui.ProgressBar(
+                        Math.Clamp(snapshot.PeakLevel, 0.0f, 1.0f),
+                        meterSize,
+                        $"输入电平  {snapshot.PeakLevel:P0}");
+                    ImGui.TextWrapped(
+                        "设备选择与本地测试立即生效。当前版本的 Party 语音设备会在重启 Mod 后应用；" +
+                        "测试时建议佩戴耳机，避免声学回授。");
+                }
+
+                ImGui.Separator();
+                ImGui.Text("聊天框布局");
+                ImGui.TextWrapped(
+                    "拖动聊天框顶部可移动；拖动右下角三角标记可缩放。关闭本菜单时自动保存，" +
+                    "位置会按当前可用画面比例适配其他分辨率。");
+                ImGui.TextWrapped("按 F10 或 Esc 关闭设置菜单。设置菜单打开时，鼠标与键盘不会传给游戏。");
+            }
+            finally
+            {
+                ImGui.EndDisabled();
+            }
+        }
+        finally
+        {
+            ImGui.End();
+        }
+    }
+
+    private static bool DrawEndpointCombo(
+        string label,
+        string selectedId,
+        IReadOnlyList<AudioEndpointInfo> endpoints,
+        out string newSelection)
+    {
+        newSelection = selectedId;
+        var preview = AudioEndpointSelectionValues.IsSystemDefault(selectedId)
+            ? AudioEndpointSelectionValues.SystemDefaultLabel
+            : endpoints.FirstOrDefault(endpoint => string.Equals(
+                endpoint.Id,
+                selectedId,
+                StringComparison.Ordinal))?.FriendlyName ?? "已保存的设备当前不可用";
+        if (!ImGui.BeginCombo(label, preview, 0))
+            return false;
+
+        try
+        {
+            using var zero = CreateVector2(0.0f, 0.0f);
+            var defaultSelected = AudioEndpointSelectionValues.IsSystemDefault(selectedId);
+            if (ImGui.SelectableBool(
+                    AudioEndpointSelectionValues.SystemDefaultLabel,
+                    defaultSelected,
+                    0,
+                    zero))
+            {
+                newSelection = AudioEndpointSelectionValues.SystemDefault;
+                return true;
+            }
+
+            foreach (var endpoint in endpoints)
+            {
+                var suffix = endpoint.IsDefaultCommunicationsDevice ? "  [Windows 通信默认]" : string.Empty;
+                if (ImGui.SelectableBool(
+                        endpoint.FriendlyName + suffix + "##" + endpoint.Id,
+                        string.Equals(endpoint.Id, selectedId, StringComparison.Ordinal),
+                        0,
+                        zero))
+                {
+                    newSelection = endpoint.Id;
+                    return true;
+                }
+            }
+        }
+        finally
+        {
+            ImGui.EndCombo();
+        }
+
+        return false;
+    }
+
+    private void DrawChatEditHandles(
+        ImGuiViewport viewport,
+        ref ChatOverlayRect rect,
+        float workX,
+        float workY,
+        float workWidth,
+        float workHeight)
+    {
+        ImGui.BeginDisabled(!_mouseInteractionGate.IsArmed);
+        try
+        {
+            using var movePosition = CreateVector2(rect.X + 4.0f, rect.Y + 3.0f);
+            using var moveSize = CreateVector2(Math.Max(1.0f, rect.Width - 38.0f), 22.0f);
+            ImGui.SetCursorScreenPos(movePosition);
+            _ = ImGui.InvisibleButton("##GBFRMoveChat", moveSize, 0);
+            if (ImGui.IsItemActive() && ImGui.IsMouseDragging(0, 0.0f))
+            {
+                using var delta = CreateVector2(0.0f, 0.0f);
+                ImGui.GetMouseDragDelta(delta, 0, 0.0f);
+                rect = ChatOverlayLayout.Move(
+                    rect,
+                    delta.X,
+                    delta.Y,
+                    workX,
+                    workY,
+                    workWidth,
+                    workHeight);
+                ImGui.ResetMouseDragDelta(0);
+            }
+
+            using var resizePosition = CreateVector2(
+                rect.X + rect.Width - 30.0f,
+                rect.Y + rect.Height - 30.0f);
+            using var resizeSize = CreateVector2(30.0f, 30.0f);
+            ImGui.SetCursorScreenPos(resizePosition);
+            _ = ImGui.InvisibleButton("##GBFRResizeChat", resizeSize, 0);
+            if (ImGui.IsItemActive() && ImGui.IsMouseDragging(0, 0.0f))
+            {
+                using var delta = CreateVector2(0.0f, 0.0f);
+                ImGui.GetMouseDragDelta(delta, 0, 0.0f);
+                rect = ChatOverlayLayout.Resize(
+                    rect,
+                    delta.X,
+                    delta.Y,
+                    workX,
+                    workY,
+                    workWidth,
+                    workHeight);
+                ImGui.ResetMouseDragDelta(0);
+            }
+        }
+        finally
+        {
+            ImGui.EndDisabled();
+        }
+
+        var drawList = ImGui.GetForegroundDrawListViewportPtr(viewport);
+        using var topLeft = CreateVector2(rect.X + 5.0f, rect.Y + 4.0f);
+        using var topRight = CreateVector2(rect.X + rect.Width - 34.0f, rect.Y + 4.0f);
+        ImGui.ImDrawListAddLine(drawList, topLeft, topRight, PackColor(105, 224, 255, 0.75f), 2.0f);
+        using var triangleTop = CreateVector2(rect.X + rect.Width - 5.0f, rect.Y + rect.Height - 25.0f);
+        using var triangleCorner = CreateVector2(rect.X + rect.Width - 5.0f, rect.Y + rect.Height - 5.0f);
+        using var triangleLeft = CreateVector2(rect.X + rect.Width - 25.0f, rect.Y + rect.Height - 5.0f);
+        ImGui.ImDrawListAddTriangleFilled(
+            drawList,
+            triangleTop,
+            triangleCorner,
+            triangleLeft,
+            PackColor(105, 224, 255, 0.92f));
+    }
+
+    private static string DescribeSelfTest(LocalMicrophoneMonitorState state) => state switch
+    {
+        LocalMicrophoneMonitorState.Starting => "正在启动所选音频设备……",
+        LocalMicrophoneMonitorState.Monitoring => "正在监听；请对着麦克风说话。",
+        LocalMicrophoneMonitorState.SignalDetected => "已检测到麦克风输入。",
+        LocalMicrophoneMonitorState.Faulted => "自检启动失败；请重新选择可用设备后再试。",
+        LocalMicrophoneMonitorState.Suspended => "Mod 已暂停，本地自检不可用。",
+        _ => "点击“麦克风测试”后，可从下方音量条直观看到输入等级。",
+    };
+
+    private static uint PackColor(byte red, byte green, byte blue, float alpha)
+    {
+        var a = (uint)Math.Clamp((int)MathF.Round(Math.Clamp(alpha, 0.0f, 1.0f) * 255.0f), 0, 255);
+        return (uint)red | ((uint)green << 8) | ((uint)blue << 16) | (a << 24);
     }
 
     private static void DrawVoiceStatus(PartyVoiceUiStatus voiceUiStatus)
@@ -402,8 +757,25 @@ public sealed class ChatOverlayHost
             ImGui.TextWrapped(_statusText);
     }
 
-    private bool ShouldCaptureWindowMessage(uint message, nint wParam)
+    private bool ShouldCaptureWindowMessage(uint message, nint wParam, nint lParam)
     {
+        if (wParam == VirtualKeyF10)
+        {
+            if (message is WmKeyDown or WmSysKeyDown)
+            {
+                ObserveSettingsMenuKey(true);
+                return true;
+            }
+            if (message is WmKeyUp or WmSysKeyUp)
+            {
+                ObserveSettingsMenuKey(false);
+                return true;
+            }
+        }
+
+        if (Volatile.Read(ref _settingsMenuOpen) != 0)
+            return WindowInputClassifier.ShouldCapture(message, lParam);
+
         if (!_getConfiguration().EnableOverlay || !IsOnlineRoomActive())
             return false;
 
@@ -694,7 +1066,74 @@ public sealed class ChatOverlayHost
         }
     }
 
-    private void ResetInteractionState()
+    private void SetSettingsMenuOpen(bool open)
+    {
+        var newValue = open ? 1 : 0;
+        if (Interlocked.Exchange(ref _settingsMenuOpen, newValue) == newValue)
+            return;
+
+        if (open)
+        {
+            ResetChatInteractionState();
+            _settingsWindowOpen = true;
+            _editedChatRect = null;
+            _mouseInteractionGate.Open();
+            _forceReleaseVoiceInputs();
+            _audioSettings?.RefreshEndpointsAsync();
+            ReleaseCapture();
+            _ = ClipCursor(nint.Zero);
+            ResetImGuiMouseState();
+            LogSafely("F10 settings opened; Win32, Raw Input, DirectInput keyboard and mouse are captured.");
+            return;
+        }
+
+        _setLocalSelfTestRequested(false);
+        _audioSettings?.FlushPendingLevelSave();
+        _mouseInteractionGate.Close();
+        PersistEditedChatLayout();
+        _editedChatRect = null;
+        MouseButtonStateTracker.Reset();
+        ReleaseCapture();
+        LogSafely("F10 settings closed; held DirectInput keys and mouse buttons will drain before release.");
+    }
+
+    private void PersistEditedChatLayout()
+    {
+        if (_editedChatRect is not { } rect || _editWorkWidth <= 0.0f || _editWorkHeight <= 0.0f)
+            return;
+
+        var ratios = ChatOverlayLayout.ToRatios(
+            rect,
+            _editWorkX,
+            _editWorkY,
+            _editWorkWidth,
+            _editWorkHeight);
+        try
+        {
+            _updateConfiguration(configuration =>
+            {
+                configuration.OverlayWidth = (int)MathF.Round(rect.Width);
+                configuration.OverlayHeight = (int)MathF.Round(rect.Height);
+                configuration.OverlayPositionXRatio = ratios.XRatio;
+                configuration.OverlayPositionYRatio = ratios.YRatio;
+            });
+        }
+        catch (Exception exception)
+        {
+            LogSafely($"Chat layout could not be persisted: {exception.Message}");
+        }
+    }
+
+    private static void ResetImGuiMouseState()
+    {
+        var io = ImguiHook.IO;
+        ImGui.ImGuiIO_ClearInputKeys(io);
+        for (var button = 0; button < 5; button++)
+            ImGui.ImGuiIO_AddMouseButtonEvent(io, button, false);
+        ImGui.ClearActiveID();
+    }
+
+    private void ResetChatInteractionState()
     {
         _session.Composer.Cancel();
         Interlocked.Exchange(ref _openRequested, 0);
@@ -707,6 +1146,15 @@ public sealed class ChatOverlayHost
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
+    }
+
+    private void ResetInteractionState()
+    {
+        SetSettingsMenuOpen(false);
+        ResetChatInteractionState();
+        Interlocked.Exchange(ref _settingsToggleRequested, 0);
+        Interlocked.Exchange(ref _settingsToggleKeyDown, 0);
+        MouseButtonStateTracker.Reset();
     }
 
     private void NotifyOnlineRoomUnavailable()
@@ -811,6 +1259,7 @@ public sealed class ChatOverlayHost
             if (host is not null && host.IsInitialized)
             {
                 Volatile.Write(ref host._windowHandle, hWnd);
+                MouseButtonStateTracker.ObserveWindowMessage(message, wParam);
 
                 // Some third-party IME candidate windows transiently take OS
                 // focus. Preserve ImGui's active InputText while that UI is up.
@@ -847,7 +1296,7 @@ public sealed class ChatOverlayHost
                         return nint.Zero;
                 }
 
-                if (host.ShouldCaptureWindowMessage(message, wParam))
+                if (host.ShouldCaptureWindowMessage(message, wParam, lParam))
                     return nint.Zero;
             }
 
@@ -872,6 +1321,12 @@ public sealed class ChatOverlayHost
         catch (Exception exception)
         {
             host?.LogWndProcFallback(exception);
+            if (host is not null &&
+                Volatile.Read(ref host._settingsMenuOpen) != 0 &&
+                WindowInputClassifier.IsAlwaysCaptured(message))
+            {
+                return nint.Zero;
+            }
             if (!originalStarted && Volatile.Read(ref s_hasOriginalWndProc) != 0)
             {
                 try
@@ -920,4 +1375,10 @@ public sealed class ChatOverlayHost
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    private static extern bool ClipCursor(nint rectangle);
 }

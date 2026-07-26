@@ -30,6 +30,11 @@ public class ModContext
     public Config Configuration { get; set; } = null!;
 
     /// <summary>
+    /// Applies and persists an in-game configuration edit through the template-owned instance.
+    /// </summary>
+    public Action<Action<Config>> UpdateConfiguration { get; set; } = null!;
+
+    /// <summary>
     /// Configuration of this mod.
     /// </summary>
     public IModConfig ModConfig { get; set; } = null!;

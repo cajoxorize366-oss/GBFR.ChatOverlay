@@ -52,7 +52,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly RelinkChatBridge? _nativeChatBridge;
     private readonly PartyLifecycleProbe? _partyLifecycleProbe;
     private readonly RelinkPartyHudTracker? _partyHudTracker;
-    private readonly LocalMicrophoneMonitor? _localMicrophoneMonitor;
+    private readonly InGameAudioSettingsController? _audioSettings;
     private readonly RelinkGameContextProbe? _gameContextProbe;
 
     public Mod(ModContext context)
@@ -140,11 +140,9 @@ public class Mod : ModBase // <= Do not Remove.
         {
             try
             {
-                _localMicrophoneMonitor = new LocalMicrophoneMonitor(
-                    new WasapiLocalAudioMonitorBackendFactory(moduleLog),
-                    audioInputSelection,
-                    audioOutputSelection,
-                    (float)_configuration.MicrophoneSelfMonitorVolume,
+                _audioSettings = new InGameAudioSettingsController(
+                    _configuration,
+                    context.UpdateConfiguration,
                     moduleLog);
             }
             catch (Exception exception)
@@ -160,12 +158,12 @@ public class Mod : ModBase // <= Do not Remove.
             "System",
             "GBFR Chat Overlay loaded. Press Y to open chat.",
             ChatMessageKind.System);
-        if (_localMicrophoneMonitor is not null)
+        if (_audioSettings is not null)
         {
             history.Add(
                 "System",
-                "VOICE PREVIEW: hold I to hear the selected microphone on this PC. Hold U for " +
-                "Party voice when another Mod client is ready. Use headphones for the I test.",
+                "VOICE PREVIEW: press F10 for microphone/speaker selection and the local self-test. " +
+                "Hold U for Party voice when another Mod client is ready. Use headphones for testing.",
                 ChatMessageKind.System);
         }
 
@@ -239,6 +237,10 @@ public class Mod : ModBase // <= Do not Remove.
             ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
             GetPartyHudAnchors,
+            _audioSettings,
+            context.UpdateConfiguration,
+            SetLocalMicrophoneSelfTestRequested,
+            ForceReleaseVoiceInputs,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
         _directInputKeyboard = new DirectInputKeyboardHook(
@@ -250,10 +252,9 @@ public class Mod : ModBase // <= Do not Remove.
                   _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
-            () => IsOnlineRoomActive() &&
-                  _configuration.EnableVoiceInput &&
-                  _localMicrophoneMonitor?.IsAvailable == true,
-            pressed => _localMicrophoneMonitor?.SetPressed(pressed),
+            () => _overlay.IsInitialized,
+            _overlay.ObserveSettingsMenuKey,
+            pressed => _audioSettings?.SetSelfTestPressed(pressed),
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
@@ -271,8 +272,9 @@ public class Mod : ModBase // <= Do not Remove.
     public override void ConfigurationUpdated(Config configuration)
     {
         _configuration = configuration;
+        _audioSettings?.ApplyConfiguration(configuration);
         if (!configuration.EnableVoiceInput)
-            _localMicrophoneMonitor?.SetPressed(false);
+            SetLocalMicrophoneSelfTestRequested(false);
         _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
     }
 
@@ -281,7 +283,7 @@ public class Mod : ModBase // <= Do not Remove.
     public override void Suspend()
     {
         _directInputKeyboard?.Suspend();
-        _localMicrophoneMonitor?.Suspend();
+        _audioSettings?.Suspend();
         _partyLifecycleProbe?.Suspend();
         _partyHudTracker?.Suspend();
         _nativeChatBridge?.Suspend();
@@ -291,7 +293,7 @@ public class Mod : ModBase // <= Do not Remove.
     public override void Resume()
     {
         _overlay?.Resume();
-        _localMicrophoneMonitor?.Resume();
+        _audioSettings?.Resume();
         _partyLifecycleProbe?.Resume();
         _partyHudTracker?.Resume();
         _nativeChatBridge?.Resume();
@@ -316,7 +318,7 @@ public class Mod : ModBase // <= Do not Remove.
         if (!_configuration.EnableVoiceInput)
             return PartyVoiceUiStatus.Disabled;
 
-        var localMonitorState = _localMicrophoneMonitor?.State;
+        var localMonitorState = _audioSettings?.GetSnapshot().SelfTestState;
         if (localMonitorState == LocalMicrophoneMonitorState.Starting ||
             localMonitorState == LocalMicrophoneMonitorState.Monitoring)
         {
@@ -347,7 +349,23 @@ public class Mod : ModBase // <= Do not Remove.
     private void ReleaseRoomScopedInputs()
     {
         _partyLifecycleProbe?.SetPushToTalkPressed(false);
-        _localMicrophoneMonitor?.SetPressed(false);
+        SetLocalMicrophoneSelfTestRequested(false);
+    }
+
+    private void SetLocalMicrophoneSelfTestRequested(bool pressed)
+    {
+        if (pressed && !_configuration.EnableVoiceInput)
+            pressed = false;
+        _directInputKeyboard?.SetLocalMicrophoneMonitorPressed(pressed);
+        if (_directInputKeyboard is null)
+            _audioSettings?.SetSelfTestPressed(pressed);
+    }
+
+    private void ForceReleaseVoiceInputs()
+    {
+        _directInputKeyboard?.ForceReleaseVoiceInputs();
+        _partyLifecycleProbe?.SetPushToTalkPressed(false);
+        _audioSettings?.SetSelfTestPressed(false);
     }
 
     #region For Exports, Serialization etc.

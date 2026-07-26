@@ -1,9 +1,8 @@
 namespace GBFR.ChatOverlay.Input;
 
 /// <summary>
-/// Keeps remote Party push-to-talk and local microphone monitoring mutually exclusive. Remote U
-/// has priority. If U interrupts a held I monitor, I must be physically released before monitoring
-/// can start again.
+/// Keeps remote Party push-to-talk and the F10 menu's local microphone self-test mutually exclusive.
+/// Remote U has priority; reopening the local test always requires an explicit menu action.
 /// </summary>
 internal sealed class VoiceInputModeCoordinator
 {

@@ -42,7 +42,12 @@ public sealed class ConfigDefaultsTests
     [Fact]
     public void MicrophoneSelfMonitor_UsesConservativeDefaultVolume()
     {
-        Assert.Equal(0.35, new Config().MicrophoneSelfMonitorVolume);
+        var configuration = new Config();
+
+        Assert.Equal(0.35, configuration.MicrophoneSelfMonitorVolume);
+        Assert.Equal(1.0, configuration.MicrophoneSelfTestInputGain);
+        Assert.Equal(-1.0, configuration.OverlayPositionXRatio);
+        Assert.Equal(-1.0, configuration.OverlayPositionYRatio);
     }
 
     [Fact]

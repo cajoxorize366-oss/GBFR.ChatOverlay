@@ -25,6 +25,10 @@ public sealed class LocalMicrophoneMonitorTests
         backend.ReportPeak(0.2f);
 
         Assert.Equal(LocalMicrophoneMonitorState.SignalDetected, monitor.State);
+        Assert.Equal(0.2f, monitor.PeakLevel);
+
+        backend.ReportPeak(0.7f);
+        Assert.Equal(0.7f, monitor.PeakLevel);
 
         monitor.SetPressed(false);
 
@@ -111,6 +115,7 @@ public sealed class LocalMicrophoneMonitorTests
             factory,
             Input,
             Output,
+            1.0f,
             0.35f,
             _ => { },
             queue.Enqueue);
@@ -143,6 +148,7 @@ public sealed class LocalMicrophoneMonitorTests
             factory,
             Input,
             Output,
+            1.0f,
             0.35f,
             _ => { },
             action => { _ = Task.Run(action); });
@@ -187,7 +193,7 @@ public sealed class LocalMicrophoneMonitorTests
     private static LocalMicrophoneMonitor CreateMonitor(
         ILocalAudioMonitorBackendFactory factory,
         List<string> logs) =>
-        new(factory, Input, Output, 0.35f, logs.Add, action => action());
+        new(factory, Input, Output, 1.0f, 0.35f, logs.Add, action => action());
 
     private sealed class FakeFactory(params FakeBackend[] backends) : ILocalAudioMonitorBackendFactory
     {
@@ -198,12 +204,14 @@ public sealed class LocalMicrophoneMonitorTests
         public ILocalAudioMonitorBackend Create(
             ResolvedAudioEndpointSelection inputSelection,
             ResolvedAudioEndpointSelection outputSelection,
-            float volume)
+            float inputGain,
+            float playbackVolume)
         {
             CreateCount++;
             Assert.Equal(Input, inputSelection);
             Assert.Equal(Output, outputSelection);
-            Assert.Equal(0.35f, volume);
+            Assert.Equal(1.0f, inputGain);
+            Assert.Equal(0.35f, playbackVolume);
             return _backends.Dequeue();
         }
     }
@@ -231,6 +239,10 @@ public sealed class LocalMicrophoneMonitorTests
         }
 
         public void SilenceImmediately() => Silenced = true;
+
+        public void SetLevels(float inputGain, float playbackVolume)
+        {
+        }
 
         public void Stop() => Stopped = true;
 

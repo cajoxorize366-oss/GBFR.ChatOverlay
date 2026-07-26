@@ -13,6 +13,7 @@ public sealed class WasapiLocalAudioMonitorBackendTests
         var backend = new WasapiLocalAudioMonitorBackend(
             ResolvedAudioEndpointSelection.SystemDefault(),
             ResolvedAudioEndpointSelection.SystemDefault(),
+            1.0f,
             0.35f,
             logs.Enqueue);
         var stopwatch = Stopwatch.StartNew();

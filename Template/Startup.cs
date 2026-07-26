@@ -27,6 +27,7 @@ public class Startup : IMod
     /// Stores the contents of your mod's configuration. Automatically updated by template.
     /// </summary>
     private Config _configuration = null!;
+    private readonly object _configurationSync = new();
 
     /// <summary>
     /// An interface to Reloaded's the function hooks/detours library.
@@ -59,7 +60,7 @@ public class Startup : IMod
         // Need a different name, format or more configurations? Modify the `Configurator`.
         // If you do not want a config, remove Configuration folder and Config class.
         var configurator = new Configurator(_modLoader.GetModConfigDirectory(_modConfig.ModId));
-        configurator.SetContext(new() { Application = _modLoader.GetAppConfig() } );
+        configurator.SetContext(new() { Application = _modLoader.GetAppConfig() });
 
         _configuration = configurator.GetConfiguration<Config>(0);
         _configuration.ConfigurationUpdated += OnConfigurationUpdated;
@@ -74,7 +75,18 @@ public class Startup : IMod
             ModConfig = _modConfig,
             Owner = this,
             Configuration = _configuration,
+            UpdateConfiguration = UpdateConfiguration,
         });
+    }
+
+    private void UpdateConfiguration(Action<Config> update)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+        lock (_configurationSync)
+        {
+            update(_configuration);
+            _configuration.Save?.Invoke();
+        }
     }
 
     private void OnConfigurationUpdated(IConfigurable obj)
@@ -85,8 +97,11 @@ public class Startup : IMod
         */
 
         // Replace configuration with new.
-        _configuration = (Config)obj;
-        _mod.ConfigurationUpdated(_configuration);
+        lock (_configurationSync)
+        {
+            _configuration = (Config)obj;
+            _mod.ConfigurationUpdated(_configuration);
+        }
     }
 
     /* Mod loader actions. */

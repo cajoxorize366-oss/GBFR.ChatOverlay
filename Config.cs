@@ -65,8 +65,8 @@ public class Config : Configurable<Config>
     [SliderControlParams(minimum: 0.0, maximum: 1.0)]
     public double BackgroundOpacity { get; set; } = 0.55;
 
-    [DisplayName("Experimental Voice (U Party / I Local Test)")]
-    [Description("PREVIEW: hold U to unmute PlayFab Party's native selected microphone path for another Mod client. Hold I for local-only Windows microphone monitoring. Release, focus loss, input timeout and session exit force both paths off. Restart required.")]
+    [DisplayName("Experimental Voice (U Party / F10 Settings)")]
+    [Description("PREVIEW: hold U to unmute PlayFab Party's native selected microphone path for another Mod client. Use the F10 settings menu for the local microphone self-test. Release, focus loss, input timeout and session exit force both paths off. Restart required for Party device changes.")]
     [DefaultValue(true)]
     public bool EnableVoiceInput { get; set; } = true;
 
@@ -81,7 +81,7 @@ public class Config : Configurable<Config>
     public bool ShowAllVoiceIndicatorSlots { get; set; } = true;
 
     [DisplayName("Voice Microphone")]
-    [Description("Windows recording endpoint selected for Party voice while U is held and captured locally while I is held. Defaults to Default (Windows system default). Restart required.")]
+    [Description("Windows recording endpoint selected for Party voice while U is held and for the F10 local self-test. Defaults to Default (Windows system default). Party voice changes require a restart; local self-test changes apply immediately.")]
     [Editor(
         "GBFR.ChatOverlay.ConfiguratorUI.VoiceMicrophonePropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
         "HandyControl.Controls.PropertyEditorBase, HandyControl")]
@@ -90,7 +90,7 @@ public class Config : Configurable<Config>
     public string VoiceMicrophoneDeviceId { get; set; } = AudioEndpointSelectionValues.SystemDefault;
 
     [DisplayName("Voice Playback Device")]
-    [Description("Playback endpoint used for Party voice. Defaults to Default (Windows system default); active Windows speakers and headsets are listed as manual choices. Restart required.")]
+    [Description("Playback endpoint used for Party voice and the F10 local self-test. Defaults to Default (Windows system default). Party voice changes require a restart; local self-test changes apply immediately.")]
     [Editor(
         "GBFR.ChatOverlay.ConfiguratorUI.VoicePlaybackPropertyEditor, GBFR.ChatOverlay.ConfiguratorUI",
         "HandyControl.Controls.PropertyEditorBase, HandyControl")]
@@ -98,11 +98,25 @@ public class Config : Configurable<Config>
     [DefaultValue(AudioEndpointSelectionValues.SystemDefault)]
     public string VoicePlaybackDeviceId { get; set; } = AudioEndpointSelectionValues.SystemDefault;
 
-    [DisplayName("Microphone Self-Monitor Volume")]
-    [Description("Local playback volume used only while holding I. Start with headphones to avoid acoustic feedback. Capped at 50%. Restart required.")]
+    [DisplayName("Microphone Self-Test Playback Volume")]
+    [Description("Local playback volume used only by the F10 microphone self-test. Start with headphones to avoid acoustic feedback. Capped at 50% and applied immediately.")]
     [DefaultValue(0.35)]
     [SliderControlParams(minimum: 0.0, maximum: 0.5)]
     public double MicrophoneSelfMonitorVolume { get; set; } = 0.35;
+
+    [DisplayName("Microphone Self-Test Input Gain")]
+    [Description("Software input gain used only by the F10 microphone self-test and its level meter. Party transmission is not modified.")]
+    [DefaultValue(1.0)]
+    [SliderControlParams(minimum: 0.0, maximum: 2.0)]
+    public double MicrophoneSelfTestInputGain { get; set; } = 1.0;
+
+    [Browsable(false)]
+    [DefaultValue(-1.0)]
+    public double OverlayPositionXRatio { get; set; } = -1.0;
+
+    [Browsable(false)]
+    [DefaultValue(-1.0)]
+    public double OverlayPositionYRatio { get; set; } = -1.0;
 }
 
 /// <summary>

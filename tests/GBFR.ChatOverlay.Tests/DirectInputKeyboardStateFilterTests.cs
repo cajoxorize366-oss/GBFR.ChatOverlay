@@ -142,23 +142,45 @@ public sealed class DirectInputKeyboardStateFilterTests
     }
 
     [Fact]
-    public void Process_ReportsAndFiltersLocalMicrophoneMonitorWhileEnabled()
+    public void Process_ReportsAndFiltersF10SettingsMenuKey()
     {
         var filter = new DirectInputKeyboardStateFilter();
         var reports = new List<bool>();
         var state = new byte[256];
-        state[0x17] = 0x80;
+        state[0x44] = 0x80;
 
         var filtered = filter.Process(
             state,
             () => false,
             () => false,
-            isLocalMicrophoneMonitorEnabled: () => true,
-            reportLocalMicrophoneMonitor: reports.Add);
+            isSettingsMenuAvailable: () => true,
+            reportSettingsMenuKey: reports.Add);
 
         Assert.True(filtered);
-        Assert.Equal(0, state[0x17]);
+        Assert.Equal(0, state[0x44]);
         Assert.Equal(new[] { true }, reports);
+
+        state[0x44] = 0;
+        filter.Process(
+            state,
+            () => false,
+            () => false,
+            isSettingsMenuAvailable: () => true,
+            reportSettingsMenuKey: reports.Add);
+        Assert.Equal(new[] { true, false }, reports);
+    }
+
+    [Fact]
+    public void Process_IKeyIsNoLongerReservedForSelfTest()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var state = new byte[256];
+        state[0x17] = 0x80;
+
+        var filtered = filter.Process(state, () => false, () => false);
+
+        Assert.False(filtered);
+        Assert.Equal(0x80, state[0x17]);
     }
 
     [Fact]
@@ -201,47 +223,47 @@ public sealed class DirectInputKeyboardStateFilterTests
         var reports = new List<bool>();
         var state = new byte[256];
         var capture = false;
-        state[0x17] = 0x80;
+        state[0x16] = 0x80;
 
         filter.Process(
             state,
             () => false,
             () => capture,
-            isLocalMicrophoneMonitorEnabled: () => true,
-            reportLocalMicrophoneMonitor: reports.Add);
+            isVoicePushToTalkEnabled: () => true,
+            reportVoicePushToTalk: reports.Add);
 
         capture = true;
-        state[0x17] = 0x80;
+        state[0x16] = 0x80;
         filter.Process(
             state,
             () => false,
             () => capture,
-            isLocalMicrophoneMonitorEnabled: () => true,
-            reportLocalMicrophoneMonitor: reports.Add);
+            isVoicePushToTalkEnabled: () => true,
+            reportVoicePushToTalk: reports.Add);
 
         capture = false;
-        state[0x17] = 0x80;
+        state[0x16] = 0x80;
         filter.Process(
             state,
             () => false,
             () => capture,
-            isLocalMicrophoneMonitorEnabled: () => true,
-            reportLocalMicrophoneMonitor: reports.Add);
+            isVoicePushToTalkEnabled: () => true,
+            reportVoicePushToTalk: reports.Add);
 
-        state[0x17] = 0;
+        state[0x16] = 0;
         filter.Process(
             state,
             () => false,
             () => capture,
-            isLocalMicrophoneMonitorEnabled: () => true,
-            reportLocalMicrophoneMonitor: reports.Add);
-        state[0x17] = 0x80;
+            isVoicePushToTalkEnabled: () => true,
+            reportVoicePushToTalk: reports.Add);
+        state[0x16] = 0x80;
         filter.Process(
             state,
             () => false,
             () => capture,
-            isLocalMicrophoneMonitorEnabled: () => true,
-            reportLocalMicrophoneMonitor: reports.Add);
+            isVoicePushToTalkEnabled: () => true,
+            reportVoicePushToTalk: reports.Add);
 
         Assert.Equal(new[] { true, false, false, false, true }, reports);
     }

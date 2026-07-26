@@ -7,15 +7,13 @@ public sealed class DirectInputKeyboardStateFilter
 {
     internal const int ActivationScanCode = 0x15; // DIK_Y
     internal const int VoicePushToTalkScanCode = 0x16; // DIK_U
-    internal const int LocalMicrophoneMonitorScanCode = 0x17; // DIK_I
+    internal const int SettingsMenuScanCode = 0x44; // DIK_F10
     private bool _activationWasDown;
     private bool _drainPressedKeys;
     private bool _voicePushToTalkWasDown;
     private bool _voicePushToTalkAccepted;
     private bool _voicePushToTalkConsumed;
-    private bool _localMonitorWasDown;
-    private bool _localMonitorAccepted;
-    private bool _localMonitorConsumed;
+    private bool _settingsMenuWasDown;
 
     public bool Process(
         Span<byte> keyboardState,
@@ -23,8 +21,8 @@ public sealed class DirectInputKeyboardStateFilter
         Func<bool> shouldCapture,
         Func<bool>? isVoicePushToTalkEnabled = null,
         Action<bool>? reportVoicePushToTalk = null,
-        Func<bool>? isLocalMicrophoneMonitorEnabled = null,
-        Action<bool>? reportLocalMicrophoneMonitor = null)
+        Func<bool>? isSettingsMenuAvailable = null,
+        Action<bool>? reportSettingsMenuKey = null)
     {
         ArgumentNullException.ThrowIfNull(tryActivate);
         ArgumentNullException.ThrowIfNull(shouldCapture);
@@ -34,6 +32,27 @@ public sealed class DirectInputKeyboardStateFilter
         if (activationIsDown && !_activationWasDown)
             tryActivate();
         _activationWasDown = activationIsDown;
+
+        var settingsMenuAvailable = isSettingsMenuAvailable?.Invoke() == true;
+        var settingsMenuIsDown = keyboardState.Length > SettingsMenuScanCode &&
+                                 (keyboardState[SettingsMenuScanCode] & 0x80) != 0;
+        if (settingsMenuAvailable)
+        {
+            if (settingsMenuIsDown != _settingsMenuWasDown)
+                reportSettingsMenuKey?.Invoke(settingsMenuIsDown);
+            _settingsMenuWasDown = settingsMenuIsDown;
+        }
+        else
+        {
+            _settingsMenuWasDown = false;
+        }
+
+        var settingsKeyWasFiltered = false;
+        if (settingsMenuAvailable && keyboardState.Length > SettingsMenuScanCode)
+        {
+            settingsKeyWasFiltered = keyboardState[SettingsMenuScanCode] != 0;
+            keyboardState[SettingsMenuScanCode] = 0;
+        }
 
         var capture = shouldCapture();
         var voicePushToTalkEnabled = isVoicePushToTalkEnabled?.Invoke() == true;
@@ -55,30 +74,11 @@ public sealed class DirectInputKeyboardStateFilter
             keyboardState[VoicePushToTalkScanCode] = 0;
         }
 
-        var localMonitorEnabled = isLocalMicrophoneMonitorEnabled?.Invoke() == true;
-        var localMonitorIsDown = keyboardState.Length > LocalMicrophoneMonitorScanCode &&
-                                 (keyboardState[LocalMicrophoneMonitorScanCode] & 0x80) != 0;
-        var localMonitorAccepted = UpdateAcceptedKeyState(
-            localMonitorIsDown,
-            localMonitorEnabled && !capture,
-            ref _localMonitorWasDown,
-            ref _localMonitorAccepted,
-            ref _localMonitorConsumed);
-        reportLocalMicrophoneMonitor?.Invoke(localMonitorAccepted);
-
-        var monitorKeyWasFiltered = false;
-        if ((localMonitorEnabled || _localMonitorConsumed) &&
-            keyboardState.Length > LocalMicrophoneMonitorScanCode)
-        {
-            monitorKeyWasFiltered = keyboardState[LocalMicrophoneMonitorScanCode] != 0;
-            keyboardState[LocalMicrophoneMonitorScanCode] = 0;
-        }
-
         if (capture)
             _drainPressedKeys = true;
 
         if (!capture && !_drainPressedKeys)
-            return voiceKeyWasFiltered || monitorKeyWasFiltered;
+            return voiceKeyWasFiltered || settingsKeyWasFiltered;
 
         var anyKeyIsDown = keyboardState.ContainsAnyExcept((byte)0);
         keyboardState.Clear();

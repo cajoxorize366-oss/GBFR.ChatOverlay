@@ -65,7 +65,7 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 
 ## 0.4.0 voice-indicator position preview
 
-This first 0.4 package validates HUD placement without requiring another player. `Enable Party Voice Indicators` and `Voice Indicator Debug: Show All Slots` are enabled by default. The debug override intentionally draws an idle microphone icon at 70% opacity for every active CPU/player HUD row; it is not proof that those rows use the Mod. Unlike chat and input, this explicit position-test override may render in a CPU party without an authenticated online room.
+The 0.4.0 release validates HUD placement without requiring another player. `Enable Party Voice Indicators` and `Voice Indicator Debug: Show All Slots` are enabled by default. The debug override intentionally draws an idle microphone icon at 70% opacity for every active CPU/player HUD row; it is not proof that those rows use the Mod. Unlike chat and input, this explicit position-test override may render in a CPU party without an authenticated online room.
 
 1. Form a four-character CPU party in town. Confirm the log reports `Native party-HUD microphone anchors are live: layout=OnlineLobby, activeRows=4, viewport=...`; no manual layout selector exists. All four icons should sit immediately to the right of each compact party information row and must not cover portraits, names, level text or the CPU/platform badge area.
 2. Enter a quest with the battle party HUD. Confirm the same log reports `layout=Battle`; the local-player icon must follow the far-right edge of the long local HP row while the other three follow the separate right edge of the shorter teammate HP rows.

@@ -9,6 +9,8 @@ internal readonly record struct RelinkHudRvas(
     int TownDestructor,
     int BattleFactory,
     int BattleDestructor,
+    int PauseTopFactory,
+    int PauseTopDestructor,
     int UiManagerSlot);
 
 internal static class RelinkHudBuildLocator
@@ -17,9 +19,12 @@ internal static class RelinkHudBuildLocator
     private const int ExpectedTownDestructorRva = 0x025960B0;
     private const int ExpectedBattleFactoryRva = 0x02608DA0;
     private const int ExpectedBattleDestructorRva = 0x0260A200;
+    private const int ExpectedPauseTopFactoryRva = 0x0318C710;
+    private const int ExpectedPauseTopDestructorRva = 0x00BBBF30;
     private const int ExpectedUiObjectQueryRva = 0x0261DDE0;
     private const int ExpectedUiManagerSlotRva = 0x07C02358;
     private const int UiManagerInstructionOffset = 63;
+    private const int PauseTopVtableInstructionOffset = 0x192;
 
     private static readonly SignaturePattern TownFactoryPattern = SignaturePattern.Parse(
         "56 57 48 83 EC 28 48 89 D6 8B 05 ?? ?? ?? ?? " +
@@ -38,6 +43,13 @@ internal static class RelinkHudBuildLocator
     private static readonly SignaturePattern BattleDestructorPattern = SignaturePattern.Parse(
         "56 57 48 83 EC 28 89 D7 48 89 CE E8 D0 FB FF FF 85 FF 74 08 " +
         "48 89 F1 E8 D0 BE 10 02 48 89 F0");
+
+    private static readonly SignaturePattern PauseTopFactoryPattern = SignaturePattern.Parse(
+        "48 8D 0D FF 5C AE 02 48 89 08 48 8D 0D");
+
+    private static readonly SignaturePattern PauseTopDestructorPattern = SignaturePattern.Parse(
+        "56 57 48 83 EC 28 89 D7 48 89 CE E8 E0 F6 FF FF 85 FF 74 08 " +
+        "48 89 F1 E8 A0 A1 B5 03 48 89 F0");
 
     private static readonly SignaturePattern UiObjectQueryPattern = SignaturePattern.Parse(
         "48 81 EC 98 00 00 00 C5 78 29 B4 24 80 00 00 00 " +
@@ -83,6 +95,13 @@ internal static class RelinkHudBuildLocator
             textSection.VirtualAddress + BattleFactoryPattern.FindUniqueOffset(text, "battle party HUD factory"));
         var battleDestructor = checked(
             textSection.VirtualAddress + BattleDestructorPattern.FindUniqueOffset(text, "battle party HUD destructor"));
+        var pauseTopFactoryVtableOffset = PauseTopFactoryPattern.FindUniqueOffset(
+            text,
+            "pause-top controller factory vtable assignment");
+        var pauseTopFactory = checked(
+            textSection.VirtualAddress + pauseTopFactoryVtableOffset - PauseTopVtableInstructionOffset);
+        var pauseTopDestructor = checked(
+            textSection.VirtualAddress + PauseTopDestructorPattern.FindUniqueOffset(text, "pause-top shared destructor"));
         var uiObjectQueryOffset = UiObjectQueryPattern.FindUniqueOffset(text, "UI object canvas transform");
         var uiObjectQueryRva = checked(textSection.VirtualAddress + uiObjectQueryOffset);
         var uiManagerInstructionRva = checked(uiObjectQueryRva + UiManagerInstructionOffset);
@@ -94,13 +113,16 @@ internal static class RelinkHudBuildLocator
             townDestructor != ExpectedTownDestructorRva ||
             battleFactory != ExpectedBattleFactoryRva ||
             battleDestructor != ExpectedBattleDestructorRva ||
+            pauseTopFactory != ExpectedPauseTopFactoryRva ||
+            pauseTopDestructor != ExpectedPauseTopDestructorRva ||
             uiObjectQueryRva != ExpectedUiObjectQueryRva ||
             uiManagerSlot != ExpectedUiManagerSlotRva)
         {
             throw new InvalidDataException(
                 $"Relink party HUD signature validation failed: townFactory={townFactory:X}, " +
                 $"townDestructor={townDestructor:X}, battleFactory={battleFactory:X}, " +
-                $"battleDestructor={battleDestructor:X}, uiObjectQuery={uiObjectQueryRva:X}, " +
+                $"battleDestructor={battleDestructor:X}, pauseTopFactory={pauseTopFactory:X}, " +
+                $"pauseTopDestructor={pauseTopDestructor:X}, uiObjectQuery={uiObjectQueryRva:X}, " +
                 $"uiManager={uiManagerSlot:X}.");
         }
 
@@ -109,6 +131,8 @@ internal static class RelinkHudBuildLocator
             townDestructor,
             battleFactory,
             battleDestructor,
+            pauseTopFactory,
+            pauseTopDestructor,
             uiManagerSlot);
     }
 }

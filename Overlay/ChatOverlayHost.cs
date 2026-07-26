@@ -33,6 +33,7 @@ public sealed class ChatOverlayHost
     private readonly ChatSession _session;
     private readonly Func<Config> _getConfiguration;
     private readonly Func<bool> _isOnlineRoomActive;
+    private readonly Func<bool> _isGameMenuVisible;
     private readonly Action _onOnlineRoomUnavailable;
     private readonly Func<PartyVoiceUiStatus> _getVoiceUiStatus;
     private readonly Func<float, float, float, float, IReadOnlyList<PartyHudAnchor>> _getPartyHudAnchors;
@@ -68,6 +69,7 @@ public sealed class ChatOverlayHost
         ChatSession session,
         Func<Config> getConfiguration,
         Func<bool> isOnlineRoomActive,
+        Func<bool> isGameMenuVisible,
         Action onOnlineRoomUnavailable,
         Func<PartyVoiceUiStatus> getVoiceUiStatus,
         Func<float, float, float, float, IReadOnlyList<PartyHudAnchor>> getPartyHudAnchors,
@@ -76,6 +78,7 @@ public sealed class ChatOverlayHost
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
         _isOnlineRoomActive = isOnlineRoomActive ?? throw new ArgumentNullException(nameof(isOnlineRoomActive));
+        _isGameMenuVisible = isGameMenuVisible ?? throw new ArgumentNullException(nameof(isGameMenuVisible));
         _onOnlineRoomUnavailable = onOnlineRoomUnavailable ??
             throw new ArgumentNullException(nameof(onOnlineRoomUnavailable));
         _getVoiceUiStatus = getVoiceUiStatus ?? throw new ArgumentNullException(nameof(getVoiceUiStatus));
@@ -174,7 +177,11 @@ public sealed class ChatOverlayHost
             if (!onlineRoomActive && previousOnlineRoomInactive == 0)
                 NotifyOnlineRoomUnavailable();
             var voiceUiStatus = _getVoiceUiStatus();
-            if (onlineRoomActive || configuration.ShowAllVoiceIndicatorSlots)
+            var gameMenuVisible = _isGameMenuVisible();
+            if (ShouldDrawVoiceIndicators(
+                    onlineRoomActive,
+                    configuration.ShowAllVoiceIndicatorSlots,
+                    gameMenuVisible))
                 VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
             if (!configuration.EnableOverlay || !onlineRoomActive)
             {
@@ -273,6 +280,12 @@ public sealed class ChatOverlayHost
             ImGui.End();
         }
     }
+
+    internal static bool ShouldDrawVoiceIndicators(
+        bool onlineRoomActive,
+        bool showAllVoiceIndicatorSlots,
+        bool gameMenuVisible) =>
+        !gameMenuVisible && (onlineRoomActive || showAllVoiceIndicatorSlots);
 
     private static void DrawVoiceStatus(PartyVoiceUiStatus voiceUiStatus)
     {

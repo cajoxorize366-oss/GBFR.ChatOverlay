@@ -6,7 +6,7 @@ The Overlay remains independent from Relink's version-specific implementation th
 SHA-256 63340832bcf731fbc97796f686b05c988418e83d451d4a49b2244a85d00e297f
 ```
 
-The RVAs below are reverse-engineering anchors, not runtime constants. Runtime initialization scans the executable `.text` section for unique validated signatures and disables the bridge on any hash, count or RVA mismatch.
+The hash above remains a deferred diagnostic identifier. Runtime initialization does not read or hash the complete 123 MB executable on Reloaded-II's synchronous loader path. Instead it reads only the required instruction ranges at the known RVAs, validates every exact/wildcard signature and recomputes each RIP-relative target before installing hooks. Any required byte, RVA or derived target mismatch disables the affected bridge.
 
 ## Outbound messages
 
@@ -54,11 +54,11 @@ The callback copies `0x1A0` bytes immediately, calls the original function, stri
 
 ## Version and online safety
 
-- Use signature scans with validation of surrounding instructions; analysis RVAs are never used as runtime targets.
+- Validate exact surrounding instructions at every required RVA and recompute RIP-relative targets before using them.
 - Gate inbound and outbound features independently so one missing signature does not disable the local Overlay.
-- Validate executable hash, signature uniqueness, member-slot range, member activity, string encoding, maximum length and null termination before using native data.
+- Record the executable hash asynchronously for diagnostics; synchronously validate required bytes/RVAs, member-slot range, member activity, string encoding, maximum length and null termination before using native data.
 - Preserve the game's own send cooldown and validation path.
-- Disable the bridge on unknown executable versions or ambiguous scans.
+- Disable the bridge on any required-byte/RVA mismatch; an unknown full-file hash alone is diagnostic and never bypasses those checks.
 - Do not modify quest state, matchmaking state or network packets.
 
 ## Remaining runtime criteria

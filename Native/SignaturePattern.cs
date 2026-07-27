@@ -92,6 +92,9 @@ public sealed class SignaturePattern
         };
     }
 
+    public bool Matches(ReadOnlySpan<byte> candidate) =>
+        candidate.Length == Length && IsMatch(candidate);
+
     private bool IsMatch(ReadOnlySpan<byte> candidate)
     {
         for (var index = 0; index < _bytes.Length; index++)
@@ -103,4 +106,3 @@ public sealed class SignaturePattern
         return true;
     }
 }
-

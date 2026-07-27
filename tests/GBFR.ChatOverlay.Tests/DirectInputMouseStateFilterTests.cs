@@ -45,4 +45,15 @@ public sealed class DirectInputMouseStateFilterTests
     {
         Assert.True(WindowInputClassifier.IsAlwaysCaptured(message));
     }
+
+    [Theory]
+    [InlineData(0x000F)]
+    [InlineData(0x0119)]
+    [InlineData(0x0240)]
+    [InlineData(0x0312)]
+    [InlineData(0x0319)]
+    public void WindowClassifier_DoesNotCaptureUnrelatedWindowMessages(uint message)
+    {
+        Assert.False(WindowInputClassifier.IsAlwaysCaptured(message));
+    }
 }

@@ -100,7 +100,10 @@ internal sealed class RelinkPartyHudTracker
             using var process = Process.GetCurrentProcess();
             var mainModule = process.MainModule ??
                 throw new InvalidOperationException("The game module is unavailable.");
-            var rvas = RelinkHudBuildLocator.Resolve(mainModule.FileName);
+            var rvas = StartupPhaseDiagnostic.Run(
+                "required-byte-rva-preflight-party-hud",
+                _log,
+                () => RelinkHudBuildLocator.Resolve(mainModule.FileName));
             _moduleBase = mainModule.BaseAddress;
             _townVtable = _moduleBase + TownVtableRva;
             _battleVtable = _moduleBase + BattleVtableRva;

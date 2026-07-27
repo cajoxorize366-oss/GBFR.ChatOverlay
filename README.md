@@ -25,7 +25,7 @@
 15. `0.5.0-preview.1` 直接移植因子槽（GBFR Extra Sigil Slots）已经实机证明的 RTSS 兼容边界：DX11 后端只安装 `Present` Hook，先解析 RTSS/其他 Overlay 留在入口处的跳板链并挂到链尾；不再安装 `ResizeBuffers` Hook。每帧仅在需要绘制时创建并释放 RTV/BackBuffer，调用下一个原始 `Present` 时进入单独的 x64 native SEH 边界。若该调用发生 `0xC0000005`，当前帧返回失败并在图形回调线程外停用本 Overlay Hook；后续帧回到游戏/既有 Hook 的 Present 路径，同时聊天、图标和输入捕获 fail-closed。这个实现只参考因子槽仓库，不使用 Luma/ReShade 路线。
 16. `0.5.0-preview.2` 新增 `F10` Discord 风格设置菜单。菜单打开时按因子槽的成熟边界拦截 Win32、Raw Input 与 DirectInput 键盘/鼠标，关闭后等待物理键和鼠标按钮松开再归还输入。菜单内可即时选择本地自检设备、调节输入增益/回放音量、查看实时输入电平；原 `I` 键不再被 Mod 占用。设置模式还会显示聊天框预览，可拖动顶部移动，并拖动右下角三角标记缩放；尺寸和按可用画面归一化的位置会写回 `Config.json`。
 
-当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生功能只在 SHA-256 和唯一特征码匹配已验证的 Relink 2.0.2/Party 1.10.12 时启用，否则保持禁用。
+当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生代码 Hook 只在固定 RVA 的必要原始字节、RIP 相对目标以及 Party 路径/版本/导出全部通过同步预检时启用；完整 EXE/PartyWin SHA-256 在 Hook 安装后于后台计算，仅作为诊断信息。
 
 第三方组件及许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

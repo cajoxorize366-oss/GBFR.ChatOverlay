@@ -14,6 +14,16 @@ public sealed class SignaturePatternTests
     }
 
     [Fact]
+    public void Matches_RequiresExactLengthAndHonorsWildcards()
+    {
+        var pattern = SignaturePattern.Parse("48 8B ?? 05");
+
+        Assert.True(pattern.Matches([0x48, 0x8B, 0x7D, 0x05]));
+        Assert.False(pattern.Matches([0x48, 0x8B, 0x7D]));
+        Assert.False(pattern.Matches([0x48, 0x8B, 0x7D, 0x06]));
+    }
+
+    [Fact]
     public void FindUniqueOffset_HandlesLeadingWildcardAnchor()
     {
         var pattern = SignaturePattern.Parse("?? AA BB");

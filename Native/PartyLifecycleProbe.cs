@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using GBFR.ChatOverlay.Audio;
 using Reloaded.Hooks.Definitions;
 using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
@@ -12,6 +11,8 @@ public sealed class PartyLifecycleProbe
 {
     public const string SupportedPartySha256 =
         "3f0c6abbb735d81fa766a105982bda73f1d2c2cf01109fa2e7cf64813a52ce55";
+    private const string SupportedPartyFileVersion = "1.10.2509.24002";
+    private const string SupportedPartyProductVersion = "1.10.12";
 
     private const string PartyModuleName = "PartyWin.dll";
     private const int MaximumStateChangesPerBatch = 4_096;
@@ -68,6 +69,8 @@ public sealed class PartyLifecycleProbe
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
 
+    internal string? ModulePath { get; private set; }
+
     public bool IsOnlineRoomActive =>
         IsInitialized && !Volatile.Read(ref _suspended) && _onlineRoom.IsActive;
 
@@ -101,8 +104,6 @@ public sealed class PartyLifecycleProbe
             using var process = Process.GetCurrentProcess();
             var mainModule = process.MainModule ??
                 throw new InvalidOperationException("The game module is unavailable.");
-            ValidateFileHash(mainModule.FileName, RelinkBuildLocator.SupportedSha256, "Relink executable");
-
             var expectedPartyPath = Path.Combine(
                 Path.GetDirectoryName(mainModule.FileName) ??
                     throw new InvalidOperationException("The game directory is unavailable."),
@@ -127,7 +128,23 @@ public sealed class PartyLifecycleProbe
                     $"Loaded {PartyModuleName} is outside the verified game directory: {partyModule.FileName}.");
             }
 
-            ValidateFileHash(partyModule.FileName, SupportedPartySha256, PartyModuleName);
+            var partyVersion = FileVersionInfo.GetVersionInfo(partyModule.FileName);
+            if (!string.Equals(
+                    partyVersion.FileVersion,
+                    SupportedPartyFileVersion,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    partyVersion.ProductVersion,
+                    SupportedPartyProductVersion,
+                    StringComparison.Ordinal))
+            {
+                throw new NotSupportedException(
+                    $"Unsupported {PartyModuleName} version file={partyVersion.FileVersion ?? "unknown"}, " +
+                    $"product={partyVersion.ProductVersion ?? "unknown"}; expected file=" +
+                    $"{SupportedPartyFileVersion}, product={SupportedPartyProductVersion}.");
+            }
+
+            ModulePath = partyModule.FileName;
             var module = partyModule.BaseAddress;
 
             try
@@ -646,23 +663,6 @@ public sealed class PartyLifecycleProbe
         _leaveNetworkHook = null;
         _cleanupHook = null;
         _initializeHook = null;
-    }
-
-    private static void ValidateFileHash(string path, string expectedHash, string label)
-    {
-        using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            bufferSize: 1024 * 1024,
-            FileOptions.SequentialScan);
-        var actualHash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-        if (!string.Equals(actualHash, expectedHash, StringComparison.Ordinal))
-        {
-            throw new NotSupportedException(
-                $"Unsupported {label} SHA-256 {actualHash}; expected {expectedHash}.");
-        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]

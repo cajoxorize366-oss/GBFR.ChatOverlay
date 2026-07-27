@@ -25,9 +25,9 @@ constexpr uint32_t kCursorHookAll =
 
 std::atomic_bool g_cursorReleaseActive{false};
 std::mutex g_cursorHookMutex;
-bool g_cursorHookInstallAttempted = false;
 uint32_t g_cursorHookMask = 0;
-POINT g_frozenCursorPosition{};
+std::atomic<LONG> g_frozenCursorX{0};
+std::atomic<LONG> g_frozenCursorY{0};
 GetCursorPosFn g_originalGetCursorPos = nullptr;
 SetCursorPosFn g_originalSetCursorPos = nullptr;
 ClipCursorFn g_originalClipCursor = nullptr;
@@ -120,16 +120,39 @@ bool PatchMainModuleImport(
                 {
                     return false;
                 }
-                original = InterlockedExchangePointer(
+                void* previous = InterlockedExchangePointer(
                     reinterpret_cast<void* volatile*>(slot),
                     replacement);
                 DWORD ignored = 0;
-                const bool restored = VirtualProtect(
+                (void)VirtualProtect(
                     slot,
                     sizeof(void*),
                     oldProtection,
-                    &ignored) != FALSE;
-                return restored && original != nullptr;
+                    &ignored);
+                if (previous == nullptr)
+                {
+                    DWORD writableProtection = 0;
+                    if (VirtualProtect(
+                            slot,
+                            sizeof(void*),
+                            PAGE_READWRITE,
+                            &writableProtection))
+                    {
+                        (void)InterlockedCompareExchangePointer(
+                            reinterpret_cast<void* volatile*>(slot),
+                            previous,
+                            replacement);
+                        DWORD rollbackIgnored = 0;
+                        (void)VirtualProtect(
+                            slot,
+                            sizeof(void*),
+                            writableProtection,
+                            &rollbackIgnored);
+                    }
+                    return false;
+                }
+                original = previous;
+                return true;
             }
         }
     }
@@ -146,12 +169,15 @@ BOOL WINAPI GetCursorPosDetour(LPPOINT point)
     if (g_cursorReleaseActive.load(std::memory_order_acquire))
     {
         if (point != nullptr)
-            *point = g_frozenCursorPosition;
+        {
+            point->x = g_frozenCursorX.load(std::memory_order_relaxed);
+            point->y = g_frozenCursorY.load(std::memory_order_relaxed);
+        }
         return TRUE;
     }
     return g_originalGetCursorPos != nullptr
         ? g_originalGetCursorPos(point)
-        : FALSE;
+        : ::GetCursorPos(point);
 }
 
 BOOL WINAPI SetCursorPosDetour(int x, int y)
@@ -160,7 +186,7 @@ BOOL WINAPI SetCursorPosDetour(int x, int y)
         return TRUE;
     return g_originalSetCursorPos != nullptr
         ? g_originalSetCursorPos(x, y)
-        : FALSE;
+        : ::SetCursorPos(x, y);
 }
 
 BOOL WINAPI ClipCursorDetour(const RECT* rectangle)
@@ -173,18 +199,18 @@ BOOL WINAPI ClipCursorDetour(const RECT* rectangle)
     }
     return g_originalClipCursor != nullptr
         ? g_originalClipCursor(rectangle)
-        : FALSE;
+        : ::ClipCursor(rectangle);
 }
 
 uint32_t InstallCursorHooks() noexcept
 {
     std::scoped_lock lock(g_cursorHookMutex);
-    if (g_cursorHookInstallAttempted)
+    if (g_cursorHookMask == kCursorHookAll)
         return g_cursorHookMask;
-    g_cursorHookInstallAttempted = true;
 
     void* original = nullptr;
-    if (PatchMainModuleImport(
+    if ((g_cursorHookMask & kCursorHookGetPosition) == 0 &&
+        PatchMainModuleImport(
             "USER32.dll",
             "GetCursorPos",
             reinterpret_cast<void*>(&GetCursorPosDetour),
@@ -195,7 +221,8 @@ uint32_t InstallCursorHooks() noexcept
     }
 
     original = nullptr;
-    if (PatchMainModuleImport(
+    if ((g_cursorHookMask & kCursorHookSetPosition) == 0 &&
+        PatchMainModuleImport(
             "USER32.dll",
             "SetCursorPos",
             reinterpret_cast<void*>(&SetCursorPosDetour),
@@ -206,7 +233,8 @@ uint32_t InstallCursorHooks() noexcept
     }
 
     original = nullptr;
-    if (PatchMainModuleImport(
+    if ((g_cursorHookMask & kCursorHookClip) == 0 &&
+        PatchMainModuleImport(
             "USER32.dll",
             "ClipCursor",
             reinterpret_cast<void*>(&ClipCursorDetour),
@@ -605,17 +633,20 @@ GBFRChatOverlay_ResolveHookChainTarget(
 extern "C" __declspec(dllexport) int32_t __cdecl
 GBFRChatOverlay_SetCursorReleaseActive(int32_t requested)
 {
+    const uint32_t hookMask = InstallCursorHooks();
     if (requested == 0)
     {
         g_cursorReleaseActive.store(false, std::memory_order_release);
-        return static_cast<int32_t>(g_cursorHookMask);
+        return static_cast<int32_t>(hookMask & kCursorHookAll);
     }
 
-    const uint32_t hookMask = InstallCursorHooks();
+    POINT frozenCursorPosition{};
     if (g_originalGetCursorPos != nullptr)
-        (void)g_originalGetCursorPos(&g_frozenCursorPosition);
+        (void)g_originalGetCursorPos(&frozenCursorPosition);
     else
-        (void)GetCursorPos(&g_frozenCursorPosition);
+        (void)::GetCursorPos(&frozenCursorPosition);
+    g_frozenCursorX.store(frozenCursorPosition.x, std::memory_order_relaxed);
+    g_frozenCursorY.store(frozenCursorPosition.y, std::memory_order_relaxed);
     g_cursorReleaseActive.store(true, std::memory_order_release);
     if ((hookMask & kCursorHookClip) != 0 && g_originalClipCursor != nullptr)
         (void)g_originalClipCursor(nullptr);

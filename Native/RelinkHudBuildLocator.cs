@@ -1,7 +1,3 @@
-using System.Buffers.Binary;
-using System.Reflection.PortableExecutable;
-using System.Security.Cryptography;
-
 namespace GBFR.ChatOverlay.Native;
 
 internal readonly record struct RelinkHudRvas(
@@ -25,6 +21,8 @@ internal static class RelinkHudBuildLocator
     private const int ExpectedUiManagerSlotRva = 0x07C02358;
     private const int ChainburstFactoryPatternOffset = 0x128;
     private const int UiManagerInstructionOffset = 63;
+    private const int ExpectedChainburstFactoryPatternRva =
+        ExpectedChainburstFactoryRva + ChainburstFactoryPatternOffset;
 
     private static readonly SignaturePattern TownFactoryPattern = SignaturePattern.Parse(
         "56 57 48 83 EC 28 48 89 D6 8B 05 ?? ?? ?? ?? " +
@@ -44,9 +42,9 @@ internal static class RelinkHudBuildLocator
         "56 57 48 83 EC 28 89 D7 48 89 CE E8 D0 FB FF FF 85 FF 74 08 " +
         "48 89 F1 E8 D0 BE 10 02 48 89 F0");
 
-    // The supported image is SHA-256 pinned above, so retain the exact RIP-relative
-    // displacement that identifies ControllerChainburst's primary vtable rather
-    // than accepting structurally identical UI-controller constructors.
+    // Retain the exact RIP-relative displacement that identifies
+    // ControllerChainburst's primary vtable rather than accepting structurally
+    // identical UI-controller constructors during required-byte preflight.
     private static readonly SignaturePattern ChainburstFactoryPattern = SignaturePattern.Parse(
         "48 8D 05 79 91 43 03 48 89 07 " +
         "48 8D 05 8F 92 43 03 48 89 47 18 " +
@@ -72,52 +70,33 @@ internal static class RelinkHudBuildLocator
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
 
-        using var stream = new FileStream(
-            imagePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            bufferSize: 1024 * 1024,
-            FileOptions.SequentialScan);
-        var actualHash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-        if (!string.Equals(actualHash, RelinkBuildLocator.SupportedSha256, StringComparison.Ordinal))
-        {
-            throw new NotSupportedException(
-                $"Unsupported Relink executable SHA-256 {actualHash}; " +
-                $"expected {RelinkBuildLocator.SupportedSha256}.");
-        }
+        using var preflight = RelinkExecutablePreflight.Open(imagePath);
+        preflight.RequirePattern(ExpectedTownFactoryRva, TownFactoryPattern, "town party HUD factory");
+        preflight.RequirePattern(ExpectedTownDestructorRva, TownDestructorPattern, "town party HUD destructor");
+        preflight.RequirePattern(ExpectedBattleFactoryRva, BattleFactoryPattern, "battle party HUD factory");
+        preflight.RequirePattern(
+            ExpectedBattleDestructorRva,
+            BattleDestructorPattern,
+            "battle party HUD destructor");
+        preflight.RequirePattern(
+            ExpectedChainburstFactoryPatternRva,
+            ChainburstFactoryPattern,
+            "Full Chain overlay factory");
+        preflight.RequirePattern(
+            ExpectedChainburstDestructorRva,
+            ChainburstDestructorPattern,
+            "Full Chain overlay destructor");
+        preflight.RequirePattern(ExpectedUiObjectQueryRva, UiObjectQueryPattern, "UI object canvas transform");
 
-        stream.Position = 0;
-        using var peReader = new PEReader(stream, PEStreamOptions.LeaveOpen);
-        var textSection = peReader.PEHeaders.SectionHeaders
-            .SingleOrDefault(section => string.Equals(section.Name, ".text", StringComparison.Ordinal));
-        if (textSection.Name is null)
-            throw new InvalidDataException("The Relink executable has no .text section.");
-
-        var text = new byte[textSection.SizeOfRawData];
-        stream.Position = textSection.PointerToRawData;
-        stream.ReadExactly(text);
-
-        var townFactory = checked(
-            textSection.VirtualAddress + TownFactoryPattern.FindUniqueOffset(text, "town party HUD factory"));
-        var townDestructor = checked(
-            textSection.VirtualAddress + TownDestructorPattern.FindUniqueOffset(text, "town party HUD destructor"));
-        var battleFactory = checked(
-            textSection.VirtualAddress + BattleFactoryPattern.FindUniqueOffset(text, "battle party HUD factory"));
-        var battleDestructor = checked(
-            textSection.VirtualAddress + BattleDestructorPattern.FindUniqueOffset(text, "battle party HUD destructor"));
-        var chainburstFactory = checked(
-            textSection.VirtualAddress +
-            ChainburstFactoryPattern.FindUniqueOffset(text, "Full Chain overlay factory") -
-            ChainburstFactoryPatternOffset);
-        var chainburstDestructor = checked(
-            textSection.VirtualAddress +
-            ChainburstDestructorPattern.FindUniqueOffset(text, "Full Chain overlay destructor"));
-        var uiObjectQueryOffset = UiObjectQueryPattern.FindUniqueOffset(text, "UI object canvas transform");
-        var uiObjectQueryRva = checked(textSection.VirtualAddress + uiObjectQueryOffset);
-        var uiManagerInstructionRva = checked(uiObjectQueryRva + UiManagerInstructionOffset);
-        var uiManagerDisplacement = BinaryPrimitives.ReadInt32LittleEndian(
-            text.AsSpan(UiManagerInstructionOffset + uiObjectQueryOffset + 3, sizeof(int)));
+        var townFactory = ExpectedTownFactoryRva;
+        var townDestructor = ExpectedTownDestructorRva;
+        var battleFactory = ExpectedBattleFactoryRva;
+        var battleDestructor = ExpectedBattleDestructorRva;
+        var chainburstFactory = ExpectedChainburstFactoryRva;
+        var chainburstDestructor = ExpectedChainburstDestructorRva;
+        var uiObjectQueryRva = ExpectedUiObjectQueryRva;
+        var uiManagerInstructionRva = checked(ExpectedUiObjectQueryRva + UiManagerInstructionOffset);
+        var uiManagerDisplacement = preflight.ReadInt32(uiManagerInstructionRva + 3);
         var uiManagerSlot = checked(uiManagerInstructionRva + 7 + uiManagerDisplacement);
 
         if (townFactory != ExpectedTownFactoryRva ||

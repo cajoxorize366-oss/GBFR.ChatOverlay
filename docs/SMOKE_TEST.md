@@ -7,6 +7,10 @@ The current build is automatically copied to the Reloaded-II Mods directory, but
 The Reloaded-II log should contain messages equivalent to:
 
 ```text
+[gbfr.qol.chatoverlay] Startup phase=required-byte-rva-preflight-chat state=complete elapsed_ms=....
+[gbfr.qol.chatoverlay] Startup phase=required-byte-rva-preflight-party-hud state=complete elapsed_ms=....
+[gbfr.qol.chatoverlay] Startup phase=input-user32-iat state=complete hooks=All active=false; cursor interception was installed before other game hooks.
+[gbfr.qol.chatoverlay] Reloaded-II load source=launcher (...) ...
 [gbfr.qol.chatoverlay] Relink 2.0.2 native chat bridge attached: send=..., receive=....
 [gbfr.qol.chatoverlay] Relink incoming player-name resolver attached: senderSlot=..., memberLookup=...; empty RPC sender labels now use the verified four-slot lobby member table.
 [gbfr.qol.chatoverlay] Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
@@ -19,6 +23,8 @@ The Reloaded-II log should contain messages equivalent to:
 [gbfr.qol.chatoverlay] IDirectInputDevice8::GetDeviceState hooked.
 [gbfr.qol.chatoverlay] First Direct3D11 Present callback: OS TID ....
 ```
+
+`source=asi-bootstrapper` is the expected alternative when using the official Deploy ASI Loader. `source=unknown` must be preserved with its evidence string because it can identify a duplicate or conflicting injection path. The `relink-executable-sha256` and `partywin-sha256` begin/complete lines may appear later; both must state `diagnostic_only=true` and must never delay the hook phases above.
 
 The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after the game initializes DirectInput.
 
@@ -89,7 +95,7 @@ This preview replaces the stock Reloaded DX11 implementation with the Present-on
 
 ## Failure handling
 
-- If `Native chat bridge validation failed` appears, preserve the reported executable SHA-256. The Overlay should remain usable as a local preview.
+- If `Native chat bridge validation failed` appears, preserve the complete required-byte/RVA preflight error and the later deferred executable SHA-256 diagnostic, if it completes. The Overlay should remain usable as a local preview.
 - If `Native party-HUD anchor tracking unavailable` appears, preserve the complete signature-validation error. Chat and voice transport may continue, but microphone icons must remain hidden rather than fall back to screenshot coordinates.
 - If the game fails before `DirectX 11 ImGui hook initialized with the Extra Sigil Present-only hook-chain and native SEH compatibility path`, disable the Mod and preserve the Reloaded-II log.
 - If the log reaches `[WndProcHook]` but not `First Direct3D11 Present callback`, collect the Windows Application Error/WER entry. That boundary distinguishes native backend or WndProc initialization from managed Overlay rendering.

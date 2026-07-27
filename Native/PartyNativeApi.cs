@@ -202,7 +202,7 @@ internal interface IPartyChatControlApi
 
 /// <summary>
 /// Exact flat-C bindings from Party_c.h in Microsoft.PlayFab.PlayFabParty.Cpp.Windows 1.10.12.
-/// The caller supplies the already loaded, hash-verified game module. This class never loads or
+/// The caller supplies the already loaded, path- and export-verified game module. This class never loads or
 /// initializes another Party runtime. The only exposed permission call is restricted by the caller
 /// to microphone send/receive; no text, TTS, transcription or endpoint-send API is bound.
 /// </summary>

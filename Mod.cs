@@ -66,6 +66,29 @@ public class Mod : ModBase // <= Do not Remove.
 
         Action<string> moduleLog =
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+        var nativePresentBridgeAvailable = false;
+        if (_hooks is not null)
+        {
+            try
+            {
+                StartupPhaseDiagnostic.Run(
+                    "present-and-input-native-bridge",
+                    moduleLog,
+                    () => DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId)));
+                var cursorHooks = DxgiPresentBridge.SetCursorReleaseActive(false);
+                moduleLog(
+                    $"Startup phase=input-user32-iat state=complete hooks={cursorHooks} " +
+                    "active=false; cursor interception was installed before other game hooks.");
+                nativePresentBridgeAvailable = true;
+            }
+            catch (Exception exception)
+            {
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Native Present compatibility bridge unavailable; " +
+                    $"overlay and input interception will remain disabled (fail-closed): {exception}");
+            }
+        }
+
         if (_hooks is not null)
         {
             try
@@ -111,7 +134,10 @@ public class Mod : ModBase // <= Do not Remove.
                     enableVoiceTest: _configuration.EnableVoiceInput,
                     audioInputSelection: audioInputSelection,
                     audioOutputSelection: audioOutputSelection);
-                _partyLifecycleProbe.Initialize();
+                StartupPhaseDiagnostic.Run(
+                    "party-lifecycle-hooks",
+                    moduleLog,
+                    _partyLifecycleProbe.Initialize);
             }
             catch (Exception exception)
             {
@@ -178,7 +204,10 @@ public class Mod : ModBase // <= Do not Remove.
                     _hooks,
                     message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
                     _gameContextProbe);
-                _nativeChatBridge.Initialize();
+                StartupPhaseDiagnostic.Run(
+                    "native-chat-hooks",
+                    moduleLog,
+                    _nativeChatBridge.Initialize);
                 _gameContextProbe ??= _nativeChatBridge.GameContext;
                 transport = _nativeChatBridge;
                 incoming = _nativeChatBridge;
@@ -218,15 +247,11 @@ public class Mod : ModBase // <= Do not Remove.
             return;
         }
 
-        try
-        {
-            DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId));
-        }
-        catch (Exception exception)
+        if (!nativePresentBridgeAvailable)
         {
             _logger.WriteLine(
-                $"[{_modConfig.ModId}] Native Present compatibility bridge unavailable; " +
-                $"overlay and input interception are disabled (fail-closed): {exception}");
+                $"[{_modConfig.ModId}] Native Present compatibility bridge is unavailable; " +
+                "overlay and input interception are disabled (fail-closed).");
             return;
         }
 
@@ -258,7 +283,10 @@ public class Mod : ModBase // <= Do not Remove.
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
-            _directInputKeyboard.Initialize();
+            StartupPhaseDiagnostic.Run(
+                "directinput-method-hooks",
+                moduleLog,
+                _directInputKeyboard.Initialize);
         }
         catch (Exception exception)
         {
@@ -266,6 +294,8 @@ public class Mod : ModBase // <= Do not Remove.
         }
 
         _ = InitializeOverlayAsync();
+        LogInjectionSource(moduleLog);
+        StartDeferredFileHashDiagnostics(moduleLog);
     }
 
     #region Standard Overrides
@@ -310,6 +340,51 @@ public class Mod : ModBase // <= Do not Remove.
         catch (Exception exception)
         {
             _logger.WriteLine($"[{_modConfig.ModId}] Failed to initialize overlay: {exception}");
+        }
+    }
+
+    private void LogInjectionSource(Action<string> log)
+    {
+        try
+        {
+            log(ReloadedInjectionSourceDetector.FormatLogMessage(
+                ReloadedInjectionSourceDetector.Detect()));
+        }
+        catch (Exception exception)
+        {
+            log(
+                $"Reloaded-II load source=unknown; detector failed with " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+        }
+    }
+
+    private void StartDeferredFileHashDiagnostics(Action<string> log)
+    {
+        string? executablePath = null;
+        try
+        {
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            executablePath = process.MainModule?.FileName;
+        }
+        catch (Exception exception)
+        {
+            log(
+                $"Startup phase=relink-executable-sha256 state=failed " +
+                $"reason=path-unavailable error={exception.GetType().Name} diagnostic_only=true.");
+        }
+
+        _ = DeferredFileHashDiagnostic.Start(
+            "relink-executable",
+            executablePath,
+            RelinkBuildLocator.SupportedSha256,
+            log);
+        if (_partyLifecycleProbe?.ModulePath is { Length: > 0 } partyModulePath)
+        {
+            _ = DeferredFileHashDiagnostic.Start(
+                "partywin",
+                partyModulePath,
+                PartyLifecycleProbe.SupportedPartySha256,
+                log);
         }
     }
 

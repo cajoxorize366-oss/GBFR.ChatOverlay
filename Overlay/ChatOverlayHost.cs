@@ -17,7 +17,6 @@ public sealed class ChatOverlayHost
 {
     private const int VirtualKeyY = 0x59;
     private const int VirtualKeyF10 = 0x79;
-    private static readonly int[] MouseButtonVirtualKeys = [0x01, 0x02, 0x04, 0x05, 0x06];
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
     private const uint WmChar = 0x0102;
@@ -46,7 +45,6 @@ public sealed class ChatOverlayHost
     private readonly Action _forceReleaseVoiceInputs;
     private readonly Action<string> _log;
     private readonly MouseInteractionGate _mouseInteractionGate = new();
-    private readonly bool[] _polledMouseButtons = new bool[MouseButtonVirtualKeys.Length];
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private ImeCandidateSnapshot? _imeCandidateSnapshot;
     private int _openRequested;
@@ -244,9 +242,7 @@ public sealed class ChatOverlayHost
 
             if (settingsOpen)
             {
-                var physicalMouseButtonPressed = FeedPhysicalMouseToImGui();
-                _mouseInteractionGate.Observe(
-                    physicalMouseButtonPressed || MouseButtonStateTracker.PressedButtons != 0);
+                _mouseInteractionGate.Observe(MouseButtonStateTracker.PressedButtons != 0);
                 DrawSettingsMenu();
                 if (!_settingsWindowOpen)
                 {
@@ -1114,7 +1110,6 @@ public sealed class ChatOverlayHost
         PersistEditedChatLayout();
         _editedChatRect = null;
         MouseButtonStateTracker.Reset();
-        Array.Clear(_polledMouseButtons);
         ResetImGuiMouseState();
         RestoreMouseCapture();
         LogSafely("F10 settings closed; held DirectInput keys and mouse buttons will drain before release.");
@@ -1177,29 +1172,6 @@ public sealed class ChatOverlayHost
         for (var button = 0; button < 5; button++)
             ImGui.ImGuiIO_AddMouseButtonEvent(io, button, false);
         ImGui.ClearActiveID();
-    }
-
-    private bool FeedPhysicalMouseToImGui()
-    {
-        var io = ImguiHook.IO;
-        var window = Volatile.Read(ref _windowHandle);
-        if (window == nint.Zero)
-            window = ImguiHook.WindowHandle;
-        if (window != nint.Zero && GetCursorPos(out var point) && ScreenToClient(window, ref point))
-            ImGui.ImGuiIO_AddMousePosEvent(io, point.X, point.Y);
-
-        var anyButtonPressed = false;
-        for (var button = 0; button < MouseButtonVirtualKeys.Length; button++)
-        {
-            var pressed = (GetAsyncKeyState(MouseButtonVirtualKeys[button]) & 0x8000) != 0;
-            anyButtonPressed |= pressed;
-            if (_polledMouseButtons[button] == pressed)
-                continue;
-            _polledMouseButtons[button] = pressed;
-            ImGui.ImGuiIO_AddMouseButtonEvent(io, button, pressed);
-        }
-
-        return anyButtonPressed;
     }
 
     private void ResetChatInteractionState()
@@ -1447,24 +1419,6 @@ public sealed class ChatOverlayHost
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativePoint
-    {
-        internal int X;
-        internal int Y;
-    }
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorPos(out NativePoint point);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ScreenToClient(nint window, ref NativePoint point);
-
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int virtualKey);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect

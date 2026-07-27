@@ -1,7 +1,3 @@
-using System.Buffers.Binary;
-using System.Reflection.PortableExecutable;
-using System.Security.Cryptography;
-
 namespace GBFR.ChatOverlay.Native;
 
 public readonly record struct RelinkChatRvas(int SendMessage, int RpcMessage, int ManagerSlot)
@@ -24,6 +20,8 @@ public static class RelinkBuildLocator
     private const int ExpectedSenderSlotResolverRva = 0x006D2EE0;
     private const int ExpectedLobbyMemberLookupRva = 0x0037CDD0;
     private const int ExpectedLobbyMemberManagerSlotRva = 0x07C23878;
+    private const int ExpectedManagerInstructionRva = 0x025FAD2A;
+    private const int ExpectedLobbyMemberCallsiteRva = 0x003CEE70;
 
     private static readonly SignaturePattern SendMessagePattern = SignaturePattern.Parse(
         "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC F8 02 00 00 " +
@@ -51,58 +49,33 @@ public static class RelinkBuildLocator
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
 
-        using var stream = new FileStream(
-            imagePath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete,
-            bufferSize: 1024 * 1024,
-            FileOptions.SequentialScan);
-
-        var actualHash = Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
-        if (!string.Equals(actualHash, SupportedSha256, StringComparison.Ordinal))
-        {
-            throw new NotSupportedException(
-                $"Unsupported Relink executable SHA-256 {actualHash}; expected {SupportedSha256}.");
-        }
-
-        stream.Position = 0;
-        using var peReader = new PEReader(stream, PEStreamOptions.LeaveOpen);
-        var textSection = peReader.PEHeaders.SectionHeaders
-            .SingleOrDefault(section => string.Equals(section.Name, ".text", StringComparison.Ordinal));
-        if (textSection.Name is null)
-            throw new InvalidDataException("The Relink executable has no .text section.");
-
-        var text = new byte[textSection.SizeOfRawData];
-        stream.Position = textSection.PointerToRawData;
-        stream.ReadExactly(text);
-
-        var sendOffset = SendMessagePattern.FindUniqueOffset(text, "sendMessage");
-        var rpcOffset = RpcMessagePattern.FindUniqueOffset(text, "rpcMessage");
-        var managerInstructionOffset = ManagerSlotPattern.FindUniqueOffset(text, "chat Manager global");
-        var senderSlotResolverOffset = SenderSlotResolverPattern.FindUniqueOffset(
-            text,
+        using var preflight = RelinkExecutablePreflight.Open(imagePath);
+        preflight.RequirePattern(ExpectedSendMessageRva, SendMessagePattern, "chat sendMessage");
+        preflight.RequirePattern(ExpectedRpcMessageRva, RpcMessagePattern, "chat rpcMessage");
+        preflight.RequirePattern(
+            ExpectedManagerInstructionRva,
+            ManagerSlotPattern,
+            "chat Manager global");
+        preflight.RequirePattern(
+            ExpectedSenderSlotResolverRva,
+            SenderSlotResolverPattern,
             "incoming chat sender-to-slot resolver");
-        var lobbyMemberCallsiteOffset = LobbyMemberLookupCallsitePattern.FindUniqueOffset(
-            text,
+        preflight.RequirePattern(
+            ExpectedLobbyMemberCallsiteRva,
+            LobbyMemberLookupCallsitePattern,
             "lobby member name lookup callsite");
 
-        var sendRva = checked(textSection.VirtualAddress + sendOffset);
-        var rpcRva = checked(textSection.VirtualAddress + rpcOffset);
-        var managerInstructionRva = checked(textSection.VirtualAddress + managerInstructionOffset);
-        var displacement = BinaryPrimitives.ReadInt32LittleEndian(
-            text.AsSpan(managerInstructionOffset + 3, sizeof(int)));
-        var managerSlotRva = checked(managerInstructionRva + 7 + displacement);
-        var senderSlotResolverRva = checked(textSection.VirtualAddress + senderSlotResolverOffset);
-        var lobbyMemberCallsiteRva = checked(textSection.VirtualAddress + lobbyMemberCallsiteOffset);
-        var lobbyMemberManagerDisplacement = BinaryPrimitives.ReadInt32LittleEndian(
-            text.AsSpan(lobbyMemberCallsiteOffset + 3, sizeof(int)));
+        var sendRva = ExpectedSendMessageRva;
+        var rpcRva = ExpectedRpcMessageRva;
+        var displacement = preflight.ReadInt32(ExpectedManagerInstructionRva + 3);
+        var managerSlotRva = checked(ExpectedManagerInstructionRva + 7 + displacement);
+        var senderSlotResolverRva = ExpectedSenderSlotResolverRva;
+        var lobbyMemberManagerDisplacement = preflight.ReadInt32(ExpectedLobbyMemberCallsiteRva + 3);
         var lobbyMemberManagerSlotRva = checked(
-            lobbyMemberCallsiteRva + 7 + lobbyMemberManagerDisplacement);
-        var lobbyMemberLookupDisplacement = BinaryPrimitives.ReadInt32LittleEndian(
-            text.AsSpan(lobbyMemberCallsiteOffset + 10, sizeof(int)));
+            ExpectedLobbyMemberCallsiteRva + 7 + lobbyMemberManagerDisplacement);
+        var lobbyMemberLookupDisplacement = preflight.ReadInt32(ExpectedLobbyMemberCallsiteRva + 10);
         var lobbyMemberLookupRva = checked(
-            lobbyMemberCallsiteRva + 14 + lobbyMemberLookupDisplacement);
+            ExpectedLobbyMemberCallsiteRva + 14 + lobbyMemberLookupDisplacement);
 
         if (sendRva != ExpectedSendMessageRva ||
             rpcRva != ExpectedRpcMessageRva ||

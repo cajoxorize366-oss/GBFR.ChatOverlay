@@ -169,7 +169,7 @@ Mod.cs
 5. 不独立调用 `PartyStartProcessingStateChanges` 消费全局队列。
 6. 观察 Hook 必须把原批次原样交还 Relink；原生动作推迟到原始 `PartyFinishProcessingStateChanges` 返回以后。
 7. 离房前先静音并销毁本地 ChatControl；Cleanup/暂停/心跳超时都 fail-closed。
-8. 原生调用只允许已验证 EXE/Party DLL hash 和唯一签名。
+8. 原生代码 Hook 只允许通过固定 RVA 的必要原始字节、派生目标预检，以及 Party 游戏目录路径、版本和必要导出检查；完整 hash 只在 Hook 后后台计算，不能作为 R2 初始化同步门槛。
 9. 不让阻塞式音频清理或网络工作运行在渲染线程。
 10. WndProc/渲染回调中的异常不能越过 native 边界。
 
@@ -267,7 +267,7 @@ git diff --check
 - 尚无按成员的语音音量、静音和 UI 控件。
 - 快捷聊天/印章的哈希文本尚未解析，接收桥目前只保留自由文字。
 - 每位要参加 Party 语音的玩家都必须安装相同 Mod；原版客户端没有 ChatControl 能力协商。
-- Party/游戏版本升级后必须重新验证 hash、ABI 和签名，不能放宽 fail-closed。
+- Party/游戏版本升级后必须重新验证 RVA/原始字节、派生目标、ABI、Party 版本和导出，并更新后台诊断 hash；不能放宽 fail-closed。
 - `Publish/` 和 native `bin/obj` 是本地生成物；不要把它们整目录提交到 GitHub。
 
 ## 10. 验证文档入口

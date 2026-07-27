@@ -39,7 +39,10 @@ public sealed class RelinkGameContextProbe
         using var process = Process.GetCurrentProcess();
         var mainModule = process.MainModule ??
             throw new InvalidOperationException("The game module is unavailable.");
-        var chatRvas = RelinkBuildLocator.Resolve(mainModule.FileName);
+        var chatRvas = StartupPhaseDiagnostic.Run(
+            "required-byte-rva-preflight-chat",
+            log,
+            () => RelinkBuildLocator.Resolve(mainModule.FileName));
         return new RelinkGameContextProbe(
             mainModule.BaseAddress,
             chatRvas,

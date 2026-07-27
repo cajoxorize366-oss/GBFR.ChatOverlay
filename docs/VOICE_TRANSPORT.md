@@ -17,7 +17,7 @@ Product version 1.10.12
 
 The shipped `PartyWin.dll` is byte-for-byte identical to the x64 release DLL in Microsoft's official NuGet package `Microsoft.PlayFab.PlayFabParty.Cpp.Windows` version `1.10.12`: same 4,027,432-byte size, SHA-256, PE version and 157 named exports. The matching package supplies the exact `Party_c.h` ABI; no guessed structure layout or ordinal-only binding is required.
 
-The Mod must still bind the game-shipped DLL in place. It must not replace or redistribute that DLL, and it must reject any unknown DLL hash or version.
+The Mod must still bind the game-shipped DLL in place and must not replace or redistribute it. Startup synchronously verifies the exact game-directory module path, PlayFab Party file/product version and every required named export. Its full-file SHA-256 is calculated only afterward as a deferred diagnostic so Reloaded-II injection cannot block on a multi-megabyte sequential read.
 
 ## Reconstructed online stack
 
@@ -102,7 +102,7 @@ This observation layer also avoids modifying Party endpoint payloads or Relink's
 
 The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enabled by default. Host and joining-client logs have confirmed manager capture, create/connect, authentication, endpoint and remote-device lifecycle ordering in a private session.
 
-- Gate on both verified EXE and `PartyWin.dll` hashes.
+- Gate executable code hooks on required RVA/original-byte preflight, and gate Party bindings on the verified game-directory module, supported file/product version and required named exports. Record both full-file hashes afterward as deferred diagnostics.
 - Resolve named exports from the already loaded DLL; never call `PartyInitialize` a second time.
 - Log initialize/cleanup, local user, create/connect/leave network, authentication, endpoint creation and state-change types.
 - Query existing local users and networks only after the captured manager is ready.

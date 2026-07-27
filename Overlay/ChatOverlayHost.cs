@@ -67,6 +67,7 @@ public sealed class ChatOverlayHost
     private int _onlineRoomGateFailureLogged;
     private int _onlineRoomWasInactive = 1;
     private int _graphicsFailureHandled;
+    private int _cursorReleaseHookFailureLogged;
     private int _releaseCaptureFrames;
     private int _pendingAnsiLeadByte = -1;
     private nint _windowHandle;
@@ -74,6 +75,9 @@ public sealed class ChatOverlayHost
     private bool _windowOpen = true;
     private bool _settingsWindowOpen = true;
     private bool _initialized;
+    private bool _hasSavedClipRect;
+    private NativeRect _savedClipRect;
+    private nint _savedCaptureWindow;
     private ChatOverlayRect? _editedChatRect;
     private float _editWorkX;
     private float _editWorkY;
@@ -246,6 +250,9 @@ public sealed class ChatOverlayHost
                     settingsOpen = false;
                 }
             }
+            if (settingsOpen)
+                _ = ClipCursor(nint.Zero);
+            ImGui.GetIO().MouseDrawCursor = settingsOpen;
 
             if (!configuration.EnableOverlay || !onlineRoomActive)
             {
@@ -1080,21 +1087,55 @@ public sealed class ChatOverlayHost
             _mouseInteractionGate.Open();
             _forceReleaseVoiceInputs();
             _audioSettings?.RefreshEndpointsAsync();
-            ReleaseCapture();
+            BeginReleasedMouse();
+            var cursorHooks = DxgiPresentBridge.SetCursorReleaseActive(true);
+            if (cursorHooks != DxgiPresentBridge.CursorReleaseHook.All &&
+                Interlocked.Exchange(ref _cursorReleaseHookFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    $"F10 cursor release installed only {cursorHooks}; " +
+                    "the per-frame ClipCursor fallback remains active.");
+            }
             _ = ClipCursor(nint.Zero);
             ResetImGuiMouseState();
-            LogSafely("F10 settings opened; Win32, Raw Input, DirectInput keyboard and mouse are captured.");
+            LogSafely(
+                "F10 settings opened; the game cursor lock/recenter path is suspended and " +
+                "Win32, Raw Input, DirectInput keyboard and mouse are captured.");
             return;
         }
 
+        _ = DxgiPresentBridge.SetCursorReleaseActive(false);
         _setLocalSelfTestRequested(false);
         _audioSettings?.FlushPendingLevelSave();
         _mouseInteractionGate.Close();
         PersistEditedChatLayout();
         _editedChatRect = null;
         MouseButtonStateTracker.Reset();
-        ReleaseCapture();
+        RestoreMouseCapture();
         LogSafely("F10 settings closed; held DirectInput keys and mouse buttons will drain before release.");
+    }
+
+    private void BeginReleasedMouse()
+    {
+        _hasSavedClipRect = GetClipCursor(out _savedClipRect);
+        _savedCaptureWindow = GetCapture();
+        if (_savedCaptureWindow != nint.Zero)
+            ReleaseCapture();
+        _ = ClipCursor(nint.Zero);
+    }
+
+    private void RestoreMouseCapture()
+    {
+        ReleaseCapture();
+        if (_hasSavedClipRect)
+            _ = ClipCursorRect(ref _savedClipRect);
+        if (_savedCaptureWindow != nint.Zero && IsWindow(_savedCaptureWindow))
+            _ = SetCapture(_savedCaptureWindow);
+        var gameWindow = ImguiHook.WindowHandle;
+        if (gameWindow != nint.Zero && IsWindow(gameWindow))
+            _ = SetForegroundWindow(gameWindow);
+        _hasSavedClipRect = false;
+        _savedCaptureWindow = nint.Zero;
     }
 
     private void PersistEditedChatLayout()
@@ -1379,6 +1420,38 @@ public sealed class ChatOverlayHost
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        internal int Left;
+        internal int Top;
+        internal int Right;
+        internal int Bottom;
+    }
+
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClipCursor(out NativeRect rectangle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ClipCursor(nint rectangle);
+
+    [DllImport("user32.dll", EntryPoint = "ClipCursor")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ClipCursorRect(ref NativeRect rectangle);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetCapture();
+
+    [DllImport("user32.dll")]
+    private static extern nint SetCapture(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(nint window);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(nint window);
 }

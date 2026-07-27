@@ -32,6 +32,11 @@ public sealed class DxgiPresentBridgeTests
                     handle,
                     "GBFRChatOverlay_ResolveHookChainTarget",
                     out _));
+            Assert.True(
+                NativeLibrary.TryGetExport(
+                    handle,
+                    "GBFRChatOverlay_SetCursorReleaseActive",
+                    out _));
         }
         finally
         {

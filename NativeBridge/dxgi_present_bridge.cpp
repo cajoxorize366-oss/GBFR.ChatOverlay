@@ -2,16 +2,35 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 namespace
 {
 using DxgiPresentFn = int32_t(__stdcall*)(void*, uint32_t, uint32_t);
+using GetCursorPosFn = BOOL(WINAPI*)(LPPOINT);
+using SetCursorPosFn = BOOL(WINAPI*)(int, int);
+using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
 
 constexpr int32_t kEPointer = static_cast<int32_t>(0x80004003u);
 constexpr int32_t kEFail = static_cast<int32_t>(0x80004005u);
 constexpr uint32_t kMaxSupportedJumpCount = 32;
+constexpr uint32_t kCursorHookGetPosition = 1u << 0;
+constexpr uint32_t kCursorHookSetPosition = 1u << 1;
+constexpr uint32_t kCursorHookClip = 1u << 2;
+constexpr uint32_t kCursorHookAll =
+    kCursorHookGetPosition | kCursorHookSetPosition | kCursorHookClip;
+
+std::atomic_bool g_cursorReleaseActive{false};
+std::mutex g_cursorHookMutex;
+bool g_cursorHookInstallAttempted = false;
+uint32_t g_cursorHookMask = 0;
+POINT g_frozenCursorPosition{};
+GetCursorPosFn g_originalGetCursorPos = nullptr;
+SetCursorPosFn g_originalSetCursorPos = nullptr;
+ClipCursorFn g_originalClipCursor = nullptr;
 
 enum class ResolveStatus : uint32_t
 {
@@ -31,6 +50,174 @@ enum class JumpDecodeResult
     Invalid,
     Unsupported,
 };
+
+bool PatchMainModuleImport(
+    const char* moduleName,
+    const char* functionName,
+    void* replacement,
+    void*& original) noexcept
+{
+    original = nullptr;
+    const auto imageBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (imageBase == 0 || moduleName == nullptr || functionName == nullptr ||
+        replacement == nullptr)
+    {
+        return false;
+    }
+
+    __try
+    {
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(imageBase);
+        if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+            return false;
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+            imageBase + static_cast<uintptr_t>(dos->e_lfanew));
+        if (nt->Signature != IMAGE_NT_SIGNATURE)
+            return false;
+        const IMAGE_DATA_DIRECTORY& directory =
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (directory.VirtualAddress == 0 ||
+            directory.Size < sizeof(IMAGE_IMPORT_DESCRIPTOR))
+        {
+            return false;
+        }
+
+        auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+            imageBase + directory.VirtualAddress);
+        for (; descriptor->Name != 0; ++descriptor)
+        {
+            const char* importedModule = reinterpret_cast<const char*>(
+                imageBase + descriptor->Name);
+            if (_stricmp(importedModule, moduleName) != 0)
+                continue;
+
+            auto* firstThunk = reinterpret_cast<IMAGE_THUNK_DATA64*>(
+                imageBase + descriptor->FirstThunk);
+            auto* nameThunk = descriptor->OriginalFirstThunk != 0
+                ? reinterpret_cast<IMAGE_THUNK_DATA64*>(
+                    imageBase + descriptor->OriginalFirstThunk)
+                : firstThunk;
+            for (; nameThunk->u1.AddressOfData != 0; ++nameThunk, ++firstThunk)
+            {
+                if (IMAGE_SNAP_BY_ORDINAL64(nameThunk->u1.Ordinal))
+                    continue;
+                const auto* import = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+                    imageBase + nameThunk->u1.AddressOfData);
+                if (std::strcmp(
+                        reinterpret_cast<const char*>(import->Name),
+                        functionName) != 0)
+                {
+                    continue;
+                }
+
+                auto** slot = reinterpret_cast<void**>(&firstThunk->u1.Function);
+                DWORD oldProtection = 0;
+                if (!VirtualProtect(
+                        slot,
+                        sizeof(void*),
+                        PAGE_READWRITE,
+                        &oldProtection))
+                {
+                    return false;
+                }
+                original = InterlockedExchangePointer(
+                    reinterpret_cast<void* volatile*>(slot),
+                    replacement);
+                DWORD ignored = 0;
+                const bool restored = VirtualProtect(
+                    slot,
+                    sizeof(void*),
+                    oldProtection,
+                    &ignored) != FALSE;
+                return restored && original != nullptr;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        original = nullptr;
+        return false;
+    }
+    return false;
+}
+
+BOOL WINAPI GetCursorPosDetour(LPPOINT point)
+{
+    if (g_cursorReleaseActive.load(std::memory_order_acquire))
+    {
+        if (point != nullptr)
+            *point = g_frozenCursorPosition;
+        return TRUE;
+    }
+    return g_originalGetCursorPos != nullptr
+        ? g_originalGetCursorPos(point)
+        : FALSE;
+}
+
+BOOL WINAPI SetCursorPosDetour(int x, int y)
+{
+    if (g_cursorReleaseActive.load(std::memory_order_acquire))
+        return TRUE;
+    return g_originalSetCursorPos != nullptr
+        ? g_originalSetCursorPos(x, y)
+        : FALSE;
+}
+
+BOOL WINAPI ClipCursorDetour(const RECT* rectangle)
+{
+    if (g_cursorReleaseActive.load(std::memory_order_acquire))
+    {
+        if (g_originalClipCursor != nullptr)
+            (void)g_originalClipCursor(nullptr);
+        return TRUE;
+    }
+    return g_originalClipCursor != nullptr
+        ? g_originalClipCursor(rectangle)
+        : FALSE;
+}
+
+uint32_t InstallCursorHooks() noexcept
+{
+    std::scoped_lock lock(g_cursorHookMutex);
+    if (g_cursorHookInstallAttempted)
+        return g_cursorHookMask;
+    g_cursorHookInstallAttempted = true;
+
+    void* original = nullptr;
+    if (PatchMainModuleImport(
+            "USER32.dll",
+            "GetCursorPos",
+            reinterpret_cast<void*>(&GetCursorPosDetour),
+            original))
+    {
+        g_originalGetCursorPos = reinterpret_cast<GetCursorPosFn>(original);
+        g_cursorHookMask |= kCursorHookGetPosition;
+    }
+
+    original = nullptr;
+    if (PatchMainModuleImport(
+            "USER32.dll",
+            "SetCursorPos",
+            reinterpret_cast<void*>(&SetCursorPosDetour),
+            original))
+    {
+        g_originalSetCursorPos = reinterpret_cast<SetCursorPosFn>(original);
+        g_cursorHookMask |= kCursorHookSetPosition;
+    }
+
+    original = nullptr;
+    if (PatchMainModuleImport(
+            "USER32.dll",
+            "ClipCursor",
+            reinterpret_cast<void*>(&ClipCursorDetour),
+            original))
+    {
+        g_originalClipCursor = reinterpret_cast<ClipCursorFn>(original);
+        g_cursorHookMask |= kCursorHookClip;
+    }
+
+    return g_cursorHookMask;
+}
 
 bool IsReadableProtection(DWORD protection) noexcept
 {
@@ -413,6 +600,26 @@ GBFRChatOverlay_ResolveHookChainTarget(
         current = next;
         ++jumpCount;
     }
+}
+
+extern "C" __declspec(dllexport) int32_t __cdecl
+GBFRChatOverlay_SetCursorReleaseActive(int32_t requested)
+{
+    if (requested == 0)
+    {
+        g_cursorReleaseActive.store(false, std::memory_order_release);
+        return static_cast<int32_t>(g_cursorHookMask);
+    }
+
+    const uint32_t hookMask = InstallCursorHooks();
+    if (g_originalGetCursorPos != nullptr)
+        (void)g_originalGetCursorPos(&g_frozenCursorPosition);
+    else
+        (void)GetCursorPos(&g_frozenCursorPosition);
+    g_cursorReleaseActive.store(true, std::memory_order_release);
+    if ((hookMask & kCursorHookClip) != 0 && g_originalClipCursor != nullptr)
+        (void)g_originalClipCursor(nullptr);
+    return static_cast<int32_t>(hookMask & kCursorHookAll);
 }
 
 extern "C" __declspec(dllexport) int32_t __cdecl

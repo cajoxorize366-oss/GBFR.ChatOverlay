@@ -27,6 +27,16 @@ internal static class DxgiPresentBridge
         UnsupportedJump = 6,
     }
 
+    [Flags]
+    internal enum CursorReleaseHook : int
+    {
+        None = 0,
+        GetPosition = 1 << 0,
+        SetPosition = 1 << 1,
+        Clip = 1 << 2,
+        All = GetPosition | SetPosition | Clip,
+    }
+
     internal static void Configure(string modDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modDirectory);
@@ -74,6 +84,9 @@ internal static class DxgiPresentBridge
             out jumpCount,
             out status);
 
+    internal static CursorReleaseHook SetCursorReleaseActive(bool active) =>
+        (CursorReleaseHook)GBFRChatOverlay_SetCursorReleaseActive(active ? 1 : 0);
+
     private static nint ResolveLibrary(
         string libraryName,
         Assembly assembly,
@@ -108,4 +121,7 @@ internal static class DxgiPresentBridge
         uint maxJumpCount,
         out uint jumpCount,
         out HookChainResolveStatus status);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    private static extern int GBFRChatOverlay_SetCursorReleaseActive(int requested);
 }

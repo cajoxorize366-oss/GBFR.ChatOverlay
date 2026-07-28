@@ -1,6 +1,6 @@
 # Relink 2.0.2 smoke test
 
-The current build is automatically copied to the Reloaded-II Mods directory, but it must be enabled for the Granblue Fantasy: Relink profile before launch.
+A developer build is copied to the directory selected by `RELOADEDIIMODS`; a packaged build stays isolated and must be imported and enabled for the Granblue Fantasy: Relink profile before launch.
 
 ## Expected startup log
 
@@ -14,19 +14,18 @@ The Reloaded-II log should contain messages equivalent to:
 [gbfr.qol.chatoverlay] Relink 2.0.2 native chat bridge attached: send=..., receive=....
 [gbfr.qol.chatoverlay] Relink incoming player-name resolver attached: senderSlot=..., memberLookup=...; empty RPC sender labels now use the verified four-slot lobby member table.
 [gbfr.qol.chatoverlay] Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
-[gbfr.qol.chatoverlay] DirectInput8 keyboard interception initialized.
+[gbfr.qol.chatoverlay] Startup phase=directinput-broker-hooks state=complete elapsed_ms=....
+[gbfr.qol.chatoverlay] DirectInput keyboard/mouse interception initialized through the game-local IAT broker; the dinput8/ReShade export entry was not modified and controllers remain pass-through.
 [gbfr.qol.chatoverlay] CJK font loaded before DX11 hook initialization: ..., 9 glyph ranges.
 [gbfr.qol.chatoverlay] DX11 Present-only backend enabled with a native original-Present boundary; frame-local render targets replace the ResizeBuffers hook.
 [gbfr.qol.chatoverlay] DirectX 11 ImGui hook initialized with the Extra Sigil Present-only hook-chain and native SEH compatibility path.
-[gbfr.qol.chatoverlay] IDirectInput8::CreateDevice hooked (...).
-[gbfr.qol.chatoverlay] DirectInput system keyboard device detected.
-[gbfr.qol.chatoverlay] IDirectInputDevice8::GetDeviceState hooked.
+[gbfr.qol.chatoverlay] DirectInput broker readiness: iat=True, factory=True, keyboard=True, mouse=True, controllers=pass-through.
 [gbfr.qol.chatoverlay] First Direct3D11 Present callback: OS TID ....
 ```
 
 `source=asi-bootstrapper` is the expected alternative when using the official Deploy ASI Loader. `source=unknown` must be preserved with its evidence string because it can identify a duplicate or conflicting injection path. The `relink-executable-sha256` and `partywin-sha256` begin/complete lines may appear later; both must state `diagnostic_only=true` and must never delay the hook phases above.
 
-The `CreateDevice`, keyboard-device and `GetDeviceState` lines appear only after the game initializes DirectInput.
+The readiness line may transition through `factory=False`, `keyboard=False` or `mouse=False`; the final keyboard/mouse flags appear only after the game creates and polls those DirectInput devices. No line should report patching the `dinput8.dll` export itself.
 
 The ImGui backend and Relink's native chat manager may both initialize before an online room exists. They are not room-readiness signals. The Overlay itself and its `Y/U/I` interception must remain inactive on the title, save-selection, loading and solo-town flows. It opens only after Relink authenticates the local user on an existing PartyNetwork and successfully creates the matching local gameplay endpoint. A host does not need to wait for a remote player. The log should then contain exactly one transition line:
 
@@ -101,7 +100,7 @@ This preview replaces the stock Reloaded DX11 implementation with the Present-on
 - If the log reaches `[WndProcHook]` but not `First Direct3D11 Present callback`, collect the Windows Application Error/WER entry. That boundary distinguishes native backend or WndProc initialization from managed Overlay rendering.
 - If `Render callback recovered from an exception` appears, preserve the complete line. The callback guard released chat input capture, but the visual Overlay is degraded for that session.
 - Do not mix individual DLLs from older packages. `GBFR.ChatOverlay.Native.dll`, `GBFR.ChatOverlay.dll` and the remaining dependencies must come from the same archive. The current backend ports Extra Sigil's Present-only hook-chain/SEH boundary while retaining the prebuilt pinned CJK atlas and cached ANSI/Unicode WndProc fallback.
-- If the Overlay renders but controls still respond, preserve the three DirectInput log lines; their presence distinguishes a state-filter bug from a missed hook.
+- If the Overlay renders but controls still respond, preserve the `directinput-broker-hooks` phase and every DirectInput broker readiness transition; they distinguish policy/filter bugs from a missed game-local IAT or device-method hook.
 - If Chinese characters render as boxes, record the `CJK font loaded before DX11 hook initialization` line and Windows display language. If they become Latin-1 text such as `ÎÒ`, preserve the new `Win32 IME compatibility active` line, input-method name and complete Reloaded-II log.
 - If composition text appears but the in-overlay candidate row does not, preserve either `candidate notification did not expose a readable IMM32 list` or `composition ended without an IMM32 candidate list`. Their presence distinguishes an IMM32 parsing error from a TSF/Qt-only input method.
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.

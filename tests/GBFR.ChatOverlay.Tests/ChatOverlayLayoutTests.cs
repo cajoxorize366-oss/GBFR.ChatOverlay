@@ -8,7 +8,7 @@ public sealed class ChatOverlayLayoutTests
     [Fact]
     public void CalculateHistoryChildHeight_UsesBaseComposerReserveWithoutCandidates()
     {
-        Assert.Equal(-58.0f, ChatOverlayHost.CalculateHistoryChildHeight(true, 0.0f));
+        Assert.Equal(-58.0f, ChatOverlayPeer.CalculateHistoryChildHeight(true, 0.0f));
     }
 
     [Theory]
@@ -18,7 +18,7 @@ public sealed class ChatOverlayLayoutTests
         float candidateHeight,
         float expected)
     {
-        Assert.Equal(expected, ChatOverlayHost.CalculateHistoryChildHeight(true, candidateHeight));
+        Assert.Equal(expected, ChatOverlayPeer.CalculateHistoryChildHeight(true, candidateHeight));
     }
 
     [Theory]
@@ -27,13 +27,13 @@ public sealed class ChatOverlayLayoutTests
     [InlineData(float.PositiveInfinity)]
     public void CalculateHistoryChildHeight_IgnoresInvalidCandidateHeight(float candidateHeight)
     {
-        Assert.Equal(-58.0f, ChatOverlayHost.CalculateHistoryChildHeight(true, candidateHeight));
+        Assert.Equal(-58.0f, ChatOverlayPeer.CalculateHistoryChildHeight(true, candidateHeight));
     }
 
     [Fact]
     public void CalculateHistoryChildHeight_DoesNotReserveComposerSpaceWhenClosed()
     {
-        Assert.Equal(0.0f, ChatOverlayHost.CalculateHistoryChildHeight(false, 40.0f));
+        Assert.Equal(0.0f, ChatOverlayPeer.CalculateHistoryChildHeight(false, 40.0f));
     }
 
     [Fact]

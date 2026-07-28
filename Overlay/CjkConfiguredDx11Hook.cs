@@ -21,10 +21,20 @@ internal sealed unsafe class CjkConfiguredDx11Hook : IImguiHook
     private ImFont? _font;
     private bool _disposed;
 
-    internal CjkConfiguredDx11Hook(Action<string> log, Action onPermanentFailure)
+    internal CjkConfiguredDx11Hook(
+        Action presentTick,
+        Func<bool> shouldRenderFrontend,
+        Action<string> log,
+        Action onPermanentFailure)
     {
+        ArgumentNullException.ThrowIfNull(presentTick);
+        ArgumentNullException.ThrowIfNull(shouldRenderFrontend);
         _log = log ?? throw new ArgumentNullException(nameof(log));
-        _inner = new RtssSafeImguiHookDx11(_log, onPermanentFailure);
+        _inner = new RtssSafeImguiHookDx11(
+            presentTick,
+            shouldRenderFrontend,
+            _log,
+            onPermanentFailure);
     }
 
     public bool IsApiSupported() => _inner.IsApiSupported();

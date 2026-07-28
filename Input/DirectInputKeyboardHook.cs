@@ -1,53 +1,73 @@
-using System.Runtime.InteropServices;
-using Reloaded.Hooks.Definitions;
-using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
+using GBFR.ChatOverlay.Native;
 
 namespace GBFR.ChatOverlay.Input;
 
 /// <summary>
-/// Observes DirectInput keyboard and mouse state while chat/settings own input. The original calls
-/// still run so acquisition stays healthy; menu close drains held keys/buttons before control
-/// returns to the game.
+/// Translates the native DirectInput broker's atomic state into chat/settings/voice actions. The
+/// native hook never calls managed code; this object is polled by the existing ImGui Present
+/// callback and only processes a keyboard snapshot when its sequence changes.
 /// </summary>
-public sealed unsafe class DirectInputKeyboardHook
+public sealed class DirectInputKeyboardHook : IDisposable
 {
-    private const int CreateDeviceVtableIndex = 3;
-    private const int GetDeviceStateVtableIndex = 9;
-    private const int GetDeviceDataVtableIndex = 10;
-    private const int MaximumReasonableStateSize = 4_096;
-    private const uint DigddPeek = 0x00000001;
+    private const int KeyboardStateSize = 256;
 
-    private static readonly Guid SystemKeyboardGuid =
-        new(0x6F1D2B61, 0xD5A0, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
-    private static readonly Guid SystemMouseGuid =
-        new(0x6F1D2B60, 0xD5A0, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
-
-    private readonly ReloadedHooksApi _hooks;
+    private readonly IDirectInputBrokerBackend _backend;
+    private readonly Func<bool> _canActivate;
     private readonly Func<bool> _tryActivate;
     private readonly Func<bool> _shouldCapture;
+    private readonly Func<bool> _shouldCaptureMouse;
     private readonly Func<bool> _isVoicePushToTalkEnabled;
     private readonly Func<bool> _isSettingsMenuAvailable;
     private readonly Action<bool> _reportSettingsMenuKey;
     private readonly Action<string> _log;
     private readonly DirectInputKeyboardStateFilter _keyboardStateFilter = new();
-    private readonly DirectInputMouseStateFilter _mouseStateFilter = new();
     private readonly VoicePushToTalkSafetyGate _voicePushToTalkGate;
     private readonly VoiceInputModeCoordinator _voiceInputModeCoordinator;
-    private readonly object _hookSync = new();
+    private readonly object _lifecycleSync = new();
 
-    private IHook<DirectInput8CreateDelegate>? _directInputCreateHook;
-    private IHook<CreateDeviceDelegate>? _createDeviceHook;
-    private IHook<GetDeviceStateDelegate>? _getDeviceStateHook;
-    private IHook<GetDeviceDataDelegate>? _getDeviceDataHook;
-    private nint _keyboardDevice;
-    private nint _mouseDevice;
-    private bool _initialized;
-    private int _filterFailureLogged;
+    private DirectInputBrokerPolicy _lastPolicy = unchecked((DirectInputBrokerPolicy)uint.MaxValue);
+    private DirectInputBrokerReadiness _lastReadiness =
+        unchecked((DirectInputBrokerReadiness)uint.MaxValue);
+    private ulong _lastSequence = ulong.MaxValue;
+    private int _initialized;
+    private int _suspended;
+    private int _disposed;
+    private int _brokerFailureLogged;
 
     public DirectInputKeyboardHook(
-        ReloadedHooksApi hooks,
+        Func<bool> canActivate,
         Func<bool> tryActivate,
         Func<bool> shouldCapture,
+        Func<bool> shouldCaptureMouse,
+        Func<bool> isVoicePushToTalkEnabled,
+        Action<bool> setVoicePushToTalkPressed,
+        Action requestVoiceDiagnosticSample,
+        Func<bool> isSettingsMenuAvailable,
+        Action<bool> reportSettingsMenuKey,
+        Action<bool> setLocalMicrophoneMonitorPressed,
+        Action<string> log)
+        : this(
+            DirectInputBrokerBridge.Instance,
+            canActivate,
+            tryActivate,
+            shouldCapture,
+            shouldCaptureMouse,
+            isVoicePushToTalkEnabled,
+            setVoicePushToTalkPressed,
+            requestVoiceDiagnosticSample,
+            isSettingsMenuAvailable,
+            reportSettingsMenuKey,
+            setLocalMicrophoneMonitorPressed,
+            log)
+    {
+    }
+
+    internal DirectInputKeyboardHook(
+        IDirectInputBrokerBackend backend,
+        Func<bool> canActivate,
+        Func<bool> tryActivate,
+        Func<bool> shouldCapture,
+        Func<bool> shouldCaptureMouse,
         Func<bool> isVoicePushToTalkEnabled,
         Action<bool> setVoicePushToTalkPressed,
         Action requestVoiceDiagnosticSample,
@@ -56,9 +76,12 @@ public sealed unsafe class DirectInputKeyboardHook
         Action<bool> setLocalMicrophoneMonitorPressed,
         Action<string> log)
     {
-        _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
+        _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        _canActivate = canActivate ?? throw new ArgumentNullException(nameof(canActivate));
         _tryActivate = tryActivate ?? throw new ArgumentNullException(nameof(tryActivate));
         _shouldCapture = shouldCapture ?? throw new ArgumentNullException(nameof(shouldCapture));
+        _shouldCaptureMouse = shouldCaptureMouse ??
+            throw new ArgumentNullException(nameof(shouldCaptureMouse));
         _isVoicePushToTalkEnabled = isVoicePushToTalkEnabled ??
             throw new ArgumentNullException(nameof(isVoicePushToTalkEnabled));
         _isSettingsMenuAvailable = isSettingsMenuAvailable ??
@@ -78,35 +101,153 @@ public sealed unsafe class DirectInputKeyboardHook
 
     public void Initialize()
     {
-        if (_initialized)
-            return;
+        lock (_lifecycleSync)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            if (Interlocked.CompareExchange(ref _initialized, 1, 0) != 0)
+                return;
 
-        var module = NativeLibrary.Load("dinput8.dll");
-        var export = NativeLibrary.GetExport(module, "DirectInput8Create");
-        _directInputCreateHook = _hooks
-            .CreateHook<DirectInput8CreateDelegate>(DirectInput8Create, export)
-            .Activate();
-        _initialized = true;
-        _log("DirectInput8 keyboard and mouse interception initialized.");
+            try
+            {
+                if (!_backend.Install())
+                    throw new InvalidOperationException("The game-local DirectInput8 import could not be patched.");
+                if (!_backend.SetActive(true))
+                    throw new InvalidOperationException("The DirectInput broker could not be activated.");
+
+                Volatile.Write(ref _suspended, 0);
+                _lastPolicy = unchecked((DirectInputBrokerPolicy)uint.MaxValue);
+                _lastReadiness = unchecked((DirectInputBrokerReadiness)uint.MaxValue);
+                _lastSequence = ulong.MaxValue;
+                _log(
+                    "DirectInput keyboard/mouse interception initialized through the game-local IAT " +
+                    "broker; the dinput8/ReShade export entry was not modified and controllers remain pass-through.");
+            }
+            catch
+            {
+                TryFailOpenNativeBroker();
+                Volatile.Write(ref _initialized, 0);
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Synchronizes policy and consumes changed key snapshots. This performs no scans and starts no
+    /// polling thread; it is called from the already-existing ImGui Present callback.
+    /// </summary>
+    public void Poll()
+    {
+        lock (_lifecycleSync)
+        {
+            if (Volatile.Read(ref _initialized) == 0 ||
+                Volatile.Read(ref _suspended) != 0 ||
+                Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                var captureKeyboard = _shouldCapture();
+                var captureMouse = _shouldCaptureMouse();
+                var canActivate = _canActivate();
+                var settingsAvailable = _isSettingsMenuAvailable();
+                var voicePushToTalkEnabled = _isVoicePushToTalkEnabled();
+                var policy = BuildPolicy(
+                    captureKeyboard,
+                    captureMouse,
+                    canActivate,
+                    settingsAvailable,
+                    voicePushToTalkEnabled);
+
+                if (policy != _lastPolicy)
+                {
+                    if (!_backend.SetPolicy(policy))
+                        throw new InvalidOperationException("The DirectInput broker rejected its input policy.");
+                    _lastPolicy = policy;
+                }
+
+                if (captureKeyboard || !voicePushToTalkEnabled)
+                    _voicePushToTalkGate.Report(false);
+
+                if (!_backend.TryGetSnapshot(out var snapshot))
+                    throw new InvalidOperationException("The DirectInput broker snapshot could not be read.");
+                if (!snapshot.HasExpectedLayout)
+                {
+                    throw new InvalidOperationException(
+                        $"DirectInput broker ABI mismatch: native={snapshot.AbiVersion}/{snapshot.StructSize}, " +
+                        $"managed={DirectInputBrokerSnapshot.ExpectedAbiVersion}/" +
+                        $"{DirectInputBrokerSnapshot.ExpectedStructSize}.");
+                }
+
+                LogReadinessTransition(snapshot.Readiness);
+                if (snapshot.Sequence == _lastSequence)
+                    return;
+                _lastSequence = snapshot.Sequence;
+
+                Span<byte> keyboardState = stackalloc byte[KeyboardStateSize];
+                SetTrackedKey(
+                    keyboardState,
+                    DirectInputKeyboardStateFilter.ActivationScanCode,
+                    (snapshot.Keys & DirectInputBrokerKeys.Activation) != 0);
+                SetTrackedKey(
+                    keyboardState,
+                    DirectInputKeyboardStateFilter.SettingsMenuScanCode,
+                    (snapshot.Keys & DirectInputBrokerKeys.Settings) != 0);
+                SetTrackedKey(
+                    keyboardState,
+                    DirectInputKeyboardStateFilter.VoicePushToTalkScanCode,
+                    (snapshot.Keys & DirectInputBrokerKeys.PushToTalk) != 0);
+
+                _keyboardStateFilter.Process(
+                    keyboardState,
+                    _tryActivate,
+                    _shouldCapture,
+                    () => voicePushToTalkEnabled,
+                    _voicePushToTalkGate.Report,
+                    () => settingsAvailable,
+                    _reportSettingsMenuKey);
+            }
+            catch (Exception exception)
+            {
+                FailOpen(exception);
+            }
+        }
     }
 
     public void Suspend()
     {
-        _getDeviceDataHook?.Disable();
-        _getDeviceStateHook?.Disable();
-        _createDeviceHook?.Disable();
-        _directInputCreateHook?.Disable();
-        _voicePushToTalkGate.Suspend();
-        _voiceInputModeCoordinator.ReportLocalMonitor(false);
+        lock (_lifecycleSync)
+        {
+            Interlocked.Exchange(ref _suspended, 1);
+            if (Volatile.Read(ref _initialized) != 0)
+                TryFailOpenNativeBroker();
+            _voicePushToTalkGate.Suspend();
+            _voiceInputModeCoordinator.ReportLocalMonitor(false);
+        }
     }
 
     public void Resume()
     {
-        _voicePushToTalkGate.Resume();
-        _directInputCreateHook?.Enable();
-        _createDeviceHook?.Enable();
-        _getDeviceStateHook?.Enable();
-        _getDeviceDataHook?.Enable();
+        lock (_lifecycleSync)
+        {
+            if (Volatile.Read(ref _initialized) == 0 || Volatile.Read(ref _disposed) != 0)
+                return;
+
+            try
+            {
+                if (!_backend.SetActive(true))
+                    throw new InvalidOperationException("The DirectInput broker could not be resumed.");
+                _lastPolicy = unchecked((DirectInputBrokerPolicy)uint.MaxValue);
+                _lastSequence = ulong.MaxValue;
+                _voicePushToTalkGate.Resume();
+                Volatile.Write(ref _suspended, 0);
+            }
+            catch (Exception exception)
+            {
+                FailOpen(exception);
+            }
+        }
     }
 
     public void SetLocalMicrophoneMonitorPressed(bool pressed) =>
@@ -118,168 +259,90 @@ public sealed unsafe class DirectInputKeyboardHook
         _voiceInputModeCoordinator.ReportLocalMonitor(false);
     }
 
-    private int DirectInput8Create(
-        nint instance,
-        uint version,
-        nint interfaceId,
-        nint output,
-        nint outer)
+    public void Dispose()
     {
-        var result = _directInputCreateHook!.OriginalFunction(
-            instance,
-            version,
-            interfaceId,
-            output,
-            outer);
-
-        if (result < 0 || output == nint.Zero || *(nint*)output == nint.Zero)
-            return result;
-
-        lock (_hookSync)
-        {
-            if (_createDeviceHook is null)
-            {
-                var directInput = *(nint*)output;
-                var function = GetVtableFunction(directInput, CreateDeviceVtableIndex);
-                _createDeviceHook = _hooks
-                    .CreateHook<CreateDeviceDelegate>(CreateDevice, function)
-                    .Activate();
-                _log($"IDirectInput8::CreateDevice hooked (DirectInput {version:X4}).");
-            }
-        }
-
-        return result;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        Suspend();
+        _voicePushToTalkGate.Dispose();
     }
 
-    private int CreateDevice(nint self, nint deviceGuid, nint output, nint outer)
+    private static DirectInputBrokerPolicy BuildPolicy(
+        bool captureKeyboard,
+        bool captureMouse,
+        bool canActivate,
+        bool settingsAvailable,
+        bool voicePushToTalkEnabled)
     {
-        var result = _createDeviceHook!.OriginalFunction(self, deviceGuid, output, outer);
-        if (result < 0 || deviceGuid == nint.Zero || output == nint.Zero || *(nint*)output == nint.Zero)
-            return result;
-
-        var device = *(nint*)output;
-        var guid = *(Guid*)deviceGuid;
-        if (guid == SystemKeyboardGuid)
-        {
-            Volatile.Write(ref _keyboardDevice, device);
-            _log("DirectInput system keyboard device detected.");
-        }
-        else if (guid == SystemMouseGuid)
-        {
-            Volatile.Write(ref _mouseDevice, device);
-            _log("DirectInput system mouse device detected.");
-        }
-
-        lock (_hookSync)
-        {
-            if (_getDeviceStateHook is null)
-            {
-                var function = GetVtableFunction(device, GetDeviceStateVtableIndex);
-                _getDeviceStateHook = _hooks
-                    .CreateHook<GetDeviceStateDelegate>(GetDeviceState, function)
-                    .Activate();
-                _log("IDirectInputDevice8::GetDeviceState hooked.");
-            }
-
-            if (_getDeviceDataHook is null)
-            {
-                var function = GetVtableFunction(device, GetDeviceDataVtableIndex);
-                _getDeviceDataHook = _hooks
-                    .CreateHook<GetDeviceDataDelegate>(GetDeviceData, function)
-                    .Activate();
-                _log("IDirectInputDevice8::GetDeviceData hooked.");
-            }
-        }
-
-        return result;
+        var policy = DirectInputBrokerPolicy.None;
+        if (captureKeyboard)
+            policy |= DirectInputBrokerPolicy.CaptureKeyboard;
+        if (captureMouse)
+            policy |= DirectInputBrokerPolicy.CaptureMouse;
+        if (canActivate)
+            policy |= DirectInputBrokerPolicy.SuppressActivation;
+        if (settingsAvailable)
+            policy |= DirectInputBrokerPolicy.SuppressSettings;
+        if (voicePushToTalkEnabled)
+            policy |= DirectInputBrokerPolicy.SuppressPushToTalk;
+        return policy;
     }
 
-    private int GetDeviceState(nint self, int byteCount, nint state)
+    private static void SetTrackedKey(Span<byte> keyboardState, int scanCode, bool pressed)
     {
-        var result = _getDeviceStateHook!.OriginalFunction(self, byteCount, state);
-        if (result < 0 || state == nint.Zero || byteCount <= 0 || byteCount > MaximumReasonableStateSize)
-            return result;
+        if (pressed)
+            keyboardState[scanCode] = 0x80;
+    }
+
+    private void LogReadinessTransition(DirectInputBrokerReadiness readiness)
+    {
+        if (readiness == _lastReadiness)
+            return;
+        _lastReadiness = readiness;
+        _log(
+            $"DirectInput broker readiness: iat={HasFlag(readiness, DirectInputBrokerReadiness.GameImport)}, " +
+            $"factory={HasFlag(readiness, DirectInputBrokerReadiness.Factory)}, " +
+            $"keyboard={HasFlag(readiness, DirectInputBrokerReadiness.Keyboard)}, " +
+            $"mouse={HasFlag(readiness, DirectInputBrokerReadiness.Mouse)}, controllers=pass-through.");
+    }
+
+    private static bool HasFlag(
+        DirectInputBrokerReadiness value,
+        DirectInputBrokerReadiness flag) =>
+        (value & flag) != 0;
+
+    private void FailOpen(Exception exception)
+    {
+        Interlocked.Exchange(ref _suspended, 1);
+        TryFailOpenNativeBroker();
+        _voicePushToTalkGate.Suspend();
+        _voiceInputModeCoordinator.ReportLocalMonitor(false);
+        if (Interlocked.Exchange(ref _brokerFailureLogged, 1) == 0)
+        {
+            _log(
+                "DirectInput broker synchronization failed; keyboard/mouse interception was " +
+                $"released fail-open and further errors are suppressed: {exception}");
+        }
+    }
+
+    private void TryFailOpenNativeBroker()
+    {
+        try
+        {
+            _ = _backend.SetPolicy(DirectInputBrokerPolicy.None);
+        }
+        catch
+        {
+            // Best-effort release; SetActive(false) is still attempted below.
+        }
 
         try
         {
-            if (self == Volatile.Read(ref _keyboardDevice))
-            {
-                _keyboardStateFilter.Process(
-                    new Span<byte>((void*)state, byteCount),
-                    _tryActivate,
-                    _shouldCapture,
-                    _isVoicePushToTalkEnabled,
-                    _voicePushToTalkGate.Report,
-                    _isSettingsMenuAvailable,
-                    _reportSettingsMenuKey);
-            }
-            else if (self == Volatile.Read(ref _mouseDevice))
-            {
-                _mouseStateFilter.Process(
-                    new Span<byte>((void*)state, byteCount),
-                    _shouldCapture());
-            }
+            _ = _backend.SetActive(false);
         }
-        catch (Exception exception)
+        catch
         {
-            _voicePushToTalkGate.ForceMute();
-            _voiceInputModeCoordinator.ReportLocalMonitor(false);
-            if (Interlocked.Exchange(ref _filterFailureLogged, 1) == 0)
-            {
-                _log(
-                    "DirectInput filtering failed; push-to-talk was forced muted, local monitoring " +
-                    $"stopped, and further errors are suppressed: {exception.Message}");
-            }
+            // Native failures must never escape an input-release path.
         }
-        return result;
     }
-
-    private int GetDeviceData(
-        nint self,
-        int objectDataSize,
-        nint objectData,
-        nint objectCount,
-        uint flags)
-    {
-        var isMouse = self == Volatile.Read(ref _mouseDevice);
-        var suppress = isMouse && (_shouldCapture() || _mouseStateFilter.IsSuppressing);
-        var effectiveFlags = suppress ? flags & ~DigddPeek : flags;
-        var result = _getDeviceDataHook!.OriginalFunction(
-            self,
-            objectDataSize,
-            objectData,
-            objectCount,
-            effectiveFlags);
-        if (result >= 0 && suppress && objectCount != nint.Zero)
-            *(uint*)objectCount = 0;
-        return result;
-    }
-
-    private static nint GetVtableFunction(nint instance, int index)
-    {
-        var vtable = *(nint**)instance;
-        return vtable[index];
-    }
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int DirectInput8CreateDelegate(
-        nint instance,
-        uint version,
-        nint interfaceId,
-        nint output,
-        nint outer);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int CreateDeviceDelegate(nint self, nint deviceGuid, nint output, nint outer);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int GetDeviceStateDelegate(nint self, int byteCount, nint state);
-
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    private delegate int GetDeviceDataDelegate(
-        nint self,
-        int objectDataSize,
-        nint objectData,
-        nint objectCount,
-        uint flags);
 }

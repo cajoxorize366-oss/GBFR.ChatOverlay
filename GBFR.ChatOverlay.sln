@@ -11,6 +11,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{3F3CAFB8
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GBFR.ChatOverlay.Tests", "tests\GBFR.ChatOverlay.Tests\GBFR.ChatOverlay.Tests.csproj", "{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GBFR.OverlayHub.Contracts", "GBFR.OverlayHub.Contracts\GBFR.OverlayHub.Contracts.csproj", "{8CC4255F-F754-4444-BF06-CD353BDCD52D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -32,6 +34,10 @@ Global
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8CC4255F-F754-4444-BF06-CD353BDCD52D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8CC4255F-F754-4444-BF06-CD353BDCD52D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8CC4255F-F754-4444-BF06-CD353BDCD52D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8CC4255F-F754-4444-BF06-CD353BDCD52D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{52BFF82B-8039-4ED9-88B7-8D10789B7BD0} = {3F3CAFB8-9470-4E24-B56B-AC2369CB345E}

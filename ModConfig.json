@@ -14,9 +14,10 @@
   "ReleaseMetadataFileName": "GBFR.ChatOverlay.ReleaseMetadata.json",
   "PluginData": {},
   "CanUnload": false,
+  "HasExports": true,
   "IsUniversalMod": false,
   "ModDependencies": [ "reloaded.sharedlib.hooks" ],
-  "OptionalDependencies": [],
+  "OptionalDependencies": [ "GBFR.ExtraSigilSlots.Reloaded" ],
   "SupportedAppId": [ "granblue_fantasy_relink.exe" ],
   "ProjectUrl": ""
 }

@@ -34,6 +34,8 @@
     <None Remove="Reloaded.Trimming.targets" />
     <None Remove="Reloaded.Checks.targets" />
     <Compile Remove="ConfiguratorUI/**/*.cs" />
+    <Compile Remove="GBFR.OverlayHub.Contracts/**/*.cs" />
+    <Compile Remove="Publish/**/*.cs" />
     <Compile Remove="tests/**/*.cs" />
   </ItemGroup>
 
@@ -53,6 +55,12 @@
     <None Update="licenses/NAudio-LICENSE.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="licenses/SafetyHook-LICENSE.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="licenses/Zydis-LICENSE.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="NativeBridge/bin/Release/GBFR.ChatOverlay.Native.dll"
           Link="GBFR.ChatOverlay.Native.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -70,6 +78,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="GBFR.OverlayHub.Contracts/GBFR.OverlayHub.Contracts.csproj" />
     <ProjectReference Include="ConfiguratorUI/GBFR.ChatOverlay.ConfiguratorUI.csproj"
                       ReferenceOutputAssembly="false"
                       PrivateAssets="all" />

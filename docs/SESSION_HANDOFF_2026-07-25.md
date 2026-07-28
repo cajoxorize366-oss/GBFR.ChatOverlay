@@ -130,7 +130,7 @@ Mod.cs
 ├─ DirectInputKeyboardHook（Y/U/F10 + 键盘/鼠标完整捕获）
 ├─ RelinkPartyHudTracker（原生 HUD 行变换与 Full Chain 黑名单）
 ├─ DxgiPresentBridge（x64 跳板链解析与原始 Present SEH 边界）
-└─ ChatOverlayHost
+└─ ChatOverlayPeer
    ├─ 历史与输入框
    ├─ F10 语音设置与聊天框布局编辑
    ├─ 在线房间显示门控
@@ -154,7 +154,7 @@ Mod.cs
 | `Audio/LocalMicrophoneMonitor.cs` | `I` 本地监听 |
 | `Audio/VoiceInputModeCoordinator.cs` | `U/I` 互斥和抢占 |
 | `ConfiguratorUI/AudioEndpointPropertyEditors.cs` | Reloaded-II 麦克风/播放设备下拉列表 |
-| `Overlay/ChatOverlayHost.cs` | ImGui、输入捕获、IME WndProc、候选绘制 |
+| `Overlay/ChatOverlayPeer.cs` | ImGui、输入捕获、IME WndProc、候选绘制 |
 | `Overlay/RtssSafeImguiHookDx11.cs` | 因子槽来源的 Present-only/RTSS-safe DX11 后端 |
 | `Overlay/Win32ImeCompatibility.cs` | ANSI/Unicode、CP936/DBCS 和默认窗口过程 |
 | `Overlay/Win32ImeCandidateReader.cs` | IMM32 候选列表读取 |

@@ -1,4 +1,6 @@
 using GBFR.ChatOverlay.Input;
+using GBFR.OverlayHub.Contracts;
+using GBFR.OverlayHub.Runtime;
 
 namespace GBFR.ChatOverlay.Tests;
 
@@ -43,7 +45,7 @@ public sealed class DirectInputMouseStateFilterTests
     [InlineData(0x010F)]
     public void WindowClassifier_AlwaysCapturesKeyboardMouseAndIme(uint message)
     {
-        Assert.True(WindowInputClassifier.IsAlwaysCaptured(message));
+        Assert.True(OverlayWindowInputClassifier.IsAlwaysCaptured(message));
     }
 
     [Theory]
@@ -54,6 +56,48 @@ public sealed class DirectInputMouseStateFilterTests
     [InlineData(0x0319)]
     public void WindowClassifier_DoesNotCaptureUnrelatedWindowMessages(uint message)
     {
-        Assert.False(WindowInputClassifier.IsAlwaysCaptured(message));
+        Assert.False(OverlayWindowInputClassifier.IsAlwaysCaptured(message));
+    }
+
+    [Fact]
+    public void WindowClassifier_TextOnlyCapture_DoesNotSwallowMouseOrKeyState()
+    {
+        Assert.True(OverlayWindowInputClassifier.ShouldCapture(
+            0x0102,
+            nint.Zero,
+            OverlayInputDevices.Text));
+        Assert.True(OverlayWindowInputClassifier.ShouldCapture(
+            0x010F,
+            nint.Zero,
+            OverlayInputDevices.Text));
+        Assert.False(OverlayWindowInputClassifier.ShouldCapture(
+            0x0100,
+            nint.Zero,
+            OverlayInputDevices.Text));
+        Assert.False(OverlayWindowInputClassifier.ShouldCapture(
+            0x0201,
+            nint.Zero,
+            OverlayInputDevices.Text));
+    }
+
+    [Fact]
+    public void WindowClassifier_DeviceMasks_AreIndependent()
+    {
+        Assert.True(OverlayWindowInputClassifier.ShouldCapture(
+            0x0100,
+            nint.Zero,
+            OverlayInputDevices.Keyboard));
+        Assert.False(OverlayWindowInputClassifier.ShouldCapture(
+            0x0201,
+            nint.Zero,
+            OverlayInputDevices.Keyboard));
+        Assert.True(OverlayWindowInputClassifier.ShouldCapture(
+            0x0201,
+            nint.Zero,
+            OverlayInputDevices.Mouse));
+        Assert.False(OverlayWindowInputClassifier.ShouldCapture(
+            0x0100,
+            nint.Zero,
+            OverlayInputDevices.Mouse));
     }
 }

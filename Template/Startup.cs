@@ -8,10 +8,14 @@ using Reloaded.Mod.Interfaces;
 using Reloaded.Mod.Interfaces.Internal;
 using GBFR.ChatOverlay.Template.Configuration;
 using GBFR.ChatOverlay.Configuration;
+using GBFR.OverlayHub.Contracts;
+using GBFR.OverlayHub.Runtime;
+using GBFR.ChatOverlay.Native;
+using GBFR.ChatOverlay.Overlay;
 
 namespace GBFR.ChatOverlay.Template;
 
-public class Startup : IMod
+public class Startup : IMod, IExports
 {
     /// <summary>
     /// Used for writing text to the Reloaded log.
@@ -45,6 +49,8 @@ public class Startup : IMod
     /// Encapsulates your mod logic.
     /// </summary>
     private ModBase _mod = new Mod();
+    private bool _overlayHubControllerRegistered;
+    private OverlayBrokerHost? _overlayBrokerHost;
 
     /// <summary>
     /// Entry point for your mod.
@@ -67,6 +73,45 @@ public class Startup : IMod
 
         // Please put your mod code in the class below,
         // use this class for only interfacing with mod loader.
+        Action<string> moduleLog = message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+        var election = OverlayBrokerElectionService.Elect(
+            _modLoader,
+            this,
+            _modConfig.ModId,
+            moduleLog);
+        if (election.IsHost)
+        {
+            _overlayHubControllerRegistered = true;
+            if (_hooks is null)
+            {
+                election.HostControl!.MarkHostUnavailable("Reloaded.Hooks is unavailable");
+            }
+            else
+            {
+                try
+                {
+                    DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId));
+                    _ = DxgiPresentBridge.SetCursorReleaseActive(false);
+                    _overlayBrokerHost = new OverlayBrokerHost(
+                        election.HostControl!,
+                        moduleLog,
+                        setNativeCursorRelease: capture =>
+                        {
+                            var installed = DxgiPresentBridge.SetCursorReleaseActive(capture);
+                            if (capture && installed != DxgiPresentBridge.CursorReleaseHook.All)
+                                moduleLog($"Overlay Broker cursor release installed only {installed}.");
+                        });
+                    _ = InitializeBrokerAsync(_overlayBrokerHost, _hooks, moduleLog);
+                }
+                catch (Exception exception)
+                {
+                    election.HostControl!.MarkHostUnavailable(
+                        $"native graphics bridge initialization failed: {exception.GetType().Name}");
+                    moduleLog($"Overlay Broker bootstrap failed closed: {exception}");
+                }
+            }
+        }
+
         _mod = new Mod(new ModContext()
         {
             Logger = _logger,
@@ -76,7 +121,34 @@ public class Startup : IMod
             Owner = this,
             Configuration = _configuration,
             UpdateConfiguration = UpdateConfiguration,
+            OverlayHub = election.Hub,
+            OwnsOverlayBroker = election.IsHost,
         });
+        if (election.IsHost && _mod is Mod concreteMod)
+            _overlayBrokerHost?.SetCarrierUpkeep(concreteMod.BrokerCarrierUpkeep);
+    }
+
+    private static async Task InitializeBrokerAsync(
+        OverlayBrokerHost host,
+        IReloadedHooks hooks,
+        Action<string> log)
+    {
+        try
+        {
+            await host.InitializeAsync(
+                    hooks,
+                    (tick, shouldRender, permanentFailure) =>
+                        new CjkConfiguredDx11Hook(
+                            tick,
+                            shouldRender,
+                            log,
+                            permanentFailure))
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            log($"Overlay Broker graphics initialization failed: {exception}");
+        }
     }
 
     private void UpdateConfiguration(Action<Config> update)
@@ -116,5 +188,20 @@ public class Startup : IMod
     public bool CanSuspend() => _mod.CanSuspend();
 
     /* Automatically called by the mod loader when the mod is about to be unloaded. */
-    public Action Disposing => () => _mod.Disposing();
+    public Action Disposing => () =>
+    {
+        _mod.Disposing();
+        _overlayBrokerHost?.Dispose();
+        _overlayBrokerHost = null;
+        if (_overlayHubControllerRegistered)
+        {
+            _modLoader.RemoveController<IGbfrOverlayHub>();
+            _overlayHubControllerRegistered = false;
+        }
+    };
+
+    public Type[] GetTypes() =>
+    [
+        typeof(IGbfrOverlayHub),
+    ];
 }

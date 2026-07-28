@@ -37,6 +37,31 @@ public sealed class DxgiPresentBridgeTests
                     handle,
                     "GBFRChatOverlay_SetCursorReleaseActive",
                     out _));
+            Assert.True(
+                NativeLibrary.TryGetExport(
+                    handle,
+                    "GBFRChatOverlay_InstallDirectInputBroker",
+                    out _));
+            Assert.True(
+                NativeLibrary.TryGetExport(
+                    handle,
+                    "GBFRChatOverlay_SetDirectInputBrokerActive",
+                    out _));
+            Assert.True(
+                NativeLibrary.TryGetExport(
+                    handle,
+                    "GBFRChatOverlay_SetDirectInputPolicy",
+                    out _));
+            Assert.True(
+                NativeLibrary.TryGetExport(
+                    handle,
+                    "GBFRChatOverlay_GetDirectInputSnapshot",
+                    out _));
+            Assert.False(
+                NativeLibrary.TryGetExport(
+                    handle,
+                    "GBFRChatOverlay_ShutdownDirectInputBroker",
+                    out _));
         }
         finally
         {

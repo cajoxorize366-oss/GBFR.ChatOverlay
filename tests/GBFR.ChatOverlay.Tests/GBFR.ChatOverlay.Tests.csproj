@@ -21,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../../GBFR.OverlayHub.Contracts/GBFR.OverlayHub.Contracts.csproj" />
     <ProjectReference Include="../../GBFR.ChatOverlay.csproj" />
     <ProjectReference Include="../../ConfiguratorUI/GBFR.ChatOverlay.ConfiguratorUI.csproj" />
   </ItemGroup>

@@ -7,6 +7,7 @@ using GBFR.ChatOverlay.Overlay;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
 using GBFR.ChatOverlay.Audio;
+using GBFR.OverlayHub.Contracts;
 
 namespace GBFR.ChatOverlay;
 
@@ -47,13 +48,15 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly IModConfig _modConfig;
 
     private readonly ChatSession _chatSession;
-    private readonly ChatOverlayHost? _overlay;
-    private readonly DirectInputKeyboardHook? _directInputKeyboard;
+    private readonly ChatOverlayPeer? _overlay;
+    private DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
     private readonly PartyLifecycleProbe? _partyLifecycleProbe;
     private readonly RelinkPartyHudTracker? _partyHudTracker;
     private readonly InGameAudioSettingsController? _audioSettings;
     private readonly RelinkGameContextProbe? _gameContextProbe;
+    private readonly IGbfrOverlayHub _overlayHub;
+    private readonly bool _ownsOverlayBroker;
 
     public Mod(ModContext context)
     {
@@ -63,31 +66,11 @@ public class Mod : ModBase // <= Do not Remove.
         _owner = context.Owner;
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
+        _overlayHub = context.OverlayHub;
+        _ownsOverlayBroker = context.OwnsOverlayBroker;
 
         Action<string> moduleLog =
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
-        var nativePresentBridgeAvailable = false;
-        if (_hooks is not null)
-        {
-            try
-            {
-                StartupPhaseDiagnostic.Run(
-                    "present-and-input-native-bridge",
-                    moduleLog,
-                    () => DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId)));
-                var cursorHooks = DxgiPresentBridge.SetCursorReleaseActive(false);
-                moduleLog(
-                    $"Startup phase=input-user32-iat state=complete hooks={cursorHooks} " +
-                    "active=false; cursor interception was installed before other game hooks.");
-                nativePresentBridgeAvailable = true;
-            }
-            catch (Exception exception)
-            {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Native Present compatibility bridge unavailable; " +
-                    $"overlay and input interception will remain disabled (fail-closed): {exception}");
-            }
-        }
 
         if (_hooks is not null)
         {
@@ -241,21 +224,7 @@ public class Mod : ModBase // <= Do not Remove.
             incoming: incoming,
             transportStatusText: transportStatus);
 
-        if (_hooks is null)
-        {
-            _logger.WriteLine($"[{_modConfig.ModId}] Reloaded.Hooks is unavailable; overlay disabled.");
-            return;
-        }
-
-        if (!nativePresentBridgeAvailable)
-        {
-            _logger.WriteLine(
-                $"[{_modConfig.ModId}] Native Present compatibility bridge is unavailable; " +
-                "overlay and input interception are disabled (fail-closed).");
-            return;
-        }
-
-        _overlay = new ChatOverlayHost(
+        _overlay = new ChatOverlayPeer(
             _chatSession,
             () => _configuration,
             IsOnlineRoomActive,
@@ -268,32 +237,60 @@ public class Mod : ModBase // <= Do not Remove.
             ForceReleaseVoiceInputs,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
-        _directInputKeyboard = new DirectInputKeyboardHook(
-            _hooks,
-            _overlay.TryRequestOpen,
-            _overlay.ShouldCaptureKeyboard,
-            () => IsOnlineRoomActive() &&
-                  _configuration.EnableVoiceInput &&
-                  _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
-            pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
-            () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
-            () => _overlay.IsInitialized,
-            _overlay.ObserveSettingsMenuKey,
-            pressed => _audioSettings?.SetSelfTestPressed(pressed),
-            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
         try
         {
-            StartupPhaseDiagnostic.Run(
-                "directinput-method-hooks",
-                moduleLog,
-                _directInputKeyboard.Initialize);
+            var registration = _overlayHub.Register(_overlay);
+            _overlay.AttachRegistration(registration);
+            moduleLog(
+                $"Chat registered as a normal Overlay Broker peer; " +
+                $"bootstrap='{_overlayHub.HostModId}', local_bootstrap={_ownsOverlayBroker}.");
         }
         catch (Exception exception)
         {
-            _logger.WriteLine($"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
+            _overlay.OnHostUnavailable($"registration failed: {exception.GetType().Name}");
+            moduleLog($"Chat peer registration failed closed: {exception}");
         }
 
-        _ = InitializeOverlayAsync();
+        if (_ownsOverlayBroker && _hooks is not null)
+        {
+            DirectInputKeyboardHook? directInputKeyboard = null;
+            try
+            {
+                directInputKeyboard = new DirectInputKeyboardHook(
+                    _overlay.CanRequestOpen,
+                    _overlay.TryRequestOpen,
+                    () => (_overlayHub.CapturedInputDevices &
+                           (OverlayInputDevices.Keyboard | OverlayInputDevices.Text)) != 0,
+                    () => (_overlayHub.CapturedInputDevices & OverlayInputDevices.Mouse) != 0,
+                    () => IsOnlineRoomActive() &&
+                          _configuration.EnableVoiceInput &&
+                          _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
+                    pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
+                    () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
+                    () => _overlay.IsInitialized && !_overlay.IsSuspended,
+                    _overlay.ObserveSettingsMenuKey,
+                    pressed => _audioSettings?.SetSelfTestPressed(pressed),
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+                StartupPhaseDiagnostic.Run(
+                    "directinput-broker-hooks",
+                    moduleLog,
+                    directInputKeyboard.Initialize);
+                _directInputKeyboard = directInputKeyboard;
+            }
+            catch (Exception exception)
+            {
+                directInputKeyboard?.Dispose();
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
+            }
+        }
+        else if (!_ownsOverlayBroker)
+        {
+            moduleLog(
+                "Chat is a Broker guest; it did not install a second DirectInput hook. " +
+                "WndProc hotkeys and the bootstrap peer's input writer remain authoritative.");
+        }
+
         LogInjectionSource(moduleLog);
         StartDeferredFileHashDiagnostics(moduleLog);
     }
@@ -312,7 +309,7 @@ public class Mod : ModBase // <= Do not Remove.
 
     public override void Suspend()
     {
-        _directInputKeyboard?.Suspend();
+        // The process-wide Broker and its input writer outlive this peer's suspended state.
         _audioSettings?.Suspend();
         _partyLifecycleProbe?.Suspend();
         _partyHudTracker?.Suspend();
@@ -327,21 +324,16 @@ public class Mod : ModBase // <= Do not Remove.
         _partyLifecycleProbe?.Resume();
         _partyHudTracker?.Resume();
         _nativeChatBridge?.Resume();
-        _directInputKeyboard?.Resume();
+    }
+
+    public override void Disposing()
+    {
+        _directInputKeyboard?.Dispose();
+        _overlay?.Dispose();
     }
     #endregion
 
-    private async Task InitializeOverlayAsync()
-    {
-        try
-        {
-            await _overlay!.InitializeAsync(_hooks!).ConfigureAwait(false);
-        }
-        catch (Exception exception)
-        {
-            _logger.WriteLine($"[{_modConfig.ModId}] Failed to initialize overlay: {exception}");
-        }
-    }
+    internal void BrokerCarrierUpkeep() => _directInputKeyboard?.Poll();
 
     private void LogInjectionSource(Action<string> log)
     {

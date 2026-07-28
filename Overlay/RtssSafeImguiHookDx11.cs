@@ -55,25 +55,37 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
 
     private static RtssSafeImguiHookDx11? s_instance;
     private static readonly nint FailureResult = new(unchecked((int)0x80004005));
+    private static long s_fallbackOriginalPresentAddress;
+    private static int s_renderLease;
 
     [ThreadStatic]
     private static bool s_presentRecursionLock;
 
     private readonly Action<string> _log;
     private readonly Action _onPermanentFailure;
+    private readonly Action _presentTick;
+    private readonly Func<bool> _shouldRenderFrontend;
     private readonly object _hookStateLock = new();
     private readonly ReaderWriterLockSlim _presentLifetimeLock =
         new(LockRecursionPolicy.SupportsRecursion);
     private IHook<DX11Hook.Present> _presentHook = null!;
     private long _originalPresentAddress;
+    private long _initializedDevicePointer;
     private bool _initialized;
     private int _presentFailureCount;
     private int _nativePresentFailureHandled;
     private int _presentStopping;
     private bool _disposed;
 
-    internal RtssSafeImguiHookDx11(Action<string> log, Action onPermanentFailure)
+    internal RtssSafeImguiHookDx11(
+        Action presentTick,
+        Func<bool> shouldRenderFrontend,
+        Action<string> log,
+        Action onPermanentFailure)
     {
+        _presentTick = presentTick ?? throw new ArgumentNullException(nameof(presentTick));
+        _shouldRenderFrontend = shouldRenderFrontend ??
+            throw new ArgumentNullException(nameof(shouldRenderFrontend));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _onPermanentFailure = onPermanentFailure ??
             throw new ArgumentNullException(nameof(onPermanentFailure));
@@ -124,6 +136,9 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
                 nameof(PresentImplStatic),
                 unchecked((long)hookTarget));
             Volatile.Write(ref _originalPresentAddress, _presentHook.OriginalFunctionAddress);
+            Volatile.Write(
+                ref s_fallbackOriginalPresentAddress,
+                _presentHook.OriginalFunctionAddress);
             _presentHook.Activate();
             TryLog(
                 "DX11 Present-only backend enabled with a native original-Present boundary; " +
@@ -152,6 +167,8 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
         {
             if (Volatile.Read(ref _presentStopping) != 0 || s_presentRecursionLock)
                 return InvokeOriginalPresent(swapChainPointer, syncInterval, flags);
+            if (Interlocked.CompareExchange(ref s_renderLease, 1, 0) != 0)
+                return InvokeOriginalPresent(swapChainPointer, syncInterval, flags);
 
             s_presentRecursionLock = true;
             try
@@ -166,7 +183,20 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
                     if (!ImguiHook.CheckWindowHandle(windowHandle))
                         return InvokeOriginalPresent(swapChainPointer, syncInterval, flags);
 
+                    _presentTick();
+                    if (_initialized && !_shouldRenderFrontend())
+                        return InvokeOriginalPresent(swapChainPointer, syncInterval, flags);
+
                     using var device = swapChain.GetDevice<Device>();
+                    var devicePointer = device.NativePointer.ToInt64();
+                    if (_initialized &&
+                        Volatile.Read(ref _initializedDevicePointer) != devicePointer)
+                    {
+                        ImGui.ImGuiImplDX11Shutdown();
+                        _initialized = false;
+                        Volatile.Write(ref _initializedDevicePointer, 0);
+                        TryLog("DX11 device changed; the ImGui device backend was rebuilt in-place.");
+                    }
                     if (!_initialized)
                     {
                         ImguiHook.InitializeWithHandle(windowHandle);
@@ -174,7 +204,11 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
                             (void*)device.NativePointer,
                             (void*)device.ImmediateContext.NativePointer);
                         _initialized = true;
+                        Volatile.Write(ref _initializedDevicePointer, devicePointer);
                     }
+
+                    if (!_shouldRenderFrontend())
+                        return InvokeOriginalPresent(swapChainPointer, syncInterval, flags);
 
                     ImGui.ImGuiImplDX11NewFrame();
                     ImguiHook.NewFrame();
@@ -192,11 +226,12 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
             catch (Exception exception)
             {
                 ReportFailure("Present callback", exception);
-                return FailureResult;
+                return InvokeOriginalPresent(swapChainPointer, syncInterval, flags);
             }
             finally
             {
                 s_presentRecursionLock = false;
+                Volatile.Write(ref s_renderLease, 0);
             }
         }
         finally
@@ -209,21 +244,35 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
     {
         using var backBuffer = swapChain.GetBackBuffer<Texture2D>(0);
         using var renderTarget = new RenderTargetView(device, backBuffer);
-        var renderTargetBound = false;
+        var context = device.ImmediateContext;
+        DepthStencilView? previousDepthStencil = null;
+        RenderTargetView[] previousRenderTargets = [];
+        var outputMergerStateCaptured = false;
         try
         {
-            device.ImmediateContext.OutputMerger.SetRenderTargets(renderTarget);
-            renderTargetBound = true;
+            previousRenderTargets = context.OutputMerger.GetRenderTargets(
+                8,
+                out previousDepthStencil);
+            outputMergerStateCaptured = true;
+            context.OutputMerger.SetRenderTargets(renderTarget);
             ImGui.ImGuiImplDX11RenderDrawData(drawData);
         }
         finally
         {
-            if (renderTargetBound)
+            try
             {
-                // Release the context's indirect back-buffer reference before
-                // the frame-local RTV and texture wrappers are disposed.
-                device.ImmediateContext.OutputMerger.SetRenderTargets(
-                    (RenderTargetView)null!);
+                if (outputMergerStateCaptured)
+                {
+                    context.OutputMerger.SetRenderTargets(
+                        previousDepthStencil,
+                        previousRenderTargets);
+                }
+            }
+            finally
+            {
+                foreach (var previousRenderTarget in previousRenderTargets)
+                    previousRenderTarget?.Dispose();
+                previousDepthStencil?.Dispose();
             }
         }
     }
@@ -378,6 +427,7 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
             {
                 ImGui.ImGuiImplDX11Shutdown();
                 _initialized = false;
+                Volatile.Write(ref _initializedDevicePointer, 0);
             }
         }
         catch (Exception exception)
@@ -403,13 +453,37 @@ internal sealed unsafe class RtssSafeImguiHookDx11 : IImguiHook
         {
             var instance = s_instance;
             return instance is null
-                ? FailureResult
+                ? InvokeFallbackOriginalPresent(swapChainPointer, syncInterval, flags)
                 : instance.PresentImpl(swapChainPointer, syncInterval, flags);
         }
         catch (Exception exception)
         {
             var instance = s_instance;
             instance?.ReportFailure("Present unmanaged boundary", exception);
+            return InvokeFallbackOriginalPresent(swapChainPointer, syncInterval, flags);
+        }
+    }
+
+    private static nint InvokeFallbackOriginalPresent(
+        nint swapChainPointer,
+        int syncInterval,
+        PresentFlags flags)
+    {
+        try
+        {
+            var address = Volatile.Read(ref s_fallbackOriginalPresentAddress);
+            if (address == 0)
+                return FailureResult;
+            var result = DxgiPresentBridge.InvokeOriginalPresent(
+                unchecked((ulong)address),
+                swapChainPointer,
+                syncInterval,
+                unchecked((uint)flags),
+                out _);
+            return new nint(result);
+        }
+        catch
+        {
             return FailureResult;
         }
     }

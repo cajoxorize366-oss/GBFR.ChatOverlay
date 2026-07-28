@@ -1,6 +1,7 @@
 ﻿using Reloaded.Mod.Interfaces;
 using IReloadedHooks = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
 using GBFR.ChatOverlay.Configuration;
+using GBFR.OverlayHub.Contracts;
 
 namespace GBFR.ChatOverlay.Template;
 
@@ -43,4 +44,8 @@ public class ModContext
     /// Instance of the IMod interface that created this mod instance.
     /// </summary>
     public IMod Owner { get; set; } = null!;
+
+    public IGbfrOverlayHub OverlayHub { get; set; } = null!;
+
+    public bool OwnsOverlayBroker { get; set; }
 }

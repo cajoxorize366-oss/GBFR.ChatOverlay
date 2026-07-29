@@ -1,0 +1,150 @@
+using GBFR.ChatOverlay.Configuration;
+using GBFR.ChatOverlay.Core;
+using GBFR.ChatOverlay.Native;
+using GBFR.ChatOverlay.Overlay;
+
+namespace GBFR.ChatOverlay.Tests;
+
+public sealed class ChatOverlayPeerHotkeyTests
+{
+    private const uint WmKeyDown = 0x0100;
+    private const uint WmKeyUp = 0x0101;
+
+    [Fact]
+    public void KeyboardCapture_CanBeRepeatedAfterAStaleKeyDown_AndCustomTextSends()
+    {
+        var action = new QuickActionConfiguration
+        {
+            Name = "Custom",
+            Kind = QuickActionKind.CustomText,
+            Text = "Hello from custom text",
+        };
+        var configuration = new Config
+        {
+            QuickActions = [action],
+        };
+        var transport = new RecordingTransport();
+        using var peer = CreatePeer(configuration, transport);
+        var request = new BindingCaptureRequest(
+            BindingTarget.QuickAction,
+            BindingCaptureDevice.Keyboard,
+            action.Id);
+
+        peer.BeginBindingCapture(request);
+        PressAndRelease(peer, 'P');
+        Assert.Equal("P", action.KeyboardBinding);
+
+        // Reproduce a missed WM_KEYUP between two capture sessions.
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'K', nint.Zero);
+
+        peer.BeginBindingCapture(request);
+        PressAndRelease(peer, 'Q');
+        Assert.Equal("Q", action.KeyboardBinding);
+
+        PressAndRelease(peer, 'Q');
+        Assert.Equal("Hello from custom text", transport.LastMessage);
+        Assert.Equal(1, transport.SendCount);
+    }
+
+    [Fact]
+    public void PlayerMuteHotkey_TogglesOncePerPress()
+    {
+        var configuration = new Config
+        {
+            Player2MuteKeyboardBinding = "M",
+        };
+        var muted = false;
+        var operations = new List<bool>();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getPlayerMuteSlots: () =>
+            [
+                new PartyPlayerMuteSlotStatus(2, true, muted, string.Empty),
+                new PartyPlayerMuteSlotStatus(3, false, false, string.Empty),
+                new PartyPlayerMuteSlotStatus(4, false, false, string.Empty),
+            ],
+            setPlayerMuted: (player, targetMuted) =>
+            {
+                Assert.Equal(2, player);
+                operations.Add(targetMuted);
+                muted = targetMuted;
+                return new PartyPlayerMuteOperationResult(true, "ok");
+            });
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'M', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'M', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'M', nint.Zero);
+        PressAndRelease(peer, 'M');
+
+        Assert.Equal(new[] { true, false }, operations);
+    }
+
+    [Fact]
+    public void PlayerMuteHotkey_DoesNotWriteUnavailableSlot()
+    {
+        var configuration = new Config
+        {
+            Player3MuteKeyboardBinding = "N",
+        };
+        var operationCount = 0;
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getPlayerMuteSlots: () => PartyPlayerMuteSlotStatus.Unavailable("unavailable"),
+            setPlayerMuted: (_, _) =>
+            {
+                operationCount++;
+                return new PartyPlayerMuteOperationResult(true, "unexpected");
+            });
+
+        PressAndRelease(peer, 'N');
+
+        Assert.Equal(0, operationCount);
+    }
+
+    private static ChatOverlayPeer CreatePeer(
+        Config configuration,
+        IChatTransport transport,
+        Func<bool>? isOnlineRoomActive = null,
+        Func<IReadOnlyList<PartyPlayerMuteSlotStatus>>? getPlayerMuteSlots = null,
+        Func<int, bool, PartyPlayerMuteOperationResult>? setPlayerMuted = null) =>
+        new(
+            new ChatSession(new ChatHistory(10), new ChatComposer(), transport),
+            () => configuration,
+            isOnlineRoomActive ?? (() => false),
+            () => { },
+            () => PartyVoiceUiStatus.Unavailable,
+            (_, _, _, _) => Array.Empty<PartyHudAnchor>(),
+            getPlayerMuteSlots ?? (() => Array.Empty<PartyPlayerMuteSlotStatus>()),
+            setPlayerMuted ?? ((_, _) => new PartyPlayerMuteOperationResult(false, string.Empty)),
+            (_, _) => ChatSendResult.Unavailable(),
+            null,
+            update => update(configuration),
+            _ => { },
+            () => false,
+            _ => { },
+            () => { },
+            _ => { });
+
+    private static void PressAndRelease(ChatOverlayPeer peer, char key)
+    {
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, key, nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, key, nint.Zero);
+    }
+
+    private sealed class RecordingTransport : IChatTransport
+    {
+        public string? LastMessage { get; private set; }
+        public int SendCount { get; private set; }
+
+        public ChatSendResult Send(string message)
+        {
+            LastMessage = message;
+            SendCount++;
+            return ChatSendResult.Sent();
+        }
+    }
+}

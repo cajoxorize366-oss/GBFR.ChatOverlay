@@ -69,6 +69,14 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 13. Leave or disband the online room. Confirm the Overlay disappears immediately and `Y/U/I` return to the game before returning to title.
 14. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
 
+## Player 2/3/4 mute
+
+1. In a private room with at least one remote Party voice peer, open the settings menu and select `02 玩家禁言 / Player Mute`. The page must always contain exactly `玩家 2`, `玩家 3` and `玩家 4`; it must not rename or reorder rows from ChatControl join timing.
+2. An occupied row becomes actionable only after its Relink slot EntityId exactly matches a joined remote Party ChatControl. Its detail must say `EntityId 已精确匹配`; an empty slot or a peer without a matching ChatControl remains unavailable.
+3. While the matching remote player is speaking, click `禁言 / Mute`. Their incoming Party audio must stop and the row must change to `当前已禁言 / currently muted`. The log should say `Player N incoming Party audio muted after exact Relink-slot/EntityId correlation.`
+4. Click `取消禁言 / Unmute`. Audio must resume only for the same player, the Party readback must confirm the change, and the other occupied rows must retain their previous state.
+5. Have that player leave. Their row must become unavailable before another click can reach the departed ChatControl. Rejoining or replacing the slot must require a fresh EntityId match; the implementation must never reuse the old pointer or fall back to join order.
+
 ## 0.4.0 voice-indicator position preview
 
 The 0.4.0 release validates HUD placement without requiring another player. `Enable Party Voice Indicators` and `Voice Indicator Debug: Show All Slots` are enabled by default. The debug override intentionally draws an idle microphone icon at 70% opacity for every active CPU/player HUD row; it is not proof that those rows use the Mod. Unlike chat and input, this explicit position-test override may render in a CPU party without an authenticated online room.
@@ -78,7 +86,7 @@ The 0.4.0 release validates HUD placement without requiring another player. `Ena
 3. Repeat at another resolution, HUD scale or ultrawide aspect if available. The icon must remain attached to the same native row edge because its center and size come from that live UI node's final transform; there is no screenshot reference resolution or uniform image scale to tune.
 4. If aggregate Party voice reaches `Speaking`, the debug local slot becomes bright and 100% opaque; idle preview slots retain 70% Alpha with a deliberately muted palette so the two states are visually distinct.
 5. Verify the native party-HUD whitelist and timing: icons must appear only after the HP HUD finishes its opening transition, not over the black quest-loading screen. They must disappear as soon as the HUD starts closing, before the main menu or battle-results transition completes. Menus, results and every other screen without the complete party HP HUD must contain no icons. Trigger a Full Chain: although the game keeps the HP rows rendered underneath that illustration, all four icons must disappear for the entire opening/visible/closing sequence and return only after `ControllerChainburst` closes.
-6. Disable `Voice Indicator Debug: Show All Slots`. The preview must hide every icon because secure remote ChatControl-to-party-slot identity mapping is deliberately not enabled yet. A CPU or vanilla player must never receive an inferred Mod badge.
+6. Disable `Voice Indicator Debug: Show All Slots`. The preview must hide every icon because exact slot identity alone is not a secure Mod capability proof. A CPU or vanilla player must never receive an inferred Mod badge.
 
 Remote per-slot talking state and Mod capability negotiation remain deferred until the native placements are approved. Automatic lobby/battle detection is already supplied by the two controller types. Record the game resolution, HUD scale, reported native layout/row count and a screenshot for every position correction. A real platform icon should remain in the portrait/name/badge region because the microphone anchors use the party-info/HP right edge; if it overlaps, preserve the log and screenshot before changing the selected child node.
 

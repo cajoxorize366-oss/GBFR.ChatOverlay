@@ -11,7 +11,7 @@ public sealed record AudioEndpointChoice(string Id, string DisplayName);
 public abstract class AudioEndpointPropertyEditor : PropertyEditorBase
 {
     public const string SystemDefaultValue = "default";
-    public const string SystemDefaultLabel = "Default (Windows system default)";
+    public const string SystemDefaultLabel = "系统默认 / Default (Windows system default)";
 
     private readonly AudioEndpointFlow _flow;
 
@@ -81,7 +81,7 @@ internal static class AudioEndpointChoiceCatalog
         catch (Exception exception)
         {
             endpoints = Array.Empty<AudioEndpointInfo>();
-            defaultLabel += $" — device scan failed ({exception.GetType().Name})";
+            defaultLabel += $" — 设备扫描失败 / device scan failed ({exception.GetType().Name})";
         }
 
         var choices = new List<AudioEndpointChoice>(endpoints.Count + 2)
@@ -95,7 +95,7 @@ internal static class AudioEndpointChoiceCatalog
                 endpoint.FriendlyName,
                 StringComparison.CurrentCultureIgnoreCase)) > 1;
             var defaultSuffix = endpoint.IsDefaultCommunicationsDevice
-                ? " (Windows communications default)"
+                ? " (Windows 通信默认 / communications default)"
                 : string.Empty;
             var disambiguator = duplicateName ? $" — {ShortenId(endpoint.Id)}" : string.Empty;
             choices.Add(new AudioEndpointChoice(
@@ -112,7 +112,7 @@ internal static class AudioEndpointChoiceCatalog
         {
             choices.Add(new AudioEndpointChoice(
                 currentId,
-                $"Unavailable saved device — {ShortenId(currentId)}"));
+                $"已保存设备不可用 / Unavailable saved device — {ShortenId(currentId)}"));
         }
 
         return choices;

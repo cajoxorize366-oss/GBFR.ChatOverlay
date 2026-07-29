@@ -10,11 +10,28 @@
     <OutputPath Condition="'$(RELOADEDIIMODS)' != ''">$(RELOADEDIIMODS)/GBFR.ChatOverlay</OutputPath>
     <OutputPath Condition="'$(RELOADEDIIMODS)' == ''">bin/$(Configuration)/</OutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
+    <NativeBridgeConfiguration>Release</NativeBridgeConfiguration>
 
     <!-- IL Trimming Support for Framework Dependent Apps. Unofficial.
          If you set this to true, trimming will be enabled when you publish the mod.
          Test trimming with: `BuildLinked.ps1` in PowerShell. -->
     <ReloadedILLink>false</ReloadedILLink>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);GBFR_DIAGNOSTICS</DefineConstants>
+    <Optimize>false</Optimize>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>portable</DebugType>
+    <NativeBridgeConfiguration>Debug</NativeBridgeConfiguration>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DefineConstants>$(DefineConstants);GBFR_RELEASE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugSymbols>false</DebugSymbols>
+    <DebugType>none</DebugType>
+    <NativeBridgeConfiguration>Release</NativeBridgeConfiguration>
   </PropertyGroup>
 
   <ItemGroup>
@@ -61,7 +78,7 @@
     <None Update="licenses/Zydis-LICENSE.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="NativeBridge/bin/Release/GBFR.ChatOverlay.Native.dll"
+    <None Include="NativeBridge/bin/$(NativeBridgeConfiguration)/GBFR.ChatOverlay.Native.dll"
           Link="GBFR.ChatOverlay.Native.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
@@ -89,9 +106,9 @@
   </PropertyGroup>
 
   <Target Name="BuildNativePresentBridge"
-          BeforeTargets="Build"
+          BeforeTargets="PrepareForBuild"
           Condition="'$(DesignTimeBuild)' != 'true'">
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\build-native-bridge.ps1&quot; -Configuration Release" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\build-native-bridge.ps1&quot; -Configuration $(NativeBridgeConfiguration)" />
   </Target>
 
   <Target Name="CopyConfiguratorUiToBuildOutput" AfterTargets="Build">

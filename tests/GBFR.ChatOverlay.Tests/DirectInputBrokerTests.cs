@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
 
@@ -23,6 +24,19 @@ public sealed class DirectInputBrokerTests
         Assert.True(snapshot.HasExpectedLayout);
         Assert.Equal(DirectInputBrokerReadiness.None, snapshot.Readiness);
         Assert.Equal(DirectInputBrokerPolicy.None, snapshot.Policy);
+    }
+
+    [Fact]
+    public void NativeHotkeyBindingAbi_AcceptsValidatedBindingsBeforeInstallation()
+    {
+        DxgiPresentBridge.Configure(AppContext.BaseDirectory);
+        var binding = new DirectInputHotkeyBinding(
+            DirectInputKeyboardStateFilter.SettingsMenuScanCode,
+            KeyboardModifiers.Control,
+            (byte)DirectInputBrokerPolicy.SuppressSettings);
+
+        Assert.True(DirectInputBrokerBridge.Instance.SetHotkeyBindings([binding]));
+        Assert.True(DirectInputBrokerBridge.Instance.SetHotkeyBindings([]));
     }
 
     [Fact]
@@ -91,23 +105,118 @@ public sealed class DirectInputBrokerTests
             reportSettings: settings.Add);
 
         hook.Initialize();
+        hook.Poll();
         backend.Snapshot = CreateSnapshot(
             sequence: 10,
-            DirectInputBrokerKeys.Activation |
-            DirectInputBrokerKeys.Settings |
-            DirectInputBrokerKeys.PushToTalk);
+            DirectInputKeyboardStateFilter.ActivationScanCode,
+            DirectInputKeyboardStateFilter.SettingsMenuScanCode,
+            DirectInputKeyboardStateFilter.VoicePushToTalkScanCode);
         hook.Poll();
         hook.Poll();
 
         Assert.Equal(1, activations);
         Assert.Equal(new[] { true }, settings);
-        Assert.Equal(new[] { true }, voice);
+        Assert.True(voice[^1]);
 
-        backend.Snapshot = CreateSnapshot(11, DirectInputBrokerKeys.None);
+        backend.Snapshot = CreateSnapshot(11);
         hook.Poll();
 
         Assert.Equal(new[] { true, false }, settings);
-        Assert.Equal(new[] { true, false }, voice);
+        Assert.False(voice[^1]);
+    }
+
+    [Fact]
+    public void Poll_OfficialQuickActionWorksWhenOnlineChatCannotActivate()
+    {
+        var backend = new FakeDirectInputBrokerBackend();
+        var reports = new List<(string Id, bool Pressed)>();
+        var configuration = new Config
+        {
+            EnableOverlay = true,
+            QuickActions =
+            [
+                new QuickActionConfiguration
+                {
+                    Id = "stamp-thanks",
+                    Kind = QuickActionKind.Stamp,
+                    OfficialId = 16,
+                    KeyboardBinding = "P",
+                },
+            ],
+        };
+        using var hook = CreateHook(
+            backend,
+            canActivate: () => false,
+            settingsAvailable: () => true,
+            getConfiguration: () => configuration,
+            reportQuickAction: (id, pressed) => reports.Add((id, pressed)));
+
+        hook.Initialize();
+        hook.Poll();
+        backend.Snapshot = CreateSnapshot(sequence: 1, 0x19); // DIK_P
+        hook.Poll();
+
+        Assert.Contains(
+            DirectInputBrokerPolicy.SuppressQuickActions,
+            backend.PolicyRequests.Select(policy => policy & DirectInputBrokerPolicy.SuppressQuickActions));
+        Assert.Contains(("stamp-thanks", true), reports);
+    }
+
+    [Fact]
+    public void Poll_LeavesControllerBindingsToTheActiveXInputPoller()
+    {
+        var backend = new FakeDirectInputBrokerBackend();
+        var activations = 0;
+        var configuration = new Config
+        {
+            OpenChatKeyboardBinding = string.Empty,
+            OpenChatControllerBinding = "A",
+        };
+        using var hook = CreateHook(
+            backend,
+            canActivate: () => true,
+            tryActivate: () =>
+            {
+                activations++;
+                return true;
+            },
+            getConfiguration: () => configuration);
+
+        hook.Initialize();
+        hook.Poll();
+        var controllerSnapshot = CreateSnapshot(1);
+        controllerSnapshot.ControllerButtons = ControllerButtons.A;
+        backend.Snapshot = controllerSnapshot;
+        hook.Poll();
+
+        Assert.Equal(0, activations);
+    }
+
+    [Fact]
+    public void Poll_PlayerMuteKeyboardBindingReportsOneEdgePerPress()
+    {
+        var backend = new FakeDirectInputBrokerBackend();
+        var reports = new List<(int Player, bool Pressed)>();
+        var configuration = new Config
+        {
+            Player2MuteKeyboardBinding = "P",
+        };
+        using var hook = CreateHook(
+            backend,
+            canActivate: () => true,
+            settingsAvailable: () => true,
+            getConfiguration: () => configuration,
+            reportPlayerMute: (player, pressed) => reports.Add((player, pressed)));
+
+        hook.Initialize();
+        hook.Poll();
+        backend.Snapshot = CreateSnapshot(sequence: 1, 0x19); // DIK_P
+        hook.Poll();
+        hook.Poll();
+        backend.Snapshot = CreateSnapshot(sequence: 2);
+        hook.Poll();
+
+        Assert.Equal(new[] { (2, true), (2, false) }, reports);
     }
 
     [Fact]
@@ -186,7 +295,10 @@ public sealed class DirectInputBrokerTests
         Func<bool>? settingsAvailable = null,
         Action<bool>? setVoicePressed = null,
         Action<bool>? reportSettings = null,
-        Action<string>? log = null) =>
+        Action<string>? log = null,
+        Func<Config>? getConfiguration = null,
+        Action<string, bool>? reportQuickAction = null,
+        Action<int, bool>? reportPlayerMute = null) =>
         new(
             backend,
             canActivate ?? (() => false),
@@ -199,23 +311,39 @@ public sealed class DirectInputBrokerTests
             settingsAvailable ?? (() => false),
             reportSettings ?? (_ => { }),
             _ => { },
-            log ?? (_ => { }));
+            log ?? (_ => { }),
+            getConfiguration,
+            reportQuickActionKey: reportQuickAction,
+            reportPlayerMuteKey: reportPlayerMute);
 
     private static DirectInputBrokerSnapshot CreateSnapshot(
         ulong sequence,
-        DirectInputBrokerKeys keys) =>
-        new()
+        params int[] scanCodes)
+    {
+        var snapshot = new DirectInputBrokerSnapshot
         {
             AbiVersion = DirectInputBrokerSnapshot.ExpectedAbiVersion,
             StructSize = DirectInputBrokerSnapshot.ExpectedStructSize,
             Sequence = sequence,
-            Keys = keys,
             Readiness = DirectInputBrokerReadiness.GameImport |
                         DirectInputBrokerReadiness.Factory |
                         DirectInputBrokerReadiness.Keyboard |
                         DirectInputBrokerReadiness.Mouse,
             Active = 1,
         };
+        foreach (var scanCode in scanCodes)
+        {
+            var mask = 1UL << (scanCode % 64);
+            switch (scanCode / 64)
+            {
+                case 0: snapshot.KeyboardWord0 |= mask; break;
+                case 1: snapshot.KeyboardWord1 |= mask; break;
+                case 2: snapshot.KeyboardWord2 |= mask; break;
+                default: snapshot.KeyboardWord3 |= mask; break;
+            }
+        }
+        return snapshot;
+    }
 
     private sealed class FakeDirectInputBrokerBackend : IDirectInputBrokerBackend
     {
@@ -224,11 +352,12 @@ public sealed class DirectInputBrokerTests
         internal int SnapshotReads { get; private set; }
         internal List<bool> ActiveRequests { get; } = new();
         internal List<DirectInputBrokerPolicy> PolicyRequests { get; } = new();
+        internal List<DirectInputHotkeyBinding[]> HotkeyBindingRequests { get; } = new();
         internal ManualResetEventSlim InactiveRequested { get; } = new(false);
         internal ManualResetEventSlim? PolicyEntered { get; init; }
         internal ManualResetEventSlim? ReleasePolicy { get; init; }
         internal DirectInputBrokerSnapshot Snapshot { get; set; } =
-            CreateSnapshot(0, DirectInputBrokerKeys.None);
+            CreateSnapshot(0);
 
         public bool Install()
         {
@@ -249,6 +378,12 @@ public sealed class DirectInputBrokerTests
             PolicyRequests.Add(policy);
             PolicyEntered?.Set();
             ReleasePolicy?.Wait(TimeSpan.FromSeconds(2));
+            return true;
+        }
+
+        public bool SetHotkeyBindings(DirectInputHotkeyBinding[] bindings)
+        {
+            HotkeyBindingRequests.Add(bindings.ToArray());
             return true;
         }
 

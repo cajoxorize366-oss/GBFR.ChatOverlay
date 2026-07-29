@@ -53,12 +53,30 @@ public sealed class ChatSession
         if (!Composer.TryGetSubmittableText(out var text))
             return ChatSendResult.EmptyDraft();
 
-        var result = _transport.Send(text);
+        var result = SendNormalizedText(text);
         if (!result.Succeeded)
             return result;
 
-        History.Add(_localSender, text, ChatMessageKind.Self, _timeProvider.GetUtcNow());
         Composer.MarkSubmitted();
+        return result;
+    }
+
+    public ChatSendResult SendText(string? text)
+    {
+        var quickComposer = new ChatComposer(Composer.MaximumDraftLength);
+        quickComposer.SetDraft(text);
+        if (!quickComposer.TryGetSubmittableText(out var normalizedText))
+            return ChatSendResult.EmptyDraft();
+
+        return SendNormalizedText(normalizedText);
+    }
+
+    private ChatSendResult SendNormalizedText(string text)
+    {
+        var result = _transport.Send(text);
+        if (result.Succeeded)
+            History.Add(_localSender, text, ChatMessageKind.Self, _timeProvider.GetUtcNow());
+
         return result;
     }
 }

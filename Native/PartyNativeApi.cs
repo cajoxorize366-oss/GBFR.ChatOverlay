@@ -140,6 +140,24 @@ internal interface IPartyChatControlApi
         nint targetChatControl,
         out bool muted);
 
+    uint GetEntityId(nint chatControl, out string? entityId)
+    {
+        entityId = null;
+        throw new NotSupportedException("Party ChatControl EntityId lookup is not bound by this API implementation.");
+    }
+
+    uint IsLocal(nint chatControl, out bool isLocal)
+    {
+        isLocal = false;
+        throw new NotSupportedException("Party ChatControl locality lookup is not bound by this API implementation.");
+    }
+
+    uint SetIncomingAudioMuted(
+        nint localChatControl,
+        nint targetChatControl,
+        bool muted) =>
+        throw new NotSupportedException("Party incoming-audio mute is not bound by this API implementation.");
+
     uint GetLocalChatIndicator(
         nint localChatControl,
         out PartyLocalChatControlChatIndicator indicator);
@@ -221,6 +239,10 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
     private readonly PartyChatControlGetAudioDeviceDelegate _chatControlGetAudioOutput;
     private readonly PartyChatControlGetAudioRenderVolumeDelegate _chatControlGetAudioRenderVolume;
     private readonly PartyChatControlGetIncomingAudioMutedDelegate _chatControlGetIncomingAudioMuted;
+    private readonly PartyChatControlGetEntityIdDelegate _chatControlGetEntityId;
+    private readonly PartyChatControlIsLocalDelegate _chatControlIsLocal;
+    private readonly PartyChatControlSetIncomingAudioMutedDelegate
+        _chatControlSetIncomingAudioMuted;
     private readonly PartyChatControlGetLocalChatIndicatorDelegate _chatControlGetLocalChatIndicator;
     private readonly PartyChatControlGetChatIndicatorDelegate _chatControlGetChatIndicator;
     private readonly PartyGetErrorMessageDelegate _getErrorMessage;
@@ -280,6 +302,16 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
         _chatControlGetIncomingAudioMuted = Bind<PartyChatControlGetIncomingAudioMutedDelegate>(
             verifiedPartyModule,
             "PartyChatControlGetIncomingAudioMuted");
+        _chatControlGetEntityId = Bind<PartyChatControlGetEntityIdDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlGetEntityId");
+        _chatControlIsLocal = Bind<PartyChatControlIsLocalDelegate>(
+            verifiedPartyModule,
+            "PartyChatControlIsLocal");
+        _chatControlSetIncomingAudioMuted =
+            Bind<PartyChatControlSetIncomingAudioMutedDelegate>(
+                verifiedPartyModule,
+                "PartyChatControlSetIncomingAudioMuted");
         _chatControlGetLocalChatIndicator = Bind<PartyChatControlGetLocalChatIndicatorDelegate>(
             verifiedPartyModule,
             "PartyChatControlGetLocalChatIndicator");
@@ -441,6 +473,31 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
         muted = nativeMuted != 0;
         return result;
     }
+
+    public uint GetEntityId(nint chatControl, out string? entityId)
+    {
+        var result = _chatControlGetEntityId(chatControl, out var nativeEntityId);
+        entityId = result == 0 && nativeEntityId != nint.Zero
+            ? Marshal.PtrToStringUTF8(nativeEntityId)
+            : null;
+        return result;
+    }
+
+    public uint IsLocal(nint chatControl, out bool isLocal)
+    {
+        var result = _chatControlIsLocal(chatControl, out var nativeIsLocal);
+        isLocal = nativeIsLocal != 0;
+        return result;
+    }
+
+    public uint SetIncomingAudioMuted(
+        nint localChatControl,
+        nint targetChatControl,
+        bool muted) =>
+        _chatControlSetIncomingAudioMuted(
+            localChatControl,
+            targetChatControl,
+            muted ? (byte)1 : (byte)0);
 
     public uint GetLocalChatIndicator(
         nint localChatControl,
@@ -687,6 +744,22 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
         nint localChatControl,
         nint targetChatControl,
         out byte muted);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlGetEntityIdDelegate(
+        nint chatControl,
+        out nint entityId);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlIsLocalDelegate(
+        nint chatControl,
+        out byte isLocal);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyChatControlSetIncomingAudioMutedDelegate(
+        nint localChatControl,
+        nint targetChatControl,
+        byte muted);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyChatControlGetLocalChatIndicatorDelegate(

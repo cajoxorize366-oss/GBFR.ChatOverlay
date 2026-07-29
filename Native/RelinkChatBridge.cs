@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
 using Reloaded.Hooks.Definitions;
 using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
@@ -21,6 +22,11 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
 
     private IHook<SendMessageDelegate>? _sendHook;
     private IHook<RpcMessageDelegate>? _rpcHook;
+    private SendStampDelegate? _sendStamp;
+    private SendFixedPhraseDelegate? _sendFixedPhrase;
+    private SendEmotionDelegate? _sendEmotion;
+    private PlayFixedPhraseDelegate? _playFixedPhrase;
+    private PlayEmotionDelegate? _playEmotion;
     private RelinkPlayerNameResolver? _playerNameResolver;
     private bool _initialized;
     private bool _suspended;
@@ -60,6 +66,16 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                     moduleBase,
                     rvas,
                     _log);
+                _sendStamp = Marshal.GetDelegateForFunctionPointer<SendStampDelegate>(
+                    moduleBase + rvas.SendStamp);
+                _sendFixedPhrase = Marshal.GetDelegateForFunctionPointer<SendFixedPhraseDelegate>(
+                    moduleBase + rvas.SendFixedPhrase);
+                _sendEmotion = Marshal.GetDelegateForFunctionPointer<SendEmotionDelegate>(
+                    moduleBase + rvas.SendEmotion);
+                _playFixedPhrase = Marshal.GetDelegateForFunctionPointer<PlayFixedPhraseDelegate>(
+                    moduleBase + rvas.PlayFixedPhrase);
+                _playEmotion = Marshal.GetDelegateForFunctionPointer<PlayEmotionDelegate>(
+                    moduleBase + rvas.PlayEmotion);
                 _sendHook = _hooks.CreateHook<SendMessageDelegate>(
                     SendMessage,
                     moduleBase + rvas.SendMessage);
@@ -79,6 +95,11 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                     $"{(nuint)(moduleBase + rvas.SenderSlotResolver):X}, memberLookup=0x" +
                     $"{(nuint)(moduleBase + rvas.LobbyMemberLookup):X}; empty RPC sender labels now use " +
                     $"the verified four-slot lobby member table.");
+                _log(
+                    $"Relink official communication actions attached: stamp=0x" +
+                    $"{(nuint)(moduleBase + rvas.SendStamp):X}, fixed=0x" +
+                    $"{(nuint)(moduleBase + rvas.SendFixedPhrase):X}, emotion=0x" +
+                    $"{(nuint)(moduleBase + rvas.SendEmotion):X}.");
             }
             catch
             {
@@ -87,6 +108,11 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                 _rpcHook = null;
                 _sendHook = null;
                 _playerNameResolver = null;
+                _sendStamp = null;
+                _sendFixedPhrase = null;
+                _sendEmotion = null;
+                _playFixedPhrase = null;
+                _playEmotion = null;
                 GameContext = null;
                 throw;
             }
@@ -140,6 +166,71 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                     SafeLog($"Native chat send failed: {exception.Message}");
                     return ChatSendResult.Failed("Relink rejected the native chat call.");
                 }
+            }
+        }
+
+        return ChatSendResult.Sent();
+    }
+
+    public ChatSendResult SendOfficialQuickAction(QuickActionKind kind, int officialId)
+    {
+        if (kind == QuickActionKind.CustomText)
+            return ChatSendResult.Rejected("Custom text must use the normal chat transport.");
+        if (!CommunicationCatalog.TryGetEntry(kind, officialId, out var entry))
+            return ChatSendResult.Rejected("The selected official communication entry is invalid.");
+        if (!IsInitialized || Volatile.Read(ref _suspended))
+            return ChatSendResult.Unavailable("The Relink native chat bridge is not active.");
+
+        lock (_lifecycleSync)
+        {
+            if (!IsInitialized || _suspended)
+                return ChatSendResult.Unavailable("The Relink native chat bridge is not active.");
+
+            try
+            {
+                SafeLog(
+                    $"Invoking official communication: kind={kind}, id={entry.Id}, " +
+                    $"native_value={entry.NativeValue}.");
+                switch (kind)
+                {
+                    case QuickActionKind.Stamp:
+                        if (GameContext?.TryGetHudChatManager(out var stampManager) != true)
+                        {
+                            return ChatSendResult.Unavailable(
+                                "Relink's communication Manager is not ready in the current game state.");
+                        }
+                        SafeLog($"Official stamp Manager=0x{(nuint)stampManager:X}.");
+                        _sendStamp!(stampManager, entry.NativeValue);
+                        break;
+
+                    case QuickActionKind.FixedPhrase:
+                        if (GameContext?.TryGetHudChatManager(out var phraseManager) != true)
+                        {
+                            return ChatSendResult.Unavailable(
+                                "Relink's communication Manager is not ready in the current game state.");
+                        }
+
+                        // -1 is the game's explicit no-character-voice sentinel. The fixed phrase
+                        // itself is sent normally without guessing the current character voice ID.
+                        _sendFixedPhrase!(phraseManager, entry.NativeValue, -1, 0);
+                        _playFixedPhrase!(entry.NativeValue);
+                        break;
+
+                    case QuickActionKind.Emotion:
+                        _sendEmotion!(entry.NativeValue);
+                        _playEmotion!(entry.NativeValue);
+                        break;
+
+                    default:
+                        return ChatSendResult.Rejected("Unsupported quick action type.");
+                }
+                SafeLog(
+                    $"Official communication native call returned: kind={kind}, id={entry.Id}.");
+            }
+            catch (Exception exception)
+            {
+                SafeLog($"Native official communication send failed: {exception.Message}");
+                return ChatSendResult.Failed("Relink rejected the official communication call.");
             }
         }
 
@@ -272,4 +363,23 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate void RpcMessageDelegate(nint chat);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate void SendStampDelegate(nint manager, int stampId);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate void SendFixedPhraseDelegate(
+        nint manager,
+        int phraseId,
+        int voiceId,
+        int flags);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate void SendEmotionDelegate(int animationId);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate void PlayFixedPhraseDelegate(int phraseId);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate void PlayEmotionDelegate(int animationId);
 }

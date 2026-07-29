@@ -39,7 +39,7 @@ internal static class VoiceIndicatorOverlay
             workSize.X,
             workSize.Y);
         var placements = CreatePlacements(
-            configuration.ShowAllVoiceIndicatorSlots,
+            configuration.EffectiveShowAllVoiceIndicatorSlots,
             voiceStatus,
             nativeAnchors);
         if (placements.Count == 0)

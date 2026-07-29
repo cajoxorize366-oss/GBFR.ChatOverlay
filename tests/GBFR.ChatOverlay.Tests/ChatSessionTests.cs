@@ -42,6 +42,37 @@ public sealed class ChatSessionTests
     }
 
     [Fact]
+    public void SendText_NormalizesAndSendsWithoutChangingOpenDraft()
+    {
+        var composer = new ChatComposer();
+        composer.OpenKeyboard();
+        composer.SetDraft("work in progress");
+        var transport = new StubTransport(ChatSendResult.Sent());
+        var session = new ChatSession(new ChatHistory(10), composer, transport);
+
+        var result = session.SendText("  Ready!\r\n✨  ");
+
+        Assert.True(result.Succeeded);
+        Assert.Equal("Ready! ✨", transport.LastMessage);
+        Assert.Equal("work in progress", composer.Draft);
+        Assert.Equal(ChatInputMode.Keyboard, composer.Mode);
+        Assert.Equal("Ready! ✨", Assert.Single(session.History.Snapshot()).Text);
+    }
+
+    [Fact]
+    public void SendText_RejectsEmptyTextWithoutCallingTransport()
+    {
+        var transport = new StubTransport(ChatSendResult.Sent());
+        var session = new ChatSession(new ChatHistory(10), new ChatComposer(), transport);
+
+        var result = session.SendText(" \r\n ");
+
+        Assert.Equal(ChatSendStatus.EmptyDraft, result.Status);
+        Assert.Null(transport.LastMessage);
+        Assert.Empty(session.History.Snapshot());
+    }
+
+    [Fact]
     public void DrainIncoming_AppendsHookRecordsOnOwningThread()
     {
         var source = new StubIncomingSource(

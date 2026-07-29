@@ -35,6 +35,7 @@ public sealed class PartyLifecycleProbe
     private IHook<PartyStartProcessingStateChangesDelegate>? _startProcessingHook;
     private IHook<PartyFinishProcessingStateChangesDelegate>? _finishProcessingHook;
     private PartyChatControlCanary? _chatControlCanary;
+    private PartyPlayerMuteController? _playerMuteController;
     private PartyAudioWorkPump? _audioWorkPump;
     private nint _partyHandle;
     private bool _initialized;
@@ -94,6 +95,53 @@ public sealed class PartyLifecycleProbe
         }
     }
 
+    internal IReadOnlyList<PartyPlayerMuteSlotStatus> GetPlayerMuteSlots()
+    {
+        if (!IsInitialized || Volatile.Read(ref _suspended) || !_onlineRoom.IsActive)
+        {
+            return PartyPlayerMuteSlotStatus.Unavailable(
+                "仅在联机房间中可用。 / Available only in an online room.");
+        }
+
+        try
+        {
+            return _playerMuteController?.GetSnapshot() ??
+                   PartyPlayerMuteSlotStatus.Unavailable(
+                       "玩家禁言服务不可用。 / Player mute service is unavailable.");
+        }
+        catch (Exception exception)
+        {
+            LogInspectionFailureOnce(exception);
+            return PartyPlayerMuteSlotStatus.Unavailable(
+                "玩家身份读取失败。 / Player identity lookup failed.");
+        }
+    }
+
+    internal PartyPlayerMuteOperationResult SetPlayerMuted(int playerNumber, bool muted)
+    {
+        if (!IsInitialized || Volatile.Read(ref _suspended) || !_onlineRoom.IsActive)
+        {
+            return new PartyPlayerMuteOperationResult(
+                false,
+                "仅在联机房间中可修改玩家禁言。 / Player mute can be changed only in an online room.");
+        }
+
+        try
+        {
+            return _playerMuteController?.SetPlayerMuted(playerNumber, muted) ??
+                   new PartyPlayerMuteOperationResult(
+                       false,
+                       "玩家禁言服务不可用。 / Player mute service is unavailable.");
+        }
+        catch (Exception exception)
+        {
+            LogInspectionFailureOnce(exception);
+            return new PartyPlayerMuteOperationResult(
+                false,
+                "玩家禁言操作失败。 / Player mute operation failed.");
+        }
+    }
+
     public void Initialize()
     {
         lock (_lifecycleSync)
@@ -149,11 +197,44 @@ public sealed class PartyLifecycleProbe
 
             try
             {
-                if (_enableMutedChatControlCanary)
+                PartyNativeApi? partyApi = null;
+                try
+                {
+                    partyApi = new PartyNativeApi(module);
+                }
+                catch (Exception exception)
+                {
+                    EnqueueLog(
+                        $"Party ChatControl API unavailable; player mute and the optional canary remain disabled: " +
+                        exception.Message);
+                }
+
+                if (partyApi is not null)
                 {
                     try
                     {
-                        var partyApi = new PartyNativeApi(module);
+                        var relinkRvas = RelinkBuildLocator.Resolve(mainModule.FileName);
+                        var identityResolver = RelinkPartyMemberIdentityResolver.CreateForCurrentProcess(
+                            mainModule.BaseAddress,
+                            relinkRvas);
+                        _playerMuteController = new PartyPlayerMuteController(
+                            partyApi,
+                            identityResolver,
+                            EnqueueLog);
+                    }
+                    catch (Exception exception)
+                    {
+                        _playerMuteController = null;
+                        EnqueueLog(
+                            $"Exact Relink-slot/Party-EntityId player mute mapping unavailable: " +
+                            exception.Message);
+                    }
+                }
+
+                if (_enableMutedChatControlCanary && partyApi is not null)
+                {
+                    try
+                    {
                         _chatControlCanary = new PartyChatControlCanary(
                             partyApi,
                             EnqueueLog,
@@ -204,7 +285,10 @@ public sealed class PartyLifecycleProbe
 
                 Volatile.Write(ref _initialized, true);
                 _log(_chatControlCanary is null
-                    ? $"Party lifecycle probe attached at 0x{(nuint)module:X}; observation only, no Party calls or sends."
+                    ? _playerMuteController is null
+                        ? $"Party lifecycle probe attached at 0x{(nuint)module:X}; observation only, no Party calls or sends."
+                        : $"Party lifecycle/player mute attached at 0x{(nuint)module:X}; " +
+                          "players 2-4 are correlated by the verified Relink slot EntityId before Party audio is changed."
                     : _enableVoiceTest
                         ? $"Party lifecycle/Stage 3 voice test attached at 0x{(nuint)module:X}; " +
                           "one ChatControl may join the existing PartyNetwork. U unmutes Party's native selected " +
@@ -221,6 +305,8 @@ public sealed class PartyLifecycleProbe
                 _audioWorkPump = null;
                 _chatControlCanary?.Dispose();
                 _chatControlCanary = null;
+                _playerMuteController?.Reset();
+                _playerMuteController = null;
                 _onlineRoom.Reset();
                 throw;
             }
@@ -237,6 +323,7 @@ public sealed class PartyLifecycleProbe
         }
         _audioWorkPump?.DetachManager(nint.Zero, "Mod suspension");
         _chatControlCanary?.SuspendBestEffort();
+        _playerMuteController?.Reset();
     }
 
     public void Resume()
@@ -305,6 +392,7 @@ public sealed class PartyLifecycleProbe
             {
                 var handle = Marshal.ReadIntPtr(handleOutput);
                 _onlineRoom.Reset();
+                _playerMuteController?.Reset();
                 if (CapturePartyHandle(handle, "PartyInitialize"))
                     EnsureAudioWorkPump(handle, "PartyInitialize");
             }
@@ -327,6 +415,7 @@ public sealed class PartyLifecycleProbe
         _audioWorkPump?.DetachManager(
             nint.Zero,
             $"PartyCleanup for manager 0x{(nuint)handle:X}");
+        _playerMuteController?.Reset();
         _chatControlCanary?.BeginManagerCleanup(handle);
         var result = _cleanupHook!.OriginalFunction(handle);
         if (Volatile.Read(ref _suspended))
@@ -371,6 +460,7 @@ public sealed class PartyLifecycleProbe
             {
                 // This detour runs before Party's original LeaveNetwork body. Queueing destruction here
                 // gives the game's normal state-change pump time to return the local left/destroy events.
+                _playerMuteController?.PrepareForNetworkLeave(network);
                 _chatControlCanary?.PrepareForNetworkLeave(network);
             }
             catch (Exception exception)
@@ -390,6 +480,7 @@ public sealed class PartyLifecycleProbe
         nint stateChangeCountOutput,
         nint stateChangesOutput)
     {
+        _playerMuteController?.BeginStateChangeBatch(handle);
         _chatControlCanary?.BeginStateChangeBatch(handle);
         uint result;
         try
@@ -402,6 +493,7 @@ public sealed class PartyLifecycleProbe
         catch
         {
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
+            _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             throw;
         }
@@ -409,6 +501,7 @@ public sealed class PartyLifecycleProbe
         if (Volatile.Read(ref _suspended))
         {
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
+            _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             return result;
         }
@@ -416,6 +509,7 @@ public sealed class PartyLifecycleProbe
         if (result != 0)
         {
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
+            _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             if (Interlocked.Exchange(ref _startFailureLogged, 1) == 0)
             {
@@ -453,6 +547,7 @@ public sealed class PartyLifecycleProbe
         catch
         {
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
+            _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
             throw;
         }
@@ -460,6 +555,7 @@ public sealed class PartyLifecycleProbe
         {
             try
             {
+                _playerMuteController?.OnBatchFinished(handle);
                 _chatControlCanary?.OnBatchFinished(handle);
                 var pendingManager = Interlocked.Exchange(
                     ref _audioWorkStartPendingManager,
@@ -487,6 +583,10 @@ public sealed class PartyLifecycleProbe
         else
         {
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
+            if (result != 0)
+                _playerMuteController?.Reset();
+            else
+                _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
         }
         if (!Volatile.Read(ref _suspended) &&
@@ -509,6 +609,7 @@ public sealed class PartyLifecycleProbe
         if (stateChangeCountOutput == nint.Zero || stateChangesOutput == nint.Zero)
         {
             _onlineRoom.Reset();
+            _playerMuteController?.Reset();
             _chatControlCanary?.DisableFailClosed(
                 "Party returned null state-change output storage");
             return;
@@ -520,6 +621,7 @@ public sealed class PartyLifecycleProbe
         if (count > MaximumStateChangesPerBatch)
         {
             _onlineRoom.Reset();
+            _playerMuteController?.Reset();
             _chatControlCanary?.DisableFailClosed(
                 $"Party state batch count {count} exceeded the safety limit");
             EnqueueLog($"Party state batch count {count} exceeds the probe safety limit; batch ignored.");
@@ -530,6 +632,7 @@ public sealed class PartyLifecycleProbe
         if (stateChanges == nint.Zero)
         {
             _onlineRoom.Reset();
+            _playerMuteController?.Reset();
             _chatControlCanary?.DisableFailClosed(
                 "Party returned a non-empty state batch with a null array");
             return;
@@ -541,6 +644,7 @@ public sealed class PartyLifecycleProbe
             if (stateChange == nint.Zero)
             {
                 _onlineRoom.Reset();
+                _playerMuteController?.Reset();
                 _chatControlCanary?.DisableFailClosed(
                     $"Party state batch entry {index} was null");
                 return;
@@ -554,6 +658,7 @@ public sealed class PartyLifecycleProbe
                     $"Party lifecycle state {PartyStateChangeCatalog.GetName(snapshot.Type)} ({snapshot.Type}).");
             }
 
+            _playerMuteController?.Observe(snapshot);
             _chatControlCanary?.Observe(handle, snapshot);
         }
     }
@@ -581,6 +686,7 @@ public sealed class PartyLifecycleProbe
             $"Party manager ownership conflict at {source}: retained 0x{(nuint)previous:X}, " +
             $"rejected 0x{(nuint)handle:X}; Stage 2 will fail closed.");
         _onlineRoom.Reset();
+        _playerMuteController?.Reset();
         _chatControlCanary?.CaptureManager(handle, source);
         return false;
     }
@@ -596,6 +702,7 @@ public sealed class PartyLifecycleProbe
     private void LogInspectionFailureOnce(Exception exception)
     {
         _onlineRoom.Reset();
+        _playerMuteController?.Reset();
         _chatControlCanary?.DisableFailClosed(
             $"Party state inspection threw {exception.GetType().Name}: {exception.Message}");
         if (Interlocked.Exchange(ref _inspectionFailureLogged, 1) == 0)

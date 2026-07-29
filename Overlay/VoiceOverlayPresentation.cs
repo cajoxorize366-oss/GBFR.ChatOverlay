@@ -1,4 +1,5 @@
 using GBFR.ChatOverlay.Native;
+using GBFR.ChatOverlay.Configuration;
 
 namespace GBFR.ChatOverlay.Overlay;
 
@@ -6,32 +7,37 @@ internal readonly record struct VoiceOverlayPresentation(bool IsVisible, string 
 
 internal static class VoiceOverlayPresenter
 {
-    public static VoiceOverlayPresentation Create(PartyVoiceUiStatus status) =>
+    public static VoiceOverlayPresentation Create(
+        PartyVoiceUiStatus status,
+        UiLanguage language = UiLanguage.SimplifiedChinese) =>
         status.State switch
         {
             PartyVoiceUiState.Disabled => new(false, string.Empty),
             PartyVoiceUiState.Unavailable =>
-                new(true, "[VOICE] 队友语音不可用 · F10 设置 / 本地自检"),
+                new(true, T(language, "[语音] 不可用", "[Voice] Unavailable")),
             PartyVoiceUiState.WaitingForSession =>
-                new(true, "[VOICE] 等待进入联机房间 · F10 设置 / 本地自检"),
+                new(true, T(language, "[语音] 等待联机房间", "[Voice] Waiting for an online room")),
             PartyVoiceUiState.Connecting =>
-                new(true, "[VOICE] 正在初始化 · 麦克风已静音"),
+                new(true, T(language, "[语音] 正在连接", "[Voice] Connecting")),
             PartyVoiceUiState.WaitingForPeer =>
-                new(true, "[VOICE] 等待队友语音通道 · F10 设置 / 本地自检"),
+                new(true, T(language, "[语音] 等待队友", "[Voice] Waiting for players")),
             PartyVoiceUiState.LocalSelfTesting =>
-                new(true, ">>> [VOICE] 本地自检中 · 请说话 · 在 F10 菜单停止 <<<"),
+                new(true, T(language, "[语音] 测试中，请说话", "[Voice] Testing; please speak")),
             PartyVoiceUiState.LocalSelfTestSignalDetected =>
-                new(true, ">>> [VOICE] 本地自检通过 · 声音正在回放 <<<"),
+                new(true, T(language, "[语音] 测试通过", "[Voice] Test passed")),
             PartyVoiceUiState.LocalSelfTestFailed =>
-                new(true, "[VOICE] 本地监听失败 · 已停止并保持安全静音"),
+                new(true, T(language, "[语音] 测试失败", "[Voice] Test failed")),
             PartyVoiceUiState.Ready =>
-                new(true, "[VOICE] 已就绪 · U 队友通话 / F10 设置与自检"),
+                new(true, T(language, "[语音] 已就绪", "[Voice] Ready")),
             PartyVoiceUiState.Speaking =>
-                new(true, ">>> [VOICE] 正在语音 · 松开 U 静音 <<<"),
+                new(true, T(language, "[语音] 正在说话", "[Voice] Speaking")),
             PartyVoiceUiState.Disconnecting =>
-                new(true, "[VOICE] 正在断开 · 麦克风已静音"),
+                new(true, T(language, "[语音] 正在断开", "[Voice] Disconnecting")),
             PartyVoiceUiState.Faulted =>
-                new(true, "[VOICE] 异常 · 已强制静音"),
-            _ => new(true, "[VOICE] 状态未知 · 麦克风保持静音"),
+                new(true, T(language, "[语音] 已静音", "[Voice] Muted")),
+            _ => new(true, T(language, "[语音] 状态未知", "[Voice] Unknown state")),
         };
+
+    private static string T(UiLanguage language, string chinese, string english) =>
+        UiLocalization.Select(language, chinese, english);
 }

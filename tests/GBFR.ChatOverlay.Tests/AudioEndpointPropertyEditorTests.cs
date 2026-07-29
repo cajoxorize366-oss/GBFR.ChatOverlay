@@ -94,12 +94,12 @@ public sealed class AudioEndpointPropertyEditorTests
             comboBox.Items.Cast<object>(),
             choice => GetChoiceValue(choice, "Id") == staleEndpointId &&
                       GetChoiceValue(choice, "DisplayName")
-                          .Contains("Unavailable saved device", StringComparison.Ordinal));
+                          .Contains("不可用 / Unavailable", StringComparison.Ordinal));
         Assert.Contains(
             comboBox.Items.Cast<object>(),
             choice => GetChoiceValue(choice, "Id") == "default" &&
                       GetChoiceValue(choice, "DisplayName")
-                          .StartsWith("Default", StringComparison.Ordinal));
+                          .StartsWith("系统默认 / Default", StringComparison.Ordinal));
 
         comboBox.SelectedValue = "default";
         BindingOperations.GetBindingExpression(comboBox, Selector.SelectedValueProperty)!.UpdateSource();
@@ -122,7 +122,7 @@ public sealed class AudioEndpointPropertyEditorTests
 
         Assert.Equal("default", comboBox.SelectedValue);
         Assert.Equal("default", descriptor.GetValue(config));
-        Assert.StartsWith("Default", GetChoiceValue(comboBox.SelectedItem!, "DisplayName"));
+        Assert.StartsWith("系统默认 / Default", GetChoiceValue(comboBox.SelectedItem!, "DisplayName"));
     }
 
     private static string GetChoiceValue(object choice, string propertyName) =>

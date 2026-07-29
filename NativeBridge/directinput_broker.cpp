@@ -2,12 +2,15 @@
 
 #include <Windows.h>
 #include <dinput.h>
+#include <Xinput.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <intrin.h>
 #include <mutex>
 #include <utility>
 
@@ -15,28 +18,29 @@
 
 namespace
 {
-constexpr uint32_t kBrokerAbiVersion = 1;
+constexpr uint32_t kBrokerAbiVersion = 2;
+constexpr size_t kKeyboardWordCount = 4;
+constexpr size_t kMaximumHotkeyBindings = 64;
 
 constexpr uint32_t kPolicyCaptureKeyboard = 1u << 0;
 constexpr uint32_t kPolicyCaptureMouse = 1u << 1;
 constexpr uint32_t kPolicySuppressActivation = 1u << 2;
 constexpr uint32_t kPolicySuppressSettings = 1u << 3;
 constexpr uint32_t kPolicySuppressPushToTalk = 1u << 4;
+constexpr uint32_t kPolicySuppressQuickActions = 1u << 5;
 constexpr uint32_t kPolicyMask =
     kPolicyCaptureKeyboard |
     kPolicyCaptureMouse |
     kPolicySuppressActivation |
     kPolicySuppressSettings |
-    kPolicySuppressPushToTalk;
-
-constexpr uint32_t kKeyActivation = 1u << 0;
-constexpr uint32_t kKeySettings = 1u << 1;
-constexpr uint32_t kKeyPushToTalk = 1u << 2;
+    kPolicySuppressPushToTalk |
+    kPolicySuppressQuickActions;
 
 constexpr uint32_t kReadyIat = 1u << 0;
 constexpr uint32_t kReadyFactory = 1u << 1;
 constexpr uint32_t kReadyKeyboard = 1u << 2;
 constexpr uint32_t kReadyMouse = 1u << 3;
+constexpr uint32_t kReadyXInput = 1u << 4;
 
 constexpr size_t kCreateDeviceVtableIndex = 3;
 constexpr size_t kGetDeviceStateVtableIndex = 9;
@@ -69,14 +73,25 @@ struct DirectInputBrokerSnapshot
     uint32_t abi_version;
     uint32_t struct_size;
     uint64_t sequence;
-    uint32_t key_flags;
+    uint64_t keyboard_words[kKeyboardWordCount];
+    uint16_t controller_buttons;
+    uint16_t reserved;
     uint32_t ready_flags;
     uint32_t policy_flags;
     uint32_t active;
 };
+
+struct DirectInputHotkeyBinding
+{
+    uint8_t scan_code;
+    uint8_t modifiers;
+    uint8_t policy_flag;
+    uint8_t reserved;
+};
 #pragma pack(pop)
 
-static_assert(sizeof(DirectInputBrokerSnapshot) == 32);
+static_assert(sizeof(DirectInputBrokerSnapshot) == 64);
+static_assert(sizeof(DirectInputHotkeyBinding) == 4);
 
 using DirectInput8CreateFn = HRESULT(WINAPI*)(
     HINSTANCE,
@@ -84,9 +99,11 @@ using DirectInput8CreateFn = HRESULT(WINAPI*)(
     REFIID,
     LPVOID*,
     LPUNKNOWN);
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 
 std::mutex g_hook_mutex;
 std::atomic<void*> g_original_direct_input8_create{nullptr};
+std::atomic<void*> g_original_xinput_get_state{nullptr};
 SafetyHookInline g_create_device_hook;
 SafetyHookInline g_get_state_hook;
 SafetyHookInline g_get_data_hook;
@@ -100,9 +117,13 @@ std::atomic_uintptr_t g_keyboard_device{0};
 std::atomic_uintptr_t g_mouse_device{0};
 std::atomic_uint32_t g_ready_flags{0};
 std::atomic_uint32_t g_policy_flags{0};
-std::atomic_uint32_t g_selective_drain_flags{0};
-std::atomic_uint32_t g_key_flags{0};
-std::atomic_uint64_t g_key_sequence{0};
+std::array<std::atomic_uint64_t, kKeyboardWordCount> g_keyboard_words{};
+std::array<std::atomic_uint64_t, kKeyboardWordCount> g_keyboard_drain_words{};
+std::array<std::atomic_uint32_t, kMaximumHotkeyBindings> g_hotkey_bindings{};
+std::atomic_uint32_t g_hotkey_binding_count{0};
+std::array<std::atomic_uint16_t, XUSER_MAX_COUNT> g_controller_user_buttons{};
+std::atomic_uint16_t g_controller_buttons{0};
+std::atomic_uint64_t g_input_sequence{0};
 std::atomic_bool g_active{false};
 std::atomic_bool g_keyboard_drain{false};
 std::atomic_bool g_mouse_drain{false};
@@ -376,18 +397,91 @@ HRESULT InvokeGetDeviceDataSafely(
     }
 }
 
-uint32_t ReadTrackedKeyFlags(const uint8_t* state, DWORD data_size) noexcept
+std::array<uint64_t, kKeyboardWordCount> ReadKeyboardWords(
+    const uint8_t* state,
+    DWORD data_size) noexcept
 {
+    std::array<uint64_t, kKeyboardWordCount> words{};
     if (state == nullptr)
-        return 0;
-    uint32_t flags = 0;
-    if (data_size > DIK_Y && (state[DIK_Y] & 0x80) != 0)
-        flags |= kKeyActivation;
-    if (data_size > DIK_F10 && (state[DIK_F10] & 0x80) != 0)
-        flags |= kKeySettings;
-    if (data_size > DIK_U && (state[DIK_U] & 0x80) != 0)
-        flags |= kKeyPushToTalk;
-    return flags;
+        return words;
+    const DWORD maximum = std::min<DWORD>(data_size, 256);
+    for (DWORD scan_code = 0; scan_code < maximum; ++scan_code)
+    {
+        if ((state[scan_code] & 0x80) != 0)
+            words[scan_code / 64] |= uint64_t{1} << (scan_code % 64);
+    }
+    return words;
+}
+
+DWORD InvokeXInputGetStateSafely(DWORD user_index, XINPUT_STATE* state) noexcept
+{
+    const auto original = reinterpret_cast<XInputGetStateFn>(
+        g_original_xinput_get_state.load(std::memory_order_acquire));
+    if (original == nullptr)
+        return ERROR_DEVICE_NOT_CONNECTED;
+    __try
+    {
+        return original(user_index, state);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
+}
+
+uint16_t AggregateControllerButtons() noexcept
+{
+    uint16_t buttons = 0;
+    for (size_t index = 0; index < XUSER_MAX_COUNT; ++index)
+    {
+        buttons |= g_controller_user_buttons[index].load(std::memory_order_acquire);
+    }
+    return buttons;
+}
+
+DWORD WINAPI XInputGetStateDetour(DWORD user_index, XINPUT_STATE* state)
+{
+    const DWORD result = InvokeXInputGetStateSafely(user_index, state);
+    if (user_index < XUSER_MAX_COUNT)
+    {
+        const uint16_t buttons = result == ERROR_SUCCESS && state != nullptr
+            ? state->Gamepad.wButtons
+            : 0;
+        g_controller_user_buttons[user_index].store(buttons, std::memory_order_release);
+        const uint16_t aggregate = AggregateControllerButtons();
+        if (g_controller_buttons.exchange(aggregate, std::memory_order_acq_rel) != aggregate)
+            g_input_sequence.fetch_add(1, std::memory_order_acq_rel);
+    }
+    return result;
+}
+
+bool IsScanCodePressed(
+    const std::array<uint64_t, kKeyboardWordCount>& words,
+    uint8_t scan_code) noexcept
+{
+    return (words[scan_code / 64] & (uint64_t{1} << (scan_code % 64))) != 0;
+}
+
+bool AreModifiersPressed(
+    const std::array<uint64_t, kKeyboardWordCount>& words,
+    uint8_t modifiers) noexcept
+{
+    constexpr uint8_t kModifierControl = 1u << 0;
+    constexpr uint8_t kModifierShift = 1u << 1;
+    constexpr uint8_t kModifierAlt = 1u << 2;
+    constexpr uint8_t kModifierMask =
+        kModifierControl | kModifierShift | kModifierAlt;
+    if ((modifiers & ~kModifierMask) != 0)
+        return false;
+    const bool control = IsScanCodePressed(words, DIK_LCONTROL) ||
+        IsScanCodePressed(words, DIK_RCONTROL);
+    const bool shift = IsScanCodePressed(words, DIK_LSHIFT) ||
+        IsScanCodePressed(words, DIK_RSHIFT);
+    const bool alt = IsScanCodePressed(words, DIK_LMENU) ||
+        IsScanCodePressed(words, DIK_RMENU);
+    return ((modifiers & kModifierControl) == 0 || control) &&
+        ((modifiers & kModifierShift) == 0 || shift) &&
+        ((modifiers & kModifierAlt) == 0 || alt);
 }
 
 bool HasPressedKeyboardKey(const uint8_t* state, DWORD data_size) noexcept
@@ -418,33 +512,47 @@ void ApplySelectiveKeyboardSuppression(
     uint8_t* state,
     DWORD data_size,
     uint32_t policy,
-    uint32_t raw_keys) noexcept
+    const std::array<uint64_t, kKeyboardWordCount>& raw_words) noexcept
 {
-    uint32_t drain = g_selective_drain_flags.load(std::memory_order_acquire);
-    struct KeyPolicy
+    std::array<uint64_t, kKeyboardWordCount> drain{};
+    for (size_t word = 0; word < kKeyboardWordCount; ++word)
     {
-        uint32_t policy_flag;
-        uint32_t key_flag;
-        uint32_t scan_code;
-    };
-    constexpr KeyPolicy keys[] = {
-        {kPolicySuppressActivation, kKeyActivation, DIK_Y},
-        {kPolicySuppressSettings, kKeySettings, DIK_F10},
-        {kPolicySuppressPushToTalk, kKeyPushToTalk, DIK_U},
-    };
-
-    for (const KeyPolicy& key : keys)
-    {
-        const bool pressed = (raw_keys & key.key_flag) != 0;
-        const bool requested = (policy & key.policy_flag) != 0;
-        if (requested && pressed)
-            drain |= key.key_flag;
-        if (!pressed)
-            drain &= ~key.key_flag;
-        if ((requested || (drain & key.key_flag) != 0) && data_size > key.scan_code)
-            state[key.scan_code] = 0;
+        drain[word] = g_keyboard_drain_words[word].load(std::memory_order_acquire) &
+            raw_words[word];
     }
-    g_selective_drain_flags.store(drain, std::memory_order_release);
+
+    const uint32_t binding_count = std::min<uint32_t>(
+        g_hotkey_binding_count.load(std::memory_order_acquire),
+        static_cast<uint32_t>(kMaximumHotkeyBindings));
+    for (uint32_t index = 0; index < binding_count; ++index)
+    {
+        const uint32_t packed = g_hotkey_bindings[index].load(std::memory_order_acquire);
+        const auto scan_code = static_cast<uint8_t>(packed & 0xFF);
+        const auto modifiers = static_cast<uint8_t>((packed >> 8) & 0xFF);
+        const auto policy_flag = static_cast<uint8_t>((packed >> 16) & 0xFF);
+        if (scan_code == 0 || (policy & policy_flag) == 0 ||
+            !IsScanCodePressed(raw_words, scan_code) ||
+            !AreModifiersPressed(raw_words, modifiers))
+        {
+            continue;
+        }
+        drain[scan_code / 64] |= uint64_t{1} << (scan_code % 64);
+    }
+
+    for (size_t word = 0; word < kKeyboardWordCount; ++word)
+    {
+        g_keyboard_drain_words[word].store(drain[word], std::memory_order_release);
+        uint64_t remaining = drain[word];
+        while (remaining != 0)
+        {
+            unsigned long bit = 0;
+            _BitScanForward64(&bit, remaining);
+            const size_t scan_code = word * 64 + bit;
+            if (scan_code < data_size)
+                state[scan_code] = 0;
+            remaining &= remaining - 1;
+        }
+    }
 }
 
 HRESULT ProcessGetDeviceState(
@@ -473,9 +581,10 @@ HRESULT ProcessGetDeviceState(
 
     if (is_keyboard)
     {
-        const uint32_t raw_keys = ReadTrackedKeyFlags(state, data_size);
-        g_key_flags.store(raw_keys, std::memory_order_release);
-        g_key_sequence.fetch_add(1, std::memory_order_acq_rel);
+        const auto raw_words = ReadKeyboardWords(state, data_size);
+        for (size_t word = 0; word < kKeyboardWordCount; ++word)
+            g_keyboard_words[word].store(raw_words[word], std::memory_order_release);
+        g_input_sequence.fetch_add(1, std::memory_order_acq_rel);
 
         const bool capture = (policy & kPolicyCaptureKeyboard) != 0;
         if (capture)
@@ -490,7 +599,7 @@ HRESULT ProcessGetDeviceState(
             else
                 g_keyboard_drain.store(false, std::memory_order_release);
         }
-        ApplySelectiveKeyboardSuppression(state, data_size, policy, raw_keys);
+        ApplySelectiveKeyboardSuppression(state, data_size, policy, raw_words);
         return result;
     }
 
@@ -806,6 +915,28 @@ HRESULT WINAPI DirectInput8CreateDetour(
     return result;
 }
 
+void TryInstallXInputObserver() noexcept
+{
+    constexpr const char* modules[] = {
+        "XINPUT1_4.dll",
+        "XINPUT1_3.dll",
+        "XINPUT9_1_0.dll",
+        "XINPUTUAP.dll",
+    };
+    for (const char* module : modules)
+    {
+        if (PatchMainModuleImport(
+                module,
+                "XInputGetState",
+                reinterpret_cast<void*>(&XInputGetStateDetour),
+                g_original_xinput_get_state))
+        {
+            g_ready_flags.fetch_or(kReadyXInput, std::memory_order_acq_rel);
+            return;
+        }
+    }
+}
+
 bool InstallBroker() noexcept
 {
     std::scoped_lock lock(g_hook_mutex);
@@ -822,6 +953,7 @@ bool InstallBroker() noexcept
     }
 
     g_ready_flags.fetch_or(kReadyIat, std::memory_order_acq_rel);
+    TryInstallXInputObserver();
     g_active.store(true, std::memory_order_release);
     return true;
 }
@@ -843,11 +975,17 @@ GBFRChatOverlay_SetDirectInputBrokerActive(int32_t requested)
     if (!active)
     {
         g_policy_flags.store(0, std::memory_order_release);
-        g_selective_drain_flags.store(0, std::memory_order_release);
+        for (size_t word = 0; word < kKeyboardWordCount; ++word)
+        {
+            g_keyboard_drain_words[word].store(0, std::memory_order_release);
+            g_keyboard_words[word].store(0, std::memory_order_release);
+        }
         g_keyboard_drain.store(false, std::memory_order_release);
         g_mouse_drain.store(false, std::memory_order_release);
-        g_key_flags.store(0, std::memory_order_release);
-        g_key_sequence.fetch_add(1, std::memory_order_acq_rel);
+        for (size_t index = 0; index < XUSER_MAX_COUNT; ++index)
+            g_controller_user_buttons[index].store(0, std::memory_order_release);
+        g_controller_buttons.store(0, std::memory_order_release);
+        g_input_sequence.fetch_add(1, std::memory_order_acq_rel);
     }
     return active || requested == 0 ? 1 : 0;
 }
@@ -865,6 +1003,55 @@ GBFRChatOverlay_SetDirectInputPolicy(uint32_t policy_flags)
 }
 
 extern "C" __declspec(dllexport) int32_t __cdecl
+GBFRChatOverlay_SetDirectInputHotkeyBindings(
+    const DirectInputHotkeyBinding* bindings,
+    uint32_t binding_count)
+{
+    if (binding_count > kMaximumHotkeyBindings ||
+        (binding_count != 0 && bindings == nullptr))
+    {
+        return 0;
+    }
+
+    constexpr uint8_t kModifierMask = 0x07;
+    constexpr uint8_t kAllowedPolicyFlags =
+        static_cast<uint8_t>(
+            kPolicySuppressActivation |
+            kPolicySuppressSettings |
+            kPolicySuppressPushToTalk |
+            kPolicySuppressQuickActions);
+    std::array<uint32_t, kMaximumHotkeyBindings> validated{};
+    __try
+    {
+        for (uint32_t index = 0; index < binding_count; ++index)
+        {
+            const DirectInputHotkeyBinding& binding = bindings[index];
+            if (binding.scan_code == 0 || binding.reserved != 0 ||
+                (binding.modifiers & ~kModifierMask) != 0 ||
+                binding.policy_flag == 0 ||
+                (binding.policy_flag & ~kAllowedPolicyFlags) != 0 ||
+                (binding.policy_flag & (binding.policy_flag - 1)) != 0)
+            {
+                return 0;
+            }
+            validated[index] = binding.scan_code |
+                (static_cast<uint32_t>(binding.modifiers) << 8) |
+                (static_cast<uint32_t>(binding.policy_flag) << 16);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
+
+    g_hotkey_binding_count.store(0, std::memory_order_release);
+    for (size_t index = 0; index < kMaximumHotkeyBindings; ++index)
+        g_hotkey_bindings[index].store(validated[index], std::memory_order_release);
+    g_hotkey_binding_count.store(binding_count, std::memory_order_release);
+    return 1;
+}
+
+extern "C" __declspec(dllexport) int32_t __cdecl
 GBFRChatOverlay_GetDirectInputSnapshot(
     DirectInputBrokerSnapshot* snapshot,
     uint32_t snapshot_size)
@@ -872,15 +1059,16 @@ GBFRChatOverlay_GetDirectInputSnapshot(
     if (snapshot == nullptr || snapshot_size < sizeof(DirectInputBrokerSnapshot))
         return 0;
 
-    const DirectInputBrokerSnapshot value{
-        kBrokerAbiVersion,
-        sizeof(DirectInputBrokerSnapshot),
-        g_key_sequence.load(std::memory_order_acquire),
-        g_key_flags.load(std::memory_order_acquire),
-        g_ready_flags.load(std::memory_order_acquire),
-        g_policy_flags.load(std::memory_order_acquire),
-        g_active.load(std::memory_order_acquire) ? 1u : 0u,
-    };
+    DirectInputBrokerSnapshot value{};
+    value.abi_version = kBrokerAbiVersion;
+    value.struct_size = sizeof(DirectInputBrokerSnapshot);
+    value.sequence = g_input_sequence.load(std::memory_order_acquire);
+    for (size_t word = 0; word < kKeyboardWordCount; ++word)
+        value.keyboard_words[word] = g_keyboard_words[word].load(std::memory_order_acquire);
+    value.controller_buttons = g_controller_buttons.load(std::memory_order_acquire);
+    value.ready_flags = g_ready_flags.load(std::memory_order_acquire);
+    value.policy_flags = g_policy_flags.load(std::memory_order_acquire);
+    value.active = g_active.load(std::memory_order_acquire) ? 1u : 0u;
     __try
     {
         *snapshot = value;

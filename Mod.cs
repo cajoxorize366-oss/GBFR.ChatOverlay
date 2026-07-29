@@ -110,7 +110,7 @@ public class Mod : ModBase // <= Do not Remove.
                 _partyLifecycleProbe = new PartyLifecycleProbe(
                     _hooks,
                     moduleLog,
-                    enableLifecycleLogging: _configuration.EnablePartyLifecycleProbe,
+                    enableLifecycleLogging: _configuration.EffectivePartyLifecycleDiagnostics,
                     enableMutedChatControlCanary:
                         _configuration.EnableMutedPartyChatControlCanary ||
                         _configuration.EnableVoiceInput,
@@ -176,9 +176,9 @@ public class Mod : ModBase // <= Do not Remove.
                 ChatMessageKind.System);
         }
 
-        IChatTransport transport = new LocalPreviewChatTransport();
+        IChatTransport transport = new UnavailableChatTransport();
         IIncomingChatSource? incoming = null;
-        var transportStatus = "Local preview: the Relink chat bridge is not attached.";
+        var transportStatus = "Native Relink chat is unavailable.";
         if (_hooks is not null && _configuration.EnableNativeChatBridge)
         {
             try
@@ -205,7 +205,7 @@ public class Mod : ModBase // <= Do not Remove.
                 _logger.WriteLine($"[{_modConfig.ModId}] Native chat bridge unavailable: {exception}");
                 history.Add(
                     "System",
-                    "Native chat bridge validation failed; messages remain in local preview.",
+                    "Native chat bridge validation failed; chat sending is unavailable.",
                     ChatMessageKind.System);
             }
         }
@@ -213,7 +213,7 @@ public class Mod : ModBase // <= Do not Remove.
         {
             history.Add(
                 "System",
-                "Native chat bridge is disabled or Reloaded.Hooks is unavailable; messages remain local.",
+                "Native chat bridge is disabled or Reloaded.Hooks is unavailable; chat sending is unavailable.",
                 ChatMessageKind.System);
         }
 
@@ -231,9 +231,17 @@ public class Mod : ModBase // <= Do not Remove.
             ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
             GetPartyHudAnchors,
+            GetPlayerMuteSlots,
+            SetPlayerMuted,
+            (kind, id) => _nativeChatBridge?.SendOfficialQuickAction(kind, id) ??
+                ChatSendResult.Unavailable("Relink's native communication bridge is unavailable."),
             _audioSettings,
             context.UpdateConfiguration,
             SetLocalMicrophoneSelfTestRequested,
+            () => IsOnlineRoomActive() &&
+                  _configuration.EnableVoiceInput &&
+                  _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
+            pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             ForceReleaseVoiceInputs,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
@@ -257,6 +265,7 @@ public class Mod : ModBase // <= Do not Remove.
             try
             {
                 directInputKeyboard = new DirectInputKeyboardHook(
+                    DirectInputBrokerBridge.Instance,
                     _overlay.CanRequestOpen,
                     _overlay.TryRequestOpen,
                     () => (_overlayHub.CapturedInputDevices &
@@ -270,7 +279,12 @@ public class Mod : ModBase // <= Do not Remove.
                     () => _overlay.IsInitialized && !_overlay.IsSuspended,
                     _overlay.ObserveSettingsMenuKey,
                     pressed => _audioSettings?.SetSelfTestPressed(pressed),
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                    () => _configuration,
+                    _overlay.ObserveNativeInputSnapshot,
+                    _overlay.ObserveQuickActionsMenuKey,
+                    _overlay.ObserveQuickActionKey,
+                    _overlay.ObservePlayerMuteKey);
                 StartupPhaseDiagnostic.Run(
                     "directinput-broker-hooks",
                     moduleLog,
@@ -412,6 +426,17 @@ public class Mod : ModBase // <= Do not Remove.
             viewportY,
             viewportWidth,
             viewportHeight) ?? Array.Empty<PartyHudAnchor>();
+
+    private IReadOnlyList<PartyPlayerMuteSlotStatus> GetPlayerMuteSlots() =>
+        _partyLifecycleProbe?.GetPlayerMuteSlots() ??
+        PartyPlayerMuteSlotStatus.Unavailable(
+            "玩家禁言服务不可用。 / Player mute service is unavailable.");
+
+    private PartyPlayerMuteOperationResult SetPlayerMuted(int playerNumber, bool muted) =>
+        _partyLifecycleProbe?.SetPlayerMuted(playerNumber, muted) ??
+        new PartyPlayerMuteOperationResult(
+            false,
+            "玩家禁言服务不可用。 / Player mute service is unavailable.");
 
     private void ReleaseRoomScopedInputs()
     {

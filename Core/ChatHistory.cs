@@ -8,6 +8,7 @@ public sealed class ChatHistory
 {
     private readonly object _sync = new();
     private readonly Queue<ChatMessage> _messages;
+    private IReadOnlyList<ChatMessage>? _cachedSnapshot;
     private long _nextSequence = 1;
 
     public ChatHistory(int capacity)
@@ -42,6 +43,7 @@ public sealed class ChatHistory
             _messages.Enqueue(message);
             while (_messages.Count > Capacity)
                 _messages.Dequeue();
+            _cachedSnapshot = null;
 
             return message;
         }
@@ -50,12 +52,17 @@ public sealed class ChatHistory
     public IReadOnlyList<ChatMessage> Snapshot()
     {
         lock (_sync)
-            return _messages.ToArray();
+            return _cachedSnapshot ??= Array.AsReadOnly(_messages.ToArray());
     }
 
     public void Clear()
     {
         lock (_sync)
+        {
+            if (_messages.Count == 0)
+                return;
             _messages.Clear();
+            _cachedSnapshot = null;
+        }
     }
 }

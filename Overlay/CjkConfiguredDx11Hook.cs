@@ -70,7 +70,7 @@ internal sealed unsafe class CjkConfiguredDx11Hook : IImguiHook
             _font = ImGui.ImFontAtlasAddFontFromFileTTF(
                 atlas,
                 fontPath,
-                18.0f,
+                OverlayUiScale.Scale(18.0f),
                 null!,
                 ref firstGlyphRange);
             if (_font is null || !ImGui.ImFontAtlasBuild(atlas))

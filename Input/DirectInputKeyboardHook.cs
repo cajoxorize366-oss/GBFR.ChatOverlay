@@ -19,10 +19,11 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private readonly Func<bool> _isSettingsMenuAvailable;
     private readonly Action<bool> _reportSettingsMenuKey;
     private readonly Func<Config> _getConfiguration;
+    private readonly Func<long> _getConfigurationRevision;
     private readonly Action<DirectInputBrokerSnapshot> _observeInputSnapshot;
     private readonly Action<bool> _reportQuickActionsMenuKey;
     private readonly Action<string, bool> _reportQuickActionKey;
-    private readonly Action<int, bool> _reportPlayerMuteKey;
+    private readonly Action<bool> _reportGlobalMuteKey;
     private readonly Action<string> _log;
     private readonly VoicePushToTalkSafetyGate _voicePushToTalkGate;
     private readonly VoiceInputModeCoordinator _voiceInputModeCoordinator;
@@ -32,6 +33,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private DirectInputBrokerReadiness _lastReadiness =
         unchecked((DirectInputBrokerReadiness)uint.MaxValue);
     private ulong _lastSequence = ulong.MaxValue;
+    private long _lastHotkeyRevision = long.MinValue;
     private string? _lastHotkeySignature;
     private HotkeyConfigurationSnapshot? _hotkeys;
     private bool _activationWasDown;
@@ -39,7 +41,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private bool _quickActionsWasDown;
     private bool _bindingReleasePending = true;
     private readonly Dictionary<string, bool> _quickActionWasDown = new(StringComparer.Ordinal);
-    private readonly bool[] _playerMuteWasDown = new bool[3];
+    private bool _globalMuteWasDown;
     private int _initialized;
     private int _suspended;
     private int _disposed;
@@ -87,10 +89,11 @@ public sealed class DirectInputKeyboardHook : IDisposable
         Action<bool> setLocalMicrophoneMonitorPressed,
         Action<string> log,
         Func<Config>? getConfiguration = null,
+        Func<long>? getConfigurationRevision = null,
         Action<DirectInputBrokerSnapshot>? observeInputSnapshot = null,
         Action<bool>? reportQuickActionsMenuKey = null,
         Action<string, bool>? reportQuickActionKey = null,
-        Action<int, bool>? reportPlayerMuteKey = null)
+        Action<bool>? reportGlobalMuteKey = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _canActivate = canActivate ?? throw new ArgumentNullException(nameof(canActivate));
@@ -105,10 +108,11 @@ public sealed class DirectInputKeyboardHook : IDisposable
         _reportSettingsMenuKey = reportSettingsMenuKey ??
             throw new ArgumentNullException(nameof(reportSettingsMenuKey));
         _getConfiguration = getConfiguration ?? (() => new Config());
+        _getConfigurationRevision = getConfigurationRevision ?? (() => 0L);
         _observeInputSnapshot = observeInputSnapshot ?? (_ => { });
         _reportQuickActionsMenuKey = reportQuickActionsMenuKey ?? (_ => { });
         _reportQuickActionKey = reportQuickActionKey ?? ((_, _) => { });
-        _reportPlayerMuteKey = reportPlayerMuteKey ?? ((_, _) => { });
+        _reportGlobalMuteKey = reportGlobalMuteKey ?? (_ => { });
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _voiceInputModeCoordinator = new VoiceInputModeCoordinator(
             setVoicePushToTalkPressed ?? throw new ArgumentNullException(nameof(setVoicePushToTalkPressed)),
@@ -139,6 +143,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
                 _lastPolicy = unchecked((DirectInputBrokerPolicy)uint.MaxValue);
                 _lastReadiness = unchecked((DirectInputBrokerReadiness)uint.MaxValue);
                 _lastSequence = ulong.MaxValue;
+                _lastHotkeyRevision = long.MinValue;
                 _lastHotkeySignature = null;
                 _hotkeys = null;
                 _bindingReleasePending = true;
@@ -178,23 +183,25 @@ public sealed class DirectInputKeyboardHook : IDisposable
                 var canActivate = _canActivate();
                 var settingsAvailable = _isSettingsMenuAvailable();
                 var voicePushToTalkEnabled = _isVoicePushToTalkEnabled();
-                var configuration = _getConfiguration();
-                var hotkeys = HotkeyConfigurationSnapshot.Create(configuration);
-                if (!string.Equals(
-                        hotkeys.Signature,
-                        _lastHotkeySignature,
-                        StringComparison.Ordinal))
+                var (configuration, configurationRevision) = ReadStableConfiguration();
+                var hotkeys = _hotkeys;
+                if (hotkeys is null || configurationRevision != _lastHotkeyRevision)
                 {
-                    if (!_backend.SetHotkeyBindings(hotkeys.NativeBindings))
-                        throw new InvalidOperationException("The DirectInput broker rejected its hotkey bindings.");
-                    _hotkeys = hotkeys;
-                    _lastHotkeySignature = hotkeys.Signature;
-                    _bindingReleasePending = true;
-                    ResetActionEdges();
-                }
-                else
-                {
-                    hotkeys = _hotkeys ?? hotkeys;
+                    var updatedHotkeys = HotkeyConfigurationSnapshot.Create(configuration);
+                    if (!string.Equals(
+                            updatedHotkeys.Signature,
+                            _lastHotkeySignature,
+                            StringComparison.Ordinal))
+                    {
+                        if (!_backend.SetHotkeyBindings(updatedHotkeys.NativeBindings))
+                            throw new InvalidOperationException("The DirectInput broker rejected its hotkey bindings.");
+                        _lastHotkeySignature = updatedHotkeys.Signature;
+                        _bindingReleasePending = true;
+                        ResetActionEdges();
+                    }
+                    _hotkeys = updatedHotkeys;
+                    _lastHotkeyRevision = configurationRevision;
+                    hotkeys = updatedHotkeys;
                 }
 
                 var officialActionsAvailable = settingsAvailable && configuration.EnableOverlay;
@@ -210,17 +217,15 @@ public sealed class DirectInputKeyboardHook : IDisposable
                             ? customActionsAvailable
                             : officialActionsAvailable) &&
                         (action.Keyboard.IsBound || action.Controller.IsBound));
-                var playerMuteAvailable = canActivate &&
-                    (hotkeys.Player2MuteKeyboard.IsBound || hotkeys.Player2MuteController.IsBound ||
-                     hotkeys.Player3MuteKeyboard.IsBound || hotkeys.Player3MuteController.IsBound ||
-                     hotkeys.Player4MuteKeyboard.IsBound || hotkeys.Player4MuteController.IsBound);
+                var globalMuteAvailable = canActivate &&
+                    (hotkeys.GlobalMuteKeyboard.IsBound || hotkeys.GlobalMuteController.IsBound);
                 var policy = BuildPolicy(
                     captureKeyboard,
                     captureMouse,
                     canActivate,
                     settingsAvailable,
                     voicePushToTalkEnabled,
-                    quickActionsAvailable || playerMuteAvailable);
+                    quickActionsAvailable || globalMuteAvailable);
 
                 if (policy != _lastPolicy)
                 {
@@ -308,7 +313,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
                     hotkeys,
                     officialActionsAvailable && !captureKeyboard,
                     customActionsAvailable && !captureKeyboard);
-                ProcessPlayerMuteBindings(
+                ProcessGlobalMuteBinding(
                     keyboardSnapshot,
                     hotkeys,
                     canActivate && !captureKeyboard);
@@ -317,6 +322,25 @@ public sealed class DirectInputKeyboardHook : IDisposable
             {
                 FailOpen(exception);
             }
+        }
+    }
+
+    private (Config Configuration, long Revision) ReadStableConfiguration()
+    {
+        var spinner = new SpinWait();
+        while (true)
+        {
+            var before = _getConfigurationRevision();
+            if ((before & 1L) != 0)
+            {
+                spinner.SpinOnce();
+                continue;
+            }
+            var configuration = _getConfiguration();
+            var after = _getConfigurationRevision();
+            if (before == after)
+                return (configuration, after);
+            spinner.SpinOnce();
         }
     }
 
@@ -431,28 +455,18 @@ public sealed class DirectInputKeyboardHook : IDisposable
             _quickActionWasDown.Remove(staleId);
     }
 
-    private void ProcessPlayerMuteBindings(
+    private void ProcessGlobalMuteBinding(
         in DirectInputBrokerSnapshot snapshot,
         HotkeyConfigurationSnapshot hotkeys,
         bool available)
     {
-        for (var player = 2; player <= 4; player++)
-        {
-            var (keyboard, controller) = player switch
-            {
-                2 => (hotkeys.Player2MuteKeyboard, hotkeys.Player2MuteController),
-                3 => (hotkeys.Player3MuteKeyboard, hotkeys.Player3MuteController),
-                _ => (hotkeys.Player4MuteKeyboard, hotkeys.Player4MuteController),
-            };
-            var down = available && HotkeyConfigurationSnapshot.IsPressed(
-                snapshot,
-                keyboard,
-                controller);
-            var index = player - 2;
-            if (down != _playerMuteWasDown[index])
-                _reportPlayerMuteKey(player, down);
-            _playerMuteWasDown[index] = down;
-        }
+        var down = available && HotkeyConfigurationSnapshot.IsPressed(
+            snapshot,
+            hotkeys.GlobalMuteKeyboard,
+            hotkeys.GlobalMuteController);
+        if (down != _globalMuteWasDown)
+            _reportGlobalMuteKey(down);
+        _globalMuteWasDown = down;
     }
 
     private void ResetActionEdges()
@@ -467,12 +481,9 @@ public sealed class DirectInputKeyboardHook : IDisposable
         foreach (var pressedAction in _quickActionWasDown.Where(item => item.Value))
             _reportQuickActionKey(pressedAction.Key, false);
         _quickActionWasDown.Clear();
-        for (var index = 0; index < _playerMuteWasDown.Length; index++)
-        {
-            if (_playerMuteWasDown[index])
-                _reportPlayerMuteKey(index + 2, false);
-            _playerMuteWasDown[index] = false;
-        }
+        if (_globalMuteWasDown)
+            _reportGlobalMuteKey(false);
+        _globalMuteWasDown = false;
     }
 
     private void LogReadinessTransition(DirectInputBrokerReadiness readiness)

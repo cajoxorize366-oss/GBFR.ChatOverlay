@@ -193,20 +193,20 @@ public sealed class DirectInputBrokerTests
     }
 
     [Fact]
-    public void Poll_PlayerMuteKeyboardBindingReportsOneEdgePerPress()
+    public void Poll_GlobalMuteKeyboardBindingReportsOneEdgePerPress()
     {
         var backend = new FakeDirectInputBrokerBackend();
-        var reports = new List<(int Player, bool Pressed)>();
+        var reports = new List<bool>();
         var configuration = new Config
         {
-            Player2MuteKeyboardBinding = "P",
+            GlobalMuteKeyboardBinding = "P",
         };
         using var hook = CreateHook(
             backend,
             canActivate: () => true,
             settingsAvailable: () => true,
             getConfiguration: () => configuration,
-            reportPlayerMute: (player, pressed) => reports.Add((player, pressed)));
+            reportGlobalMute: reports.Add);
 
         hook.Initialize();
         hook.Poll();
@@ -216,7 +216,37 @@ public sealed class DirectInputBrokerTests
         backend.Snapshot = CreateSnapshot(sequence: 2);
         hook.Poll();
 
-        Assert.Equal(new[] { (2, true), (2, false) }, reports);
+        Assert.Equal(new[] { true, false }, reports);
+    }
+
+    [Fact]
+    public void Poll_RebuildsHotkeySnapshotOnlyWhenConfigurationRevisionChanges()
+    {
+        var backend = new FakeDirectInputBrokerBackend();
+        var configuration = new Config();
+        long revision = 0;
+        using var hook = CreateHook(
+            backend,
+            settingsAvailable: () => true,
+            getConfiguration: () => configuration,
+            getConfigurationRevision: () => revision);
+
+        hook.Initialize();
+        hook.Poll();
+        hook.Poll();
+        hook.Poll();
+
+        Assert.Single(backend.HotkeyBindingRequests);
+
+        configuration.GlobalMuteKeyboardBinding = "P";
+        revision += 2;
+        hook.Poll();
+        hook.Poll();
+
+        Assert.Equal(2, backend.HotkeyBindingRequests.Count);
+        Assert.Contains(
+            backend.HotkeyBindingRequests[^1],
+            binding => binding.ScanCode == 0x19);
     }
 
     [Fact]
@@ -297,8 +327,9 @@ public sealed class DirectInputBrokerTests
         Action<bool>? reportSettings = null,
         Action<string>? log = null,
         Func<Config>? getConfiguration = null,
+        Func<long>? getConfigurationRevision = null,
         Action<string, bool>? reportQuickAction = null,
-        Action<int, bool>? reportPlayerMute = null) =>
+        Action<bool>? reportGlobalMute = null) =>
         new(
             backend,
             canActivate ?? (() => false),
@@ -313,8 +344,9 @@ public sealed class DirectInputBrokerTests
             _ => { },
             log ?? (_ => { }),
             getConfiguration,
+            getConfigurationRevision,
             reportQuickActionKey: reportQuickAction,
-            reportPlayerMuteKey: reportPlayerMute);
+            reportGlobalMuteKey: reportGlobalMute);
 
     private static DirectInputBrokerSnapshot CreateSnapshot(
         ulong sequence,

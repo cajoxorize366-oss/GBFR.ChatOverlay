@@ -41,11 +41,14 @@ public class Mod : ModBase // <= Do not Remove.
     /// Provides access to this mod's configuration.
     /// </summary>
     private Config _configuration;
+    private long _configurationRevision;
 
     /// <summary>
     /// The configuration of the currently executing mod.
     /// </summary>
     private readonly IModConfig _modConfig;
+    private readonly Action<Action<Config>> _persistConfigurationUpdate;
+    private readonly Action<string> _requestOverlayBrokerRecovery;
 
     private readonly ChatSession _chatSession;
     private readonly ChatOverlayPeer? _overlay;
@@ -56,7 +59,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly InGameAudioSettingsController? _audioSettings;
     private readonly RelinkGameContextProbe? _gameContextProbe;
     private readonly IGbfrOverlayHub _overlayHub;
-    private readonly bool _ownsOverlayBroker;
+    private bool _ownsOverlayBroker;
 
     public Mod(ModContext context)
     {
@@ -66,6 +69,8 @@ public class Mod : ModBase // <= Do not Remove.
         _owner = context.Owner;
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
+        _persistConfigurationUpdate = context.UpdateConfiguration;
+        _requestOverlayBrokerRecovery = context.RequestOverlayBrokerRecovery;
         _overlayHub = context.OverlayHub;
         _ownsOverlayBroker = context.OwnsOverlayBroker;
 
@@ -151,7 +156,7 @@ public class Mod : ModBase // <= Do not Remove.
             {
                 _audioSettings = new InGameAudioSettingsController(
                     _configuration,
-                    context.UpdateConfiguration,
+                    UpdateConfiguration,
                     moduleLog);
             }
             catch (Exception exception)
@@ -226,7 +231,7 @@ public class Mod : ModBase // <= Do not Remove.
 
         _overlay = new ChatOverlayPeer(
             _chatSession,
-            () => _configuration,
+                    () => Volatile.Read(ref _configuration),
             IsOnlineRoomActive,
             ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
@@ -236,13 +241,14 @@ public class Mod : ModBase // <= Do not Remove.
             (kind, id) => _nativeChatBridge?.SendOfficialQuickAction(kind, id) ??
                 ChatSendResult.Unavailable("Relink's native communication bridge is unavailable."),
             _audioSettings,
-            context.UpdateConfiguration,
+            UpdateConfiguration,
             SetLocalMicrophoneSelfTestRequested,
             () => IsOnlineRoomActive() &&
                   _configuration.EnableVoiceInput &&
                   _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             ForceReleaseVoiceInputs,
+            HandleOverlayBrokerUnavailable,
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
 
         try
@@ -260,44 +266,7 @@ public class Mod : ModBase // <= Do not Remove.
         }
 
         if (_ownsOverlayBroker && _hooks is not null)
-        {
-            DirectInputKeyboardHook? directInputKeyboard = null;
-            try
-            {
-                directInputKeyboard = new DirectInputKeyboardHook(
-                    DirectInputBrokerBridge.Instance,
-                    _overlay.CanRequestOpen,
-                    _overlay.TryRequestOpen,
-                    () => (_overlayHub.CapturedInputDevices &
-                           (OverlayInputDevices.Keyboard | OverlayInputDevices.Text)) != 0,
-                    () => (_overlayHub.CapturedInputDevices & OverlayInputDevices.Mouse) != 0,
-                    () => IsOnlineRoomActive() &&
-                          _configuration.EnableVoiceInput &&
-                          _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
-                    pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
-                    () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
-                    () => _overlay.IsInitialized && !_overlay.IsSuspended,
-                    _overlay.ObserveSettingsMenuKey,
-                    pressed => _audioSettings?.SetSelfTestPressed(pressed),
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
-                    () => _configuration,
-                    _overlay.ObserveNativeInputSnapshot,
-                    _overlay.ObserveQuickActionsMenuKey,
-                    _overlay.ObserveQuickActionKey,
-                    _overlay.ObservePlayerMuteKey);
-                StartupPhaseDiagnostic.Run(
-                    "directinput-broker-hooks",
-                    moduleLog,
-                    directInputKeyboard.Initialize);
-                _directInputKeyboard = directInputKeyboard;
-            }
-            catch (Exception exception)
-            {
-                directInputKeyboard?.Dispose();
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
-            }
-        }
+            BecomeOverlayBrokerCarrier();
         else if (!_ownsOverlayBroker)
         {
             moduleLog(
@@ -312,11 +281,19 @@ public class Mod : ModBase // <= Do not Remove.
     #region Standard Overrides
     public override void ConfigurationUpdated(Config configuration)
     {
-        _configuration = configuration;
-        _audioSettings?.ApplyConfiguration(configuration);
-        if (!configuration.EnableVoiceInput)
-            SetLocalMicrophoneSelfTestRequested(false);
-        _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
+        Interlocked.Increment(ref _configurationRevision);
+        try
+        {
+            Volatile.Write(ref _configuration, configuration);
+            _audioSettings?.ApplyConfiguration(configuration);
+            if (!configuration.EnableVoiceInput)
+                SetLocalMicrophoneSelfTestRequested(false);
+            _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
+        }
+        finally
+        {
+            Interlocked.Increment(ref _configurationRevision);
+        }
     }
 
     public override bool CanSuspend() => _overlay is not null;
@@ -348,6 +325,72 @@ public class Mod : ModBase // <= Do not Remove.
     #endregion
 
     internal void BrokerCarrierUpkeep() => _directInputKeyboard?.Poll();
+
+    internal void BecomeOverlayBrokerCarrier()
+    {
+        _ownsOverlayBroker = true;
+        if (_hooks is null || _overlay is null || _directInputKeyboard is not null)
+            return;
+
+        DirectInputKeyboardHook? directInputKeyboard = null;
+        try
+        {
+            directInputKeyboard = new DirectInputKeyboardHook(
+                DirectInputBrokerBridge.Instance,
+                _overlay.CanRequestOpen,
+                _overlay.TryRequestOpen,
+                () => (_overlayHub.CapturedInputDevices &
+                       (OverlayInputDevices.Keyboard | OverlayInputDevices.Text)) != 0,
+                () => (_overlayHub.CapturedInputDevices & OverlayInputDevices.Mouse) != 0,
+                () => IsOnlineRoomActive() &&
+                      _configuration.EnableVoiceInput &&
+                      _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
+                pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
+                () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
+                () => _overlay.IsInitialized && !_overlay.IsSuspended,
+                _overlay.ObserveSettingsMenuKey,
+                pressed => _audioSettings?.SetSelfTestPressed(pressed),
+                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                () => Volatile.Read(ref _configuration),
+                () => Volatile.Read(ref _configurationRevision),
+                _overlay.ObserveNativeInputSnapshot,
+                _overlay.ObserveQuickActionsMenuKey,
+                _overlay.ObserveQuickActionKey,
+                _overlay.ObserveGlobalMuteKey);
+            StartupPhaseDiagnostic.Run(
+                "directinput-broker-hooks",
+                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                directInputKeyboard.Initialize);
+            _directInputKeyboard = directInputKeyboard;
+        }
+        catch (Exception exception)
+        {
+            directInputKeyboard?.Dispose();
+            _logger.WriteLine(
+                $"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
+        }
+    }
+
+    private void HandleOverlayBrokerUnavailable(string reason)
+    {
+        _directInputKeyboard?.Dispose();
+        _directInputKeyboard = null;
+        _ownsOverlayBroker = false;
+        _requestOverlayBrokerRecovery(reason);
+    }
+
+    private void UpdateConfiguration(Action<Config> update)
+    {
+        Interlocked.Increment(ref _configurationRevision);
+        try
+        {
+            _persistConfigurationUpdate(update);
+        }
+        finally
+        {
+            Interlocked.Increment(ref _configurationRevision);
+        }
+    }
 
     private void LogInjectionSource(Action<string> log)
     {

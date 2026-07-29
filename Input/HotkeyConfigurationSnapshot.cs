@@ -22,12 +22,8 @@ internal sealed class HotkeyConfigurationSnapshot
         ControllerBinding pushToTalkController,
         KeyboardBinding quickActionsKeyboard,
         ControllerBinding quickActionsController,
-        KeyboardBinding player2MuteKeyboard,
-        ControllerBinding player2MuteController,
-        KeyboardBinding player3MuteKeyboard,
-        ControllerBinding player3MuteController,
-        KeyboardBinding player4MuteKeyboard,
-        ControllerBinding player4MuteController,
+        KeyboardBinding globalMuteKeyboard,
+        ControllerBinding globalMuteController,
         IReadOnlyList<ConfiguredQuickAction> quickActions,
         DirectInputHotkeyBinding[] nativeBindings)
     {
@@ -40,12 +36,8 @@ internal sealed class HotkeyConfigurationSnapshot
         PushToTalkController = pushToTalkController;
         QuickActionsKeyboard = quickActionsKeyboard;
         QuickActionsController = quickActionsController;
-        Player2MuteKeyboard = player2MuteKeyboard;
-        Player2MuteController = player2MuteController;
-        Player3MuteKeyboard = player3MuteKeyboard;
-        Player3MuteController = player3MuteController;
-        Player4MuteKeyboard = player4MuteKeyboard;
-        Player4MuteController = player4MuteController;
+        GlobalMuteKeyboard = globalMuteKeyboard;
+        GlobalMuteController = globalMuteController;
         QuickActions = quickActions;
         NativeBindings = nativeBindings;
     }
@@ -59,12 +51,8 @@ internal sealed class HotkeyConfigurationSnapshot
     internal ControllerBinding PushToTalkController { get; }
     internal KeyboardBinding QuickActionsKeyboard { get; }
     internal ControllerBinding QuickActionsController { get; }
-    internal KeyboardBinding Player2MuteKeyboard { get; }
-    internal ControllerBinding Player2MuteController { get; }
-    internal KeyboardBinding Player3MuteKeyboard { get; }
-    internal ControllerBinding Player3MuteController { get; }
-    internal KeyboardBinding Player4MuteKeyboard { get; }
-    internal ControllerBinding Player4MuteController { get; }
+    internal KeyboardBinding GlobalMuteKeyboard { get; }
+    internal ControllerBinding GlobalMuteController { get; }
     internal IReadOnlyList<ConfiguredQuickAction> QuickActions { get; }
     internal DirectInputHotkeyBinding[] NativeBindings { get; }
 
@@ -79,12 +67,8 @@ internal sealed class HotkeyConfigurationSnapshot
         var pushToTalkController = ParseController(configuration.PushToTalkControllerBinding);
         var quickActionsKeyboard = ParseKeyboard(configuration.QuickActionsKeyboardBinding);
         var quickActionsController = ParseController(configuration.QuickActionsControllerBinding);
-        var player2MuteKeyboard = ParseKeyboard(configuration.Player2MuteKeyboardBinding);
-        var player2MuteController = ParseController(configuration.Player2MuteControllerBinding);
-        var player3MuteKeyboard = ParseKeyboard(configuration.Player3MuteKeyboardBinding);
-        var player3MuteController = ParseController(configuration.Player3MuteControllerBinding);
-        var player4MuteKeyboard = ParseKeyboard(configuration.Player4MuteKeyboardBinding);
-        var player4MuteController = ParseController(configuration.Player4MuteControllerBinding);
+        var globalMuteKeyboard = ParseKeyboard(configuration.GlobalMuteKeyboardBinding);
+        var globalMuteController = ParseController(configuration.GlobalMuteControllerBinding);
         var quickActions = (configuration.QuickActions ?? [])
             .Where(action => action is not null)
             .Select(action => new ConfiguredQuickAction(
@@ -99,15 +83,13 @@ internal sealed class HotkeyConfigurationSnapshot
             .DistinctBy(action => action.Id, StringComparer.Ordinal)
             .ToArray();
 
-        var nativeBindings = new List<DirectInputHotkeyBinding>(8 + quickActions.Length);
+        var nativeBindings = new List<DirectInputHotkeyBinding>(6 + quickActions.Length);
         AddNativeBinding(nativeBindings, openChatKeyboard, ActivationPolicy);
         AddNativeBinding(nativeBindings, settingsKeyboard, SettingsPolicy);
         AddNativeBinding(nativeBindings, EmergencySettingsKeyboard, SettingsPolicy);
         AddNativeBinding(nativeBindings, pushToTalkKeyboard, PushToTalkPolicy);
         AddNativeBinding(nativeBindings, quickActionsKeyboard, QuickActionsPolicy);
-        AddNativeBinding(nativeBindings, player2MuteKeyboard, QuickActionsPolicy);
-        AddNativeBinding(nativeBindings, player3MuteKeyboard, QuickActionsPolicy);
-        AddNativeBinding(nativeBindings, player4MuteKeyboard, QuickActionsPolicy);
+        AddNativeBinding(nativeBindings, globalMuteKeyboard, QuickActionsPolicy);
         foreach (var action in quickActions)
         {
             if (action.Enabled && action.IsConfigured)
@@ -124,12 +106,8 @@ internal sealed class HotkeyConfigurationSnapshot
             configuration.PushToTalkControllerBinding,
             configuration.QuickActionsKeyboardBinding,
             configuration.QuickActionsControllerBinding,
-            configuration.Player2MuteKeyboardBinding,
-            configuration.Player2MuteControllerBinding,
-            configuration.Player3MuteKeyboardBinding,
-            configuration.Player3MuteControllerBinding,
-            configuration.Player4MuteKeyboardBinding,
-            configuration.Player4MuteControllerBinding,
+            configuration.GlobalMuteKeyboardBinding,
+            configuration.GlobalMuteControllerBinding,
             string.Join('\u001E', quickActions.Select(action => action.Signature)));
 
         return new HotkeyConfigurationSnapshot(
@@ -142,12 +120,8 @@ internal sealed class HotkeyConfigurationSnapshot
             pushToTalkController,
             quickActionsKeyboard,
             quickActionsController,
-            player2MuteKeyboard,
-            player2MuteController,
-            player3MuteKeyboard,
-            player3MuteController,
-            player4MuteKeyboard,
-            player4MuteController,
+            globalMuteKeyboard,
+            globalMuteController,
             quickActions,
             distinctBindings);
     }

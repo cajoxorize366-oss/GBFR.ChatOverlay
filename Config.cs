@@ -96,40 +96,16 @@ public class Config : Configurable<Config>
     public string QuickActionsControllerBinding { get; set; } = string.Empty;
 
     [Category("00 通用设置 / General")]
-    [DisplayName("玩家 2 禁言（手柄） / Player 2 Mute (Controller)")]
-    [Description("切换玩家 2 的禁言状态。 / Toggle mute for Player 2.")]
+    [DisplayName("全局禁言（手柄） / Global Mute (Controller)")]
+    [Description("切换所有玩家的禁言状态。 / Toggle mute for all players.")]
     [DefaultValue("")]
-    public string Player2MuteControllerBinding { get; set; } = string.Empty;
+    public string GlobalMuteControllerBinding { get; set; } = string.Empty;
 
     [Category("00 通用设置 / General")]
-    [DisplayName("玩家 2 禁言（键盘） / Player 2 Mute (Keyboard)")]
-    [Description("切换玩家 2 的禁言状态。 / Toggle mute for Player 2.")]
+    [DisplayName("全局禁言（键盘） / Global Mute (Keyboard)")]
+    [Description("切换所有玩家的禁言状态。 / Toggle mute for all players.")]
     [DefaultValue("")]
-    public string Player2MuteKeyboardBinding { get; set; } = string.Empty;
-
-    [Category("00 通用设置 / General")]
-    [DisplayName("玩家 3 禁言（手柄） / Player 3 Mute (Controller)")]
-    [Description("切换玩家 3 的禁言状态。 / Toggle mute for Player 3.")]
-    [DefaultValue("")]
-    public string Player3MuteControllerBinding { get; set; } = string.Empty;
-
-    [Category("00 通用设置 / General")]
-    [DisplayName("玩家 3 禁言（键盘） / Player 3 Mute (Keyboard)")]
-    [Description("切换玩家 3 的禁言状态。 / Toggle mute for Player 3.")]
-    [DefaultValue("")]
-    public string Player3MuteKeyboardBinding { get; set; } = string.Empty;
-
-    [Category("00 通用设置 / General")]
-    [DisplayName("玩家 4 禁言（手柄） / Player 4 Mute (Controller)")]
-    [Description("切换玩家 4 的禁言状态。 / Toggle mute for Player 4.")]
-    [DefaultValue("")]
-    public string Player4MuteControllerBinding { get; set; } = string.Empty;
-
-    [Category("00 通用设置 / General")]
-    [DisplayName("玩家 4 禁言（键盘） / Player 4 Mute (Keyboard)")]
-    [Description("切换玩家 4 的禁言状态。 / Toggle mute for Player 4.")]
-    [DefaultValue("")]
-    public string Player4MuteKeyboardBinding { get; set; } = string.Empty;
+    public string GlobalMuteKeyboardBinding { get; set; } = string.Empty;
 
     [Category("03 语音 / Voice")]
     [DisplayName("播放设备 / Playback Device")]

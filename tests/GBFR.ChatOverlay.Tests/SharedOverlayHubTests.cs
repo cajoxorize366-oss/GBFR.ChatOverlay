@@ -1,5 +1,7 @@
 using GBFR.OverlayHub.Contracts;
 using System.IO;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using Xunit;
 
@@ -241,6 +243,124 @@ public sealed class SharedOverlayHubTests
     }
 
     [Fact]
+    public void HostLoss_AllowsOneFencedReplacementToRebindExistingPeers()
+    {
+        var endpoints = OverlayBrokerFactory.Create("first-host", _ => { });
+        var recoverable = Assert.IsAssignableFrom<IRecoverableGbfrOverlayHub>(endpoints.Hub);
+        var client = new FakeClient("guest") { WantsRenderValue = true };
+        using var registration = endpoints.Hub.Register(client);
+        Assert.True(registration.SetEnabled(true));
+        endpoints.Host.PublishGraphicsBinding(TestGraphicsBinding);
+        endpoints.Host.MarkGraphicsReady();
+
+        endpoints.Host.MarkHostUnavailable("test host loss");
+
+        Assert.False(recoverable.IsHostAvailable);
+        Assert.False(endpoints.Hub.IsGraphicsReady);
+        Assert.Equal(1, client.HostUnavailableCount);
+        Assert.Throws<InvalidOperationException>(endpoints.Host.MarkGraphicsReady);
+
+        using var replacement = Assert.IsAssignableFrom<IDisposable>(
+            recoverable.TryAcquireHost("replacement-host"));
+        var replacementControl = Assert.IsAssignableFrom<IOverlayBrokerHostControl>(replacement);
+        Assert.True(recoverable.IsHostAvailable);
+        Assert.Equal("replacement-host", endpoints.Hub.HostModId);
+        Assert.Null(recoverable.TryAcquireHost("second-writer"));
+
+        var replacementBinding = new OverlayGraphicsBinding(
+            OverlayHubProtocol.GraphicsBindingVersion,
+            new nint(3),
+            new nint(4));
+        replacementControl.PublishGraphicsBinding(replacementBinding);
+        replacementControl.MarkGraphicsReady();
+        replacementControl.RenderClients();
+
+        Assert.Equal(2, client.GraphicsBindCount);
+        Assert.Equal(1, client.RenderCount);
+    }
+
+    [Fact]
+    public void StableClientLoops_DoNotAllocateRegistrationSnapshots()
+    {
+        var endpoints = OverlayBrokerFactory.Create("test-host", _ => { });
+        var client = new FakeClient("stable") { WantsRenderValue = false };
+        using var registration = endpoints.Hub.Register(client);
+        Assert.True(registration.SetEnabled(true));
+        endpoints.Host.PublishGraphicsBinding(TestGraphicsBinding);
+        endpoints.Host.MarkGraphicsReady();
+        for (var index = 0; index < 16; index++)
+        {
+            endpoints.Host.TickClients();
+            _ = endpoints.Host.HasRenderableClients();
+            _ = endpoints.Host.ObserveWindowMessage(nint.Zero, 0, nint.Zero, nint.Zero);
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var index = 0; index < 1_000; index++)
+        {
+            endpoints.Host.TickClients();
+            _ = endpoints.Host.HasRenderableClients();
+            _ = endpoints.Host.ObserveWindowMessage(nint.Zero, 0, nint.Zero, nint.Zero);
+        }
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(0, allocated);
+    }
+
+    [Fact]
+    public async Task ReplacementHost_FencesAnInFlightOldGraphicsBinding()
+    {
+        var endpoints = OverlayBrokerFactory.Create("first-host", _ => { });
+        var recoverable = Assert.IsAssignableFrom<IRecoverableGbfrOverlayHub>(endpoints.Hub);
+        var client = new FakeClient("guest");
+        using var registration = endpoints.Hub.Register(client);
+        Assert.True(registration.SetEnabled(true));
+        endpoints.Host.PublishGraphicsBinding(TestGraphicsBinding);
+        endpoints.Host.MarkGraphicsReady();
+
+        client.BindEntered = new ManualResetEventSlim(false);
+        client.ReleaseBind = new ManualResetEventSlim(false);
+        var staleBinding = new OverlayGraphicsBinding(
+            OverlayHubProtocol.GraphicsBindingVersion,
+            new nint(5),
+            new nint(6));
+        var stalePublish = Task.Run(() => endpoints.Host.PublishGraphicsBinding(staleBinding));
+        Assert.True(client.BindEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        endpoints.Host.MarkHostUnavailable("replace during bind");
+        using var replacement = Assert.IsAssignableFrom<IOverlayBrokerHostControl>(
+            recoverable.TryAcquireHost("replacement-host"));
+        var currentBinding = new OverlayGraphicsBinding(
+            OverlayHubProtocol.GraphicsBindingVersion,
+            new nint(7),
+            new nint(8));
+        var replacementPublish = Task.Run(() => replacement.PublishGraphicsBinding(currentBinding));
+
+        client.ReleaseBind.Set();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await stalePublish);
+        await replacementPublish;
+        replacement.MarkGraphicsReady();
+
+        Assert.Equal(currentBinding.NativeLibraryHandle, client.LastGraphicsBinding.NativeLibraryHandle);
+        Assert.Equal(currentBinding.ContextPointer, client.LastGraphicsBinding.ContextPointer);
+    }
+
+    [Fact]
+    public void Registration_DoesNotKeepAbandonedClientAlive()
+    {
+        var endpoints = OverlayBrokerFactory.Create("test-host", _ => { });
+        var weakClient = RegisterTemporaryClient(endpoints.Hub, out var registration);
+        using (registration)
+        {
+            ForceCollection();
+
+            Assert.False(weakClient.IsAlive);
+            endpoints.Host.PublishGraphicsBinding(TestGraphicsBinding);
+            Assert.False(registration.SetEnabled(true));
+        }
+    }
+
+    [Fact]
     public void CanonicalContract_CanBeResolvedFromTwoPackagePaths()
     {
         string originalPath = typeof(IGbfrOverlayHub).Assembly.Location;
@@ -266,6 +386,66 @@ public sealed class SharedOverlayHubTests
         }
     }
 
+    [Fact]
+    public void SeparateLoadContexts_RequireCanonicalContractResolution()
+    {
+        var contract = typeof(IGbfrOverlayHub).Assembly;
+        var first = new CanonicalContractLoadContext(contract);
+        var second = new CanonicalContractLoadContext(contract);
+        try
+        {
+            var firstResolved = first.LoadFromAssemblyName(contract.GetName());
+            var secondResolved = second.LoadFromAssemblyName(contract.GetName());
+
+            Assert.Same(contract, firstResolved);
+            Assert.Same(contract, secondResolved);
+            Assert.Same(
+                typeof(IGbfrOverlayHub),
+                firstResolved.GetType(typeof(IGbfrOverlayHub).FullName!, throwOnError: true));
+        }
+        finally
+        {
+            first.Unload();
+            second.Unload();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference RegisterTemporaryClient(
+        IGbfrOverlayHub hub,
+        out IGbfrOverlayRegistration registration)
+    {
+        var client = new FakeClient("temporary");
+        registration = hub.Register(client);
+        return new WeakReference(client);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ForceCollection()
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+    }
+
+    private sealed class CanonicalContractLoadContext : AssemblyLoadContext
+    {
+        private readonly Assembly _canonicalContract;
+
+        internal CanonicalContractLoadContext(Assembly canonicalContract)
+            : base(isCollectible: true)
+        {
+            _canonicalContract = canonicalContract;
+        }
+
+        protected override Assembly? Load(AssemblyName assemblyName) =>
+            AssemblyName.ReferenceMatchesDefinition(
+                assemblyName,
+                _canonicalContract.GetName())
+                ? _canonicalContract
+                : null;
+    }
+
     private sealed class FakeClient : IGbfrOverlayGraphicsClient
     {
         internal FakeClient(string modId)
@@ -285,9 +465,13 @@ public sealed class SharedOverlayHubTests
         internal int GraphicsBindCount { get; private set; }
         internal OverlayGraphicsBinding LastGraphicsBinding { get; private set; }
         internal OverlayWindowMessageResult MessageResult { get; init; }
+        internal ManualResetEventSlim? BindEntered { get; set; }
+        internal ManualResetEventSlim? ReleaseBind { get; set; }
 
         public bool BindGraphics(OverlayGraphicsBinding binding)
         {
+            BindEntered?.Set();
+            ReleaseBind?.Wait(TimeSpan.FromSeconds(2));
             GraphicsBindCount++;
             LastGraphicsBinding = binding;
             return true;

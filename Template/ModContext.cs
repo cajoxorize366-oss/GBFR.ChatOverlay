@@ -48,4 +48,6 @@ public class ModContext
     public IGbfrOverlayHub OverlayHub { get; set; } = null!;
 
     public bool OwnsOverlayBroker { get; set; }
+
+    public Action<string> RequestOverlayBrokerRecovery { get; set; } = _ => { };
 }

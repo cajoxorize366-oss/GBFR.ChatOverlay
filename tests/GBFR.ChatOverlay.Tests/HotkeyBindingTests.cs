@@ -85,10 +85,8 @@ public sealed class HotkeyBindingTests
             SettingsMenuKeyboardBinding = "Ctrl+F10",
             PushToTalkKeyboardBinding = "U",
             QuickActionsKeyboardBinding = "Q",
-            Player2MuteKeyboardBinding = "M",
-            Player2MuteControllerBinding = "LB+X",
-            Player3MuteKeyboardBinding = "N",
-            Player4MuteKeyboardBinding = "B",
+            GlobalMuteKeyboardBinding = "M",
+            GlobalMuteControllerBinding = "LB+X",
             QuickActions =
             [
                 new QuickActionConfiguration
@@ -103,13 +101,11 @@ public sealed class HotkeyBindingTests
 
         var snapshot = HotkeyConfigurationSnapshot.Create(configuration);
 
-        Assert.Equal(8, snapshot.NativeBindings.Length);
+        Assert.Equal(6, snapshot.NativeBindings.Length);
         Assert.Single(snapshot.QuickActions);
         Assert.Equal("LB+Y", snapshot.QuickActions[0].Controller.Format());
-        Assert.Equal("M", snapshot.Player2MuteKeyboard.Format());
-        Assert.Equal("LB+X", snapshot.Player2MuteController.Format());
-        Assert.Equal("N", snapshot.Player3MuteKeyboard.Format());
-        Assert.Equal("B", snapshot.Player4MuteKeyboard.Format());
+        Assert.Equal("M", snapshot.GlobalMuteKeyboard.Format());
+        Assert.Equal("LB+X", snapshot.GlobalMuteController.Format());
         Assert.Contains(
             snapshot.NativeBindings,
             binding => binding.Modifiers == KeyboardModifiers.Control &&

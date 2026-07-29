@@ -51,6 +51,10 @@ public class Startup : IMod, IExports
     private ModBase _mod = new Mod();
     private bool _overlayHubControllerRegistered;
     private OverlayBrokerHost? _overlayBrokerHost;
+    private IGbfrOverlayHub? _overlayHub;
+    private readonly object _brokerRecoverySync = new();
+    private int _brokerRecoveryInProgress;
+    private int _disposing;
 
     /// <summary>
     /// Entry point for your mod.
@@ -79,6 +83,7 @@ public class Startup : IMod, IExports
             this,
             _modConfig.ModId,
             moduleLog);
+        _overlayHub = election.Hub;
         if (election.IsHost)
         {
             _overlayHubControllerRegistered = true;
@@ -123,6 +128,7 @@ public class Startup : IMod, IExports
             UpdateConfiguration = UpdateConfiguration,
             OverlayHub = election.Hub,
             OwnsOverlayBroker = election.IsHost,
+            RequestOverlayBrokerRecovery = RequestOverlayBrokerRecovery,
         });
         if (election.IsHost && _mod is Mod concreteMod)
             _overlayBrokerHost?.SetCarrierUpkeep(concreteMod.BrokerCarrierUpkeep);
@@ -148,6 +154,103 @@ public class Startup : IMod, IExports
         catch (Exception exception)
         {
             log($"Overlay Broker graphics initialization failed: {exception}");
+        }
+    }
+
+    private void RequestOverlayBrokerRecovery(string reason)
+    {
+        lock (_brokerRecoverySync)
+        {
+            if (_hooks is null || Volatile.Read(ref _disposing) != 0)
+                return;
+            if (Interlocked.CompareExchange(ref _brokerRecoveryInProgress, 1, 0) != 0)
+                return;
+
+            Action<string> moduleLog = message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+            IOverlayBrokerHostControl? claimedHost = null;
+            try
+            {
+                moduleLog($"Overlay Broker recovery requested: {reason}.");
+                var election = OverlayBrokerElectionService.Elect(
+                    _modLoader,
+                    this,
+                    _modConfig.ModId,
+                    moduleLog);
+                _overlayHub = election.Hub;
+                if (!election.IsHost)
+                {
+                    Interlocked.Exchange(ref _brokerRecoveryInProgress, 0);
+                    return;
+                }
+
+                _overlayHubControllerRegistered = true;
+                claimedHost = election.HostControl;
+
+                DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId));
+                _ = DxgiPresentBridge.SetCursorReleaseActive(false);
+                var recoveredHost = new OverlayBrokerHost(
+                    claimedHost!,
+                    moduleLog,
+                    setNativeCursorRelease: capture =>
+                    {
+                        var installed = DxgiPresentBridge.SetCursorReleaseActive(capture);
+                        if (capture && installed != DxgiPresentBridge.CursorReleaseHook.All)
+                            moduleLog($"Overlay Broker cursor release installed only {installed}.");
+                    });
+                claimedHost = null;
+                Interlocked.Exchange(ref _overlayBrokerHost, recoveredHost)?.Dispose();
+                _ = InitializeRecoveredBrokerAsync(recoveredHost, _hooks, moduleLog);
+            }
+            catch (Exception exception)
+            {
+                claimedHost?.MarkHostUnavailable(
+                    $"recovery bootstrap failed: {exception.GetType().Name}");
+                Interlocked.Exchange(ref _brokerRecoveryInProgress, 0);
+                moduleLog($"Overlay Broker recovery failed closed: {exception}");
+            }
+        }
+    }
+
+    private async Task InitializeRecoveredBrokerAsync(
+        OverlayBrokerHost host,
+        IReloadedHooks hooks,
+        Action<string> log)
+    {
+        try
+        {
+            await host.InitializeAsync(
+                    hooks,
+                    (tick, shouldRender, permanentFailure) =>
+                        new CjkConfiguredDx11Hook(
+                            tick,
+                            shouldRender,
+                            log,
+                            permanentFailure))
+                .ConfigureAwait(false);
+            lock (_brokerRecoverySync)
+            {
+                if (Volatile.Read(ref _disposing) != 0 ||
+                    !ReferenceEquals(Volatile.Read(ref _overlayBrokerHost), host))
+                {
+                    host.Dispose();
+                    return;
+                }
+                if (_mod is Mod concreteMod)
+                {
+                    concreteMod.BecomeOverlayBrokerCarrier();
+                    host.SetCarrierUpkeep(concreteMod.BrokerCarrierUpkeep);
+                }
+            }
+            log("Overlay Broker recovery completed with one coordinated graphics writer.");
+        }
+        catch (Exception exception)
+        {
+            Interlocked.CompareExchange(ref _overlayBrokerHost, null, host);
+            log($"Overlay Broker recovery initialization failed closed: {exception}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _brokerRecoveryInProgress, 0);
         }
     }
 
@@ -190,13 +293,18 @@ public class Startup : IMod, IExports
     /* Automatically called by the mod loader when the mod is about to be unloaded. */
     public Action Disposing => () =>
     {
-        _mod.Disposing();
-        _overlayBrokerHost?.Dispose();
-        _overlayBrokerHost = null;
-        if (_overlayHubControllerRegistered)
+        lock (_brokerRecoverySync)
         {
-            _modLoader.RemoveController<IGbfrOverlayHub>();
-            _overlayHubControllerRegistered = false;
+            Interlocked.Exchange(ref _disposing, 1);
+            _mod.Disposing();
+            Interlocked.Exchange(ref _overlayBrokerHost, null)?.Dispose();
+            var recoveredElsewhere = _overlayHub is IRecoverableGbfrOverlayHub recoverable &&
+                                     recoverable.IsHostAvailable;
+            if (_overlayHubControllerRegistered && !recoveredElsewhere)
+            {
+                _modLoader.RemoveController<IGbfrOverlayHub>();
+                _overlayHubControllerRegistered = false;
+            }
         }
     };
 

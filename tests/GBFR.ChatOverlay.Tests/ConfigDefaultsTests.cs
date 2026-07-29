@@ -27,12 +27,8 @@ public sealed class ConfigDefaultsTests
     [InlineData(nameof(Config.EnableImeCandidateFallback), "输入法兼容 / IME Compatibility")]
     [InlineData(nameof(Config.EnableOverlay), "启用聊天界面 / Enable Chat Overlay")]
     [InlineData(nameof(Config.QuickActionsControllerBinding), "快捷菜单（手柄） / Quick Action (Controller)")]
-    [InlineData(nameof(Config.Player2MuteControllerBinding), "玩家 2 禁言（手柄） / Player 2 Mute (Controller)")]
-    [InlineData(nameof(Config.Player2MuteKeyboardBinding), "玩家 2 禁言（键盘） / Player 2 Mute (Keyboard)")]
-    [InlineData(nameof(Config.Player3MuteControllerBinding), "玩家 3 禁言（手柄） / Player 3 Mute (Controller)")]
-    [InlineData(nameof(Config.Player3MuteKeyboardBinding), "玩家 3 禁言（键盘） / Player 3 Mute (Keyboard)")]
-    [InlineData(nameof(Config.Player4MuteControllerBinding), "玩家 4 禁言（手柄） / Player 4 Mute (Controller)")]
-    [InlineData(nameof(Config.Player4MuteKeyboardBinding), "玩家 4 禁言（键盘） / Player 4 Mute (Keyboard)")]
+    [InlineData(nameof(Config.GlobalMuteControllerBinding), "全局禁言（手柄） / Global Mute (Controller)")]
+    [InlineData(nameof(Config.GlobalMuteKeyboardBinding), "全局禁言（键盘） / Global Mute (Keyboard)")]
     [InlineData(nameof(Config.VoicePlaybackDeviceId), "播放设备 / Playback Device")]
     [InlineData(nameof(Config.EnableVoiceIndicators), "语音状态指示 / Show Voice Indicator")]
     [InlineData(nameof(Config.EnableVoiceInput), "启用语音聊天 / Enable Voice Chat")]
@@ -59,12 +55,8 @@ public sealed class ConfigDefaultsTests
                      nameof(Config.BackgroundOpacity),
                      nameof(Config.SettingsMenuKeyboardBinding),
                      nameof(Config.SettingsMenuControllerBinding),
-                     nameof(Config.Player2MuteKeyboardBinding),
-                     nameof(Config.Player2MuteControllerBinding),
-                     nameof(Config.Player3MuteKeyboardBinding),
-                     nameof(Config.Player3MuteControllerBinding),
-                     nameof(Config.Player4MuteKeyboardBinding),
-                     nameof(Config.Player4MuteControllerBinding),
+                     nameof(Config.GlobalMuteKeyboardBinding),
+                     nameof(Config.GlobalMuteControllerBinding),
                  })
         {
             Assert.Equal(
@@ -145,12 +137,8 @@ public sealed class ConfigDefaultsTests
         Assert.Equal(string.Empty, configuration.OpenChatControllerBinding);
         Assert.Equal(string.Empty, configuration.PushToTalkControllerBinding);
         Assert.Equal(string.Empty, configuration.QuickActionsControllerBinding);
-        Assert.Equal(string.Empty, configuration.Player2MuteKeyboardBinding);
-        Assert.Equal(string.Empty, configuration.Player2MuteControllerBinding);
-        Assert.Equal(string.Empty, configuration.Player3MuteKeyboardBinding);
-        Assert.Equal(string.Empty, configuration.Player3MuteControllerBinding);
-        Assert.Equal(string.Empty, configuration.Player4MuteKeyboardBinding);
-        Assert.Equal(string.Empty, configuration.Player4MuteControllerBinding);
+        Assert.Equal(string.Empty, configuration.GlobalMuteKeyboardBinding);
+        Assert.Equal(string.Empty, configuration.GlobalMuteControllerBinding);
         Assert.Empty(configuration.QuickActions);
     }
 

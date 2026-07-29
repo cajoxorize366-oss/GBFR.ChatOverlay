@@ -30,4 +30,20 @@ public sealed class ChatHistoryTests
         Assert.Single(snapshot);
         Assert.Equal("one", snapshot[0].Text);
     }
+
+    [Fact]
+    public void Snapshot_ReusesCachedArrayUntilHistoryChanges()
+    {
+        var history = new ChatHistory(3);
+        history.Add("Io", "one", ChatMessageKind.Party);
+
+        var first = history.Snapshot();
+        var second = history.Snapshot();
+        history.Add("Io", "two", ChatMessageKind.Party);
+        var changed = history.Snapshot();
+
+        Assert.Same(first, second);
+        Assert.NotSame(first, changed);
+        Assert.Equal(2, changed.Count);
+    }
 }

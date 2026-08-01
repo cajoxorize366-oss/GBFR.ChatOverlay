@@ -100,4 +100,31 @@ public sealed class DirectInputMouseStateFilterTests
             nint.Zero,
             OverlayInputDevices.Mouse));
     }
+
+    [Theory]
+    [InlineData(0x0006)]
+    [InlineData(0x0008)]
+    [InlineData(0x001C)]
+    [InlineData(0x001F)]
+    [InlineData(0x0215)]
+    public void BrokerHost_ForwardsWindowLifecycleMessages(uint message)
+    {
+        Assert.False(OverlayBrokerHost.ShouldSuppressWindowMessage(
+            message,
+            nint.Zero,
+            OverlayInputDevices.Keyboard | OverlayInputDevices.Mouse));
+    }
+
+    [Theory]
+    [InlineData(0x0100, OverlayInputDevices.Keyboard)]
+    [InlineData(0x0201, OverlayInputDevices.Mouse)]
+    public void BrokerHost_StillSuppressesCapturedKeyboardAndMouse(
+        uint message,
+        OverlayInputDevices devices)
+    {
+        Assert.True(OverlayBrokerHost.ShouldSuppressWindowMessage(
+            message,
+            nint.Zero,
+            devices));
+    }
 }

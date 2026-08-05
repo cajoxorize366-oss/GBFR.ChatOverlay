@@ -9,7 +9,6 @@ public sealed class DirectInputKeyboardStateFilter
     internal const int VoicePushToTalkScanCode = 0x16; // DIK_U
     internal const int SettingsMenuScanCode = 0x44; // DIK_F10
     private bool _activationWasDown;
-    private bool _drainPressedKeys;
     private bool _voicePushToTalkWasDown;
     private bool _voicePushToTalkAccepted;
     private bool _voicePushToTalkConsumed;
@@ -74,16 +73,10 @@ public sealed class DirectInputKeyboardStateFilter
             keyboardState[VoicePushToTalkScanCode] = 0;
         }
 
-        if (capture)
-            _drainPressedKeys = true;
-
-        if (!capture && !_drainPressedKeys)
+        if (!capture)
             return voiceKeyWasFiltered || settingsKeyWasFiltered;
 
-        var anyKeyIsDown = keyboardState.ContainsAnyExcept((byte)0);
         keyboardState.Clear();
-        if (!capture && !anyKeyIsDown)
-            _drainPressedKeys = false;
         return true;
     }
 

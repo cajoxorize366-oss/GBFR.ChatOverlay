@@ -45,6 +45,8 @@ public sealed class ChatOverlayHost
     private readonly Action _forceReleaseVoiceInputs;
     private readonly Action<string> _log;
     private readonly MouseInteractionGate _mouseInteractionGate = new();
+    private readonly InputCaptureReleaseBarrier _inputCaptureBarrier = new();
+    private readonly object _inputCaptureTransitionSync = new();
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private ImeCandidateSnapshot? _imeCandidateSnapshot;
     private int _openRequested;
@@ -68,7 +70,6 @@ public sealed class ChatOverlayHost
     private int _onlineRoomWasInactive = 1;
     private int _graphicsFailureHandled;
     private int _cursorReleaseHookFailureLogged;
-    private int _releaseCaptureFrames;
     private int _pendingAnsiLeadByte = -1;
     private nint _windowHandle;
     private bool _focusInputNextFrame;
@@ -125,19 +126,29 @@ public sealed class ChatOverlayHost
             _session.Composer.IsOpen)
             return false;
 
-        Interlocked.Exchange(ref _captureKeyboard, 1);
-        Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
-        ClearImeCandidateSnapshot();
-        Interlocked.Exchange(ref _openRequested, 1);
-        return true;
+        lock (_inputCaptureTransitionSync)
+        {
+            if (!Volatile.Read(ref _initialized) ||
+                !_getConfiguration().EnableOverlay ||
+                !IsOnlineRoomActive() ||
+                _session.Composer.IsOpen ||
+                Volatile.Read(ref _settingsMenuOpen) != 0 ||
+                _inputCaptureBarrier.Effective != InputCaptureDevices.None)
+            {
+                return false;
+            }
+
+            Interlocked.Exchange(ref _captureKeyboard, 1);
+            ApplyRequestedInputCaptureLocked();
+            Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
+            ClearImeCandidateSnapshot();
+            Interlocked.Exchange(ref _openRequested, 1);
+            return true;
+        }
     }
 
-    public bool ShouldCaptureKeyboard() =>
-        Volatile.Read(ref _initialized) &&
-        (Volatile.Read(ref _settingsMenuOpen) != 0 ||
-         (_getConfiguration().EnableOverlay &&
-          IsOnlineRoomActive() &&
-          Volatile.Read(ref _captureKeyboard) != 0));
+    public InputCaptureDevices GetEffectiveInputCaptureDevices() =>
+        _inputCaptureBarrier.Effective;
 
     public void ObserveSettingsMenuKey(bool pressed)
     {
@@ -194,9 +205,9 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
         ClearImeCandidateSnapshot();
-        _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
+        ForceReleaseInputCapture();
         if (_initialized)
             ImguiHook.Disable();
     }
@@ -236,6 +247,7 @@ public sealed class ChatOverlayHost
                 SetSettingsMenuOpen(false);
                 settingsOpen = false;
             }
+            RefreshEffectiveInputCapture();
 
             if (settingsOpen || (configuration.EnableOverlay && onlineRoomActive))
                 BindPlatformImeWindow();
@@ -250,7 +262,7 @@ public sealed class ChatOverlayHost
                     settingsOpen = false;
                 }
             }
-            if (settingsOpen)
+            if ((_inputCaptureBarrier.Effective & InputCaptureDevices.Mouse) != 0)
                 _ = ClipCursor(nint.Zero);
             ImGui.GetIO().MouseDrawCursor = settingsOpen;
 
@@ -276,9 +288,6 @@ public sealed class ChatOverlayHost
                 return;
             }
 
-            if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
-                Interlocked.Exchange(ref _captureKeyboard, 0);
-
             var openedThisFrame = Interlocked.Exchange(ref _openRequested, 0) != 0;
             if (openedThisFrame)
             {
@@ -291,7 +300,8 @@ public sealed class ChatOverlayHost
             if (_session.Composer.IsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
             {
                 _session.Composer.Cancel();
-                _releaseCaptureFrames = 2;
+                Interlocked.Exchange(ref _captureKeyboard, 0);
+                ApplyRequestedInputCapture();
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
                 ClearImeCandidateSnapshot();
                 _statusText = null;
@@ -747,7 +757,8 @@ public sealed class ChatOverlayHost
             if (result.Succeeded)
             {
                 Array.Clear(_inputBuffer);
-                _releaseCaptureFrames = 2;
+                Interlocked.Exchange(ref _captureKeyboard, 0);
+                ApplyRequestedInputCapture();
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
                 ClearImeCandidateSnapshot();
                 _statusText = null;
@@ -779,8 +790,19 @@ public sealed class ChatOverlayHost
             }
         }
 
-        if (Volatile.Read(ref _settingsMenuOpen) != 0)
-            return WindowInputClassifier.ShouldCapture(message, lParam);
+        if ((message is WmKeyUp or WmSysKeyUp) &&
+            wParam == VirtualKeyY &&
+            Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0) != 0)
+        {
+            return true;
+        }
+
+        var effectiveCapture = _inputCaptureBarrier.Effective;
+        if (effectiveCapture != InputCaptureDevices.None &&
+            WindowInputClassifier.ShouldCapture(message, lParam, effectiveCapture))
+        {
+            return true;
+        }
 
         if (!_getConfiguration().EnableOverlay || !IsOnlineRoomActive())
             return false;
@@ -799,15 +821,7 @@ public sealed class ChatOverlayHost
             return false;
         }
 
-        if ((message is WmKeyUp or WmSysKeyUp) &&
-            wParam == VirtualKeyY &&
-            Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0) != 0)
-        {
-            return true;
-        }
-
-        return Volatile.Read(ref _captureKeyboard) != 0 &&
-               message is WmKeyDown or WmKeyUp or WmChar or WmSysKeyDown or WmSysKeyUp or WmSysChar;
+        return false;
     }
 
     private bool IsCapturingTextInput() =>
@@ -1072,6 +1086,125 @@ public sealed class ChatOverlayHost
         }
     }
 
+    private InputCaptureDevices GetRequestedInputCaptureDevices()
+    {
+        if (Volatile.Read(ref _settingsMenuOpen) != 0)
+            return InputCaptureDevices.All;
+        if (_getConfiguration().EnableOverlay &&
+            IsOnlineRoomActive() &&
+            Volatile.Read(ref _captureKeyboard) != 0)
+        {
+            return InputCaptureDevices.Keyboard | InputCaptureDevices.Text;
+        }
+
+        return InputCaptureDevices.None;
+    }
+
+    private void ApplyRequestedInputCapture()
+    {
+        lock (_inputCaptureTransitionSync)
+            ApplyRequestedInputCaptureLocked();
+    }
+
+    private void ApplyRequestedInputCaptureLocked()
+    {
+        var transition = _inputCaptureBarrier.SetRequested(GetRequestedInputCaptureDevices());
+        ApplyEffectiveInputTransition(transition);
+    }
+
+    private void RefreshEffectiveInputCapture()
+    {
+        lock (_inputCaptureTransitionSync)
+        {
+            var requested = _inputCaptureBarrier.Requested;
+            var effective = _inputCaptureBarrier.Effective;
+            var pendingRelease = effective & ~requested;
+            if (pendingRelease == InputCaptureDevices.None)
+                return;
+
+            var keyboardNeutral =
+                (pendingRelease & (InputCaptureDevices.Keyboard | InputCaptureDevices.Text)) == 0 ||
+                IsPhysicalKeyboardNeutral();
+            var mouseNeutral =
+                (pendingRelease & InputCaptureDevices.Mouse) == 0 ||
+                IsPhysicalMouseNeutral();
+            ApplyEffectiveInputTransition(
+                _inputCaptureBarrier.Tick(keyboardNeutral, mouseNeutral));
+        }
+    }
+
+    private void ApplyEffectiveInputTransition(InputCaptureTransition transition)
+    {
+        if (transition.Previous == transition.Current)
+            return;
+
+        var previousMouse = (transition.Previous & InputCaptureDevices.Mouse) != 0;
+        var captureMouse = (transition.Current & InputCaptureDevices.Mouse) != 0;
+        if (previousMouse == captureMouse)
+            return;
+
+        if (captureMouse)
+        {
+            var cursorHooks = DxgiPresentBridge.SetCursorReleaseActive(true);
+            if (cursorHooks != DxgiPresentBridge.CursorReleaseHook.All &&
+                Interlocked.Exchange(ref _cursorReleaseHookFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    $"F10 cursor release installed only {cursorHooks}; " +
+                    "the per-frame ClipCursor fallback remains active.");
+            }
+            BeginReleasedMouse();
+            _ = ClipCursor(nint.Zero);
+            ResetImGuiMouseState();
+            return;
+        }
+
+        _ = DxgiPresentBridge.SetCursorReleaseActive(false);
+        ResetImGuiMouseState();
+        RestoreMouseCapture();
+    }
+
+    private void ForceReleaseInputCapture()
+    {
+        lock (_inputCaptureTransitionSync)
+        {
+            var transition = _inputCaptureBarrier.ForceRelease();
+            _ = DxgiPresentBridge.SetCursorReleaseActive(false);
+            if ((transition.Previous & InputCaptureDevices.Mouse) == 0 &&
+                !_hasSavedClipRect &&
+                _savedCaptureWindow == nint.Zero)
+            {
+                return;
+            }
+
+            ResetImGuiMouseState();
+            RestoreMouseCapture();
+        }
+    }
+
+    private static bool IsPhysicalKeyboardNeutral()
+    {
+        for (var key = 0x08; key <= 0xFE; key++)
+        {
+            if ((GetAsyncKeyState(key) & 0x8000) != 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsPhysicalMouseNeutral()
+    {
+        ReadOnlySpan<int> buttons = [0x01, 0x02, 0x04, 0x05, 0x06];
+        foreach (var button in buttons)
+        {
+            if ((GetAsyncKeyState(button) & 0x8000) != 0)
+                return false;
+        }
+
+        return true;
+    }
+
     private void SetSettingsMenuOpen(bool open)
     {
         var newValue = open ? 1 : 0;
@@ -1086,24 +1219,12 @@ public sealed class ChatOverlayHost
             _mouseInteractionGate.Open();
             _forceReleaseVoiceInputs();
             _audioSettings?.RefreshEndpointsAsync();
-            BeginReleasedMouse();
-            var cursorHooks = DxgiPresentBridge.SetCursorReleaseActive(true);
-            if (cursorHooks != DxgiPresentBridge.CursorReleaseHook.All &&
-                Interlocked.Exchange(ref _cursorReleaseHookFailureLogged, 1) == 0)
-            {
-                LogSafely(
-                    $"F10 cursor release installed only {cursorHooks}; " +
-                    "the per-frame ClipCursor fallback remains active.");
-            }
-            _ = ClipCursor(nint.Zero);
-            ResetImGuiMouseState();
             LogSafely(
                 "F10 settings opened; the game cursor lock/recenter path is suspended and " +
                 "Win32, Raw Input, DirectInput keyboard and mouse are captured.");
             return;
         }
 
-        _ = DxgiPresentBridge.SetCursorReleaseActive(false);
         _setLocalSelfTestRequested(false);
         _audioSettings?.FlushPendingLevelSave();
         _mouseInteractionGate.Close();
@@ -1111,12 +1232,17 @@ public sealed class ChatOverlayHost
         _editedChatRect = null;
         MouseButtonStateTracker.Reset();
         ResetImGuiMouseState();
-        RestoreMouseCapture();
-        LogSafely("F10 settings closed; held DirectInput keys and mouse buttons will drain before release.");
+        ApplyRequestedInputCapture();
+        LogSafely(
+            "F10 settings closed; the shared input barrier retains held keyboard/mouse devices " +
+            "until two physically neutral frames are observed.");
     }
 
     private void BeginReleasedMouse()
     {
+        if (_hasSavedClipRect || _savedCaptureWindow != nint.Zero)
+            return;
+
         _hasSavedClipRect = GetClipCursor(out _savedClipRect);
         _savedCaptureWindow = GetCapture();
         if (_savedCaptureWindow != nint.Zero)
@@ -1179,12 +1305,12 @@ public sealed class ChatOverlayHost
         _session.Composer.Cancel();
         Interlocked.Exchange(ref _openRequested, 0);
         Interlocked.Exchange(ref _captureKeyboard, 0);
+        ApplyRequestedInputCapture();
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
         ClearImeCandidateSnapshot();
         Interlocked.Exchange(ref _imeCompositionObserved, 0);
         Interlocked.Exchange(ref _imeCandidateCapturedInComposition, 0);
-        _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
     }
@@ -1196,6 +1322,7 @@ public sealed class ChatOverlayHost
         Interlocked.Exchange(ref _settingsToggleRequested, 0);
         Interlocked.Exchange(ref _settingsToggleKeyDown, 0);
         MouseButtonStateTracker.Reset();
+        ForceReleaseInputCapture();
     }
 
     private void NotifyOnlineRoomUnavailable()
@@ -1362,9 +1489,10 @@ public sealed class ChatOverlayHost
         catch (Exception exception)
         {
             host?.LogWndProcFallback(exception);
-            if (host is not null &&
-                Volatile.Read(ref host._settingsMenuOpen) != 0 &&
-                WindowInputClassifier.IsAlwaysCaptured(message))
+            var effectiveCapture = host?._inputCaptureBarrier.Effective ??
+                                   InputCaptureDevices.None;
+            if (effectiveCapture != InputCaptureDevices.None &&
+                WindowInputClassifier.IsAlwaysCaptured(message, effectiveCapture))
             {
                 return nint.Zero;
             }
@@ -1416,6 +1544,9 @@ public sealed class ChatOverlayHost
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();

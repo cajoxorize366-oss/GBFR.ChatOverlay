@@ -271,7 +271,7 @@ public class Mod : ModBase // <= Do not Remove.
         _directInputKeyboard = new DirectInputKeyboardHook(
             _hooks,
             _overlay.TryRequestOpen,
-            _overlay.ShouldCaptureKeyboard,
+            _overlay.GetEffectiveInputCaptureDevices,
             () => IsOnlineRoomActive() &&
                   _configuration.EnableVoiceInput &&
                   _partyLifecycleProbe?.IsVoicePushToTalkReady == true,

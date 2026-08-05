@@ -6,8 +6,8 @@ namespace GBFR.ChatOverlay.Input;
 
 /// <summary>
 /// Observes DirectInput keyboard and mouse state while chat/settings own input. The original calls
-/// still run so acquisition stays healthy; menu close drains held keys/buttons before control
-/// returns to the game.
+/// still run so acquisition stays healthy; the shared capture barrier decides when each device is
+/// safe to return to the game.
 /// </summary>
 public sealed unsafe class DirectInputKeyboardHook
 {
@@ -24,7 +24,7 @@ public sealed unsafe class DirectInputKeyboardHook
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Func<bool> _tryActivate;
-    private readonly Func<bool> _shouldCapture;
+    private readonly Func<InputCaptureDevices> _getEffectiveCapture;
     private readonly Func<bool> _isVoicePushToTalkEnabled;
     private readonly Func<bool> _isSettingsMenuAvailable;
     private readonly Action<bool> _reportSettingsMenuKey;
@@ -47,7 +47,7 @@ public sealed unsafe class DirectInputKeyboardHook
     public DirectInputKeyboardHook(
         ReloadedHooksApi hooks,
         Func<bool> tryActivate,
-        Func<bool> shouldCapture,
+        Func<InputCaptureDevices> getEffectiveCapture,
         Func<bool> isVoicePushToTalkEnabled,
         Action<bool> setVoicePushToTalkPressed,
         Action requestVoiceDiagnosticSample,
@@ -58,7 +58,8 @@ public sealed unsafe class DirectInputKeyboardHook
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _tryActivate = tryActivate ?? throw new ArgumentNullException(nameof(tryActivate));
-        _shouldCapture = shouldCapture ?? throw new ArgumentNullException(nameof(shouldCapture));
+        _getEffectiveCapture = getEffectiveCapture ??
+            throw new ArgumentNullException(nameof(getEffectiveCapture));
         _isVoicePushToTalkEnabled = isVoicePushToTalkEnabled ??
             throw new ArgumentNullException(nameof(isVoicePushToTalkEnabled));
         _isSettingsMenuAvailable = isSettingsMenuAvailable ??
@@ -207,7 +208,7 @@ public sealed unsafe class DirectInputKeyboardHook
                 _keyboardStateFilter.Process(
                     new Span<byte>((void*)state, byteCount),
                     _tryActivate,
-                    _shouldCapture,
+                    () => (_getEffectiveCapture() & InputCaptureDevices.Keyboard) != 0,
                     _isVoicePushToTalkEnabled,
                     _voicePushToTalkGate.Report,
                     _isSettingsMenuAvailable,
@@ -217,7 +218,7 @@ public sealed unsafe class DirectInputKeyboardHook
             {
                 _mouseStateFilter.Process(
                     new Span<byte>((void*)state, byteCount),
-                    _shouldCapture());
+                    (_getEffectiveCapture() & InputCaptureDevices.Mouse) != 0);
             }
         }
         catch (Exception exception)
@@ -242,7 +243,8 @@ public sealed unsafe class DirectInputKeyboardHook
         uint flags)
     {
         var isMouse = self == Volatile.Read(ref _mouseDevice);
-        var suppress = isMouse && (_shouldCapture() || _mouseStateFilter.IsSuppressing);
+        var suppress = isMouse &&
+                       (_getEffectiveCapture() & InputCaptureDevices.Mouse) != 0;
         var effectiveFlags = suppress ? flags & ~DigddPeek : flags;
         var result = _getDeviceDataHook!.OriginalFunction(
             self,

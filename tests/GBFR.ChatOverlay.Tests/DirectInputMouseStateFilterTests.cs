@@ -17,7 +17,7 @@ public sealed class DirectInputMouseStateFilterTests
     }
 
     [Fact]
-    public void Close_DrainsHeldButtonBeforeReturningMouseToGame()
+    public void Release_DoesNotKeepASeparateButtonLatch()
     {
         var filter = new DirectInputMouseStateFilter();
         var state = new byte[20];
@@ -25,25 +25,26 @@ public sealed class DirectInputMouseStateFilterTests
 
         Assert.True(filter.Process(state, capture: true));
         state[12] = 0x80;
-        Assert.True(filter.Process(state, capture: false));
-        Assert.True(filter.IsSuppressing);
-
-        Assert.True(filter.Process(state, capture: false));
-        Assert.False(filter.IsSuppressing);
-
-        state[4] = 1;
         Assert.False(filter.Process(state, capture: false));
-        Assert.Equal(1, state[4]);
+        Assert.Equal(0x80, state[12]);
     }
 
     [Theory]
-    [InlineData(0x0100)]
-    [InlineData(0x0201)]
-    [InlineData(0x00A1)]
-    [InlineData(0x010F)]
-    public void WindowClassifier_AlwaysCapturesKeyboardMouseAndIme(uint message)
+    [InlineData(0x0100, InputCaptureDevices.Keyboard)]
+    [InlineData(0x0104, InputCaptureDevices.Keyboard)]
+    [InlineData(0x0102, InputCaptureDevices.Text)]
+    [InlineData(0x010F, InputCaptureDevices.Text)]
+    [InlineData(0x0201, InputCaptureDevices.Mouse)]
+    [InlineData(0x00A1, InputCaptureDevices.Mouse)]
+    public void WindowClassifier_CapturesOnlyTheRequestedDeviceClass(
+        uint message,
+        InputCaptureDevices devices)
     {
-        Assert.True(WindowInputClassifier.IsAlwaysCaptured(message));
+        Assert.True(WindowInputClassifier.IsAlwaysCaptured(message, devices));
+        Assert.False(
+            WindowInputClassifier.IsAlwaysCaptured(
+                message,
+                InputCaptureDevices.All & ~devices));
     }
 
     [Theory]
@@ -54,6 +55,6 @@ public sealed class DirectInputMouseStateFilterTests
     [InlineData(0x0319)]
     public void WindowClassifier_DoesNotCaptureUnrelatedWindowMessages(uint message)
     {
-        Assert.False(WindowInputClassifier.IsAlwaysCaptured(message));
+        Assert.False(WindowInputClassifier.IsAlwaysCaptured(message, InputCaptureDevices.All));
     }
 }

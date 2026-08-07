@@ -42,6 +42,24 @@ public sealed class DirectInputKeyboardStateFilterTests
     }
 
     [Fact]
+    public void Process_ActivationCanEnableCaptureForTheSameStateBuffer()
+    {
+        var filter = new DirectInputKeyboardStateFilter();
+        var state = new byte[256];
+        state[0x15] = 0x80;
+        state[42] = 0x80;
+        var capture = false;
+
+        var filtered = filter.Process(
+            state,
+            () => capture = true,
+            () => capture);
+
+        Assert.True(filtered);
+        Assert.All(state, value => Assert.Equal(0, value));
+    }
+
+    [Fact]
     public void Process_LeavesStateUntouchedWhenCaptureIsDisabled()
     {
         var filter = new DirectInputKeyboardStateFilter();
@@ -55,18 +73,13 @@ public sealed class DirectInputKeyboardStateFilterTests
     }
 
     [Fact]
-    public void Process_DrainsHeldKeysBeforeReturningControlToGame()
+    public void Process_DoesNotKeepASeparateReleaseLatch()
     {
         var filter = new DirectInputKeyboardStateFilter();
         var state = new byte[256];
         state[42] = 0x80;
 
         Assert.True(filter.Process(state, () => false, () => true));
-        state[42] = 0x80;
-        Assert.True(filter.Process(state, () => false, () => false));
-        Assert.All(state, value => Assert.Equal(0, value));
-        Assert.True(filter.Process(state, () => false, () => false));
-
         state[42] = 0x80;
         Assert.False(filter.Process(state, () => false, () => false));
         Assert.Equal(0x80, state[42]);

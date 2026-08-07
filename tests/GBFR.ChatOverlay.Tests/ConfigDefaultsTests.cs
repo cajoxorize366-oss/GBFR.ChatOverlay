@@ -23,12 +23,26 @@ public sealed class ConfigDefaultsTests
     [InlineData(nameof(Config.SettingsMenuKeyboardBinding), "菜单键（键盘） / Menu (Keyboard)")]
     [InlineData(nameof(Config.QuickActionsKeyboardBinding), "快捷菜单 / Quick Action Menu")]
     [InlineData(nameof(Config.BackgroundOpacity), "聊天背景透明度 / Chat Background Opacity")]
+    [InlineData(nameof(Config.ChatFontSize), "字体大小 / Font Size")]
+    [InlineData(nameof(Config.ShowTimestamps), "显示时间戳 / Show Timestamps")]
     [InlineData(nameof(Config.HistoryCapacity), "聊天记录上限 / Chat History Limit")]
+    [InlineData(nameof(Config.PlayerNameFontSize), "玩家名字大小 / Player Name Size")]
+    [InlineData(nameof(Config.PlayerNameWeight), "玩家名字粗细 / Player Name Weight")]
+    [InlineData(nameof(Config.Player1NameColor), "玩家 1 颜色 / Player 1 Color")]
+    [InlineData(nameof(Config.Player2NameColor), "玩家 2 颜色 / Player 2 Color")]
+    [InlineData(nameof(Config.Player3NameColor), "玩家 3 颜色 / Player 3 Color")]
+    [InlineData(nameof(Config.Player4NameColor), "玩家 4 颜色 / Player 4 Color")]
     [InlineData(nameof(Config.EnableImeCandidateFallback), "输入法兼容 / IME Compatibility")]
     [InlineData(nameof(Config.EnableOverlay), "启用聊天界面 / Enable Chat Overlay")]
     [InlineData(nameof(Config.QuickActionsControllerBinding), "快捷菜单（手柄） / Quick Action (Controller)")]
-    [InlineData(nameof(Config.GlobalMuteControllerBinding), "全局禁言（手柄） / Global Mute (Controller)")]
-    [InlineData(nameof(Config.GlobalMuteKeyboardBinding), "全局禁言（键盘） / Global Mute (Keyboard)")]
+    [InlineData(nameof(Config.GlobalMuteControllerBinding), "全局聊天禁言（手柄） / Block All Chat (Controller)")]
+    [InlineData(nameof(Config.GlobalMuteKeyboardBinding), "全局聊天禁言（键盘） / Block All Chat (Keyboard)")]
+    [InlineData(nameof(Config.RemotePlayer1ChatMuteControllerBinding), "玩家 1 聊天禁言（手柄） / Player 1 Chat Mute (Controller)")]
+    [InlineData(nameof(Config.RemotePlayer1ChatMuteKeyboardBinding), "玩家 1 聊天禁言（键盘） / Player 1 Chat Mute (Keyboard)")]
+    [InlineData(nameof(Config.RemotePlayer2ChatMuteControllerBinding), "玩家 2 聊天禁言（手柄） / Player 2 Chat Mute (Controller)")]
+    [InlineData(nameof(Config.RemotePlayer2ChatMuteKeyboardBinding), "玩家 2 聊天禁言（键盘） / Player 2 Chat Mute (Keyboard)")]
+    [InlineData(nameof(Config.RemotePlayer3ChatMuteControllerBinding), "玩家 3 聊天禁言（手柄） / Player 3 Chat Mute (Controller)")]
+    [InlineData(nameof(Config.RemotePlayer3ChatMuteKeyboardBinding), "玩家 3 聊天禁言（键盘） / Player 3 Chat Mute (Keyboard)")]
     [InlineData(nameof(Config.VoicePlaybackDeviceId), "播放设备 / Playback Device")]
     [InlineData(nameof(Config.EnableVoiceIndicators), "语音状态指示 / Show Voice Indicator")]
     [InlineData(nameof(Config.EnableVoiceInput), "启用语音聊天 / Enable Voice Chat")]
@@ -53,10 +67,22 @@ public sealed class ConfigDefaultsTests
                      nameof(Config.EnableOverlay),
                      nameof(Config.EnableImeCandidateFallback),
                      nameof(Config.BackgroundOpacity),
+                     nameof(Config.ChatFontSize),
+                     nameof(Config.ShowTimestamps),
+                     nameof(Config.HistoryCapacity),
+                     nameof(Config.PlayerNameFontSize),
+                     nameof(Config.PlayerNameWeight),
+                     nameof(Config.Player1NameColor),
                      nameof(Config.SettingsMenuKeyboardBinding),
                      nameof(Config.SettingsMenuControllerBinding),
                      nameof(Config.GlobalMuteKeyboardBinding),
                      nameof(Config.GlobalMuteControllerBinding),
+                     nameof(Config.RemotePlayer1ChatMuteKeyboardBinding),
+                     nameof(Config.RemotePlayer1ChatMuteControllerBinding),
+                     nameof(Config.RemotePlayer2ChatMuteKeyboardBinding),
+                     nameof(Config.RemotePlayer2ChatMuteControllerBinding),
+                     nameof(Config.RemotePlayer3ChatMuteKeyboardBinding),
+                     nameof(Config.RemotePlayer3ChatMuteControllerBinding),
                  })
         {
             Assert.Equal(
@@ -139,7 +165,28 @@ public sealed class ConfigDefaultsTests
         Assert.Equal(string.Empty, configuration.QuickActionsControllerBinding);
         Assert.Equal(string.Empty, configuration.GlobalMuteKeyboardBinding);
         Assert.Equal(string.Empty, configuration.GlobalMuteControllerBinding);
+        Assert.Equal(string.Empty, configuration.RemotePlayer1ChatMuteKeyboardBinding);
+        Assert.Equal(string.Empty, configuration.RemotePlayer1ChatMuteControllerBinding);
+        Assert.Equal(string.Empty, configuration.RemotePlayer2ChatMuteKeyboardBinding);
+        Assert.Equal(string.Empty, configuration.RemotePlayer2ChatMuteControllerBinding);
+        Assert.Equal(string.Empty, configuration.RemotePlayer3ChatMuteKeyboardBinding);
+        Assert.Equal(string.Empty, configuration.RemotePlayer3ChatMuteControllerBinding);
         Assert.Empty(configuration.QuickActions);
+    }
+
+    [Fact]
+    public void ChatPresentation_UsesReadableDefaultsAndHidesTimestamps()
+    {
+        var configuration = new Config();
+
+        Assert.Equal(18.0, configuration.ChatFontSize);
+        Assert.False(configuration.ShowTimestamps);
+        Assert.Equal(18.0, configuration.PlayerNameFontSize);
+        Assert.Equal(2, configuration.PlayerNameWeight);
+        Assert.Equal("#5ED9FF", configuration.Player1NameColor);
+        Assert.Equal("#FFAD5E", configuration.Player2NameColor);
+        Assert.Equal("#71DF8A", configuration.Player3NameColor);
+        Assert.Equal("#C69CFF", configuration.Player4NameColor);
     }
 
     [Fact]

@@ -72,6 +72,9 @@
     <None Update="licenses/NAudio-LICENSE.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Update="licenses/HidSharp-LICENSE.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="licenses/SafetyHook-LICENSE.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -87,6 +90,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.ILLink.Tasks" Version="8.0.3" />
+    <PackageReference Include="HidSharp" Version="2.6.4" />
     <PackageReference Include="NAudio.Wasapi" Version="2.3.0" />
     <PackageReference Include="Reloaded.Imgui.Hook" Version="4.1.0" />
     <PackageReference Include="Reloaded.Imgui.Hook.Direct3D11" Version="1.0.2" />

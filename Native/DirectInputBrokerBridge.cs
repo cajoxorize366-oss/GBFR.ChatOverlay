@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using GBFR.ChatOverlay.Input;
+using GBFR.OverlayHub.Contracts;
 
 namespace GBFR.ChatOverlay.Native;
 
@@ -123,6 +124,18 @@ internal sealed class DirectInputBrokerBridge : IDirectInputBrokerBackend
                    DirectInputBrokerSnapshot.ExpectedStructSize) != 0;
     }
 
+    internal OverlayInputDevices GetEffectiveInputDevices()
+    {
+        var effective = (DirectInputBrokerPolicy)
+            GBFRChatOverlay_GetDirectInputEffectiveCapture();
+        var devices = OverlayInputDevices.None;
+        if ((effective & DirectInputBrokerPolicy.CaptureKeyboard) != 0)
+            devices |= OverlayInputDevices.Keyboard;
+        if ((effective & DirectInputBrokerPolicy.CaptureMouse) != 0)
+            devices |= OverlayInputDevices.Mouse;
+        return devices;
+    }
+
     [DllImport(
         DxgiPresentBridge.LibraryName,
         CallingConvention = CallingConvention.Cdecl,
@@ -157,5 +170,11 @@ internal sealed class DirectInputBrokerBridge : IDirectInputBrokerBackend
     private static extern int GBFRChatOverlay_GetDirectInputSnapshot(
         ref DirectInputBrokerSnapshot snapshot,
         uint snapshotSize);
+
+    [DllImport(
+        DxgiPresentBridge.LibraryName,
+        CallingConvention = CallingConvention.Cdecl,
+        ExactSpelling = true)]
+    private static extern uint GBFRChatOverlay_GetDirectInputEffectiveCapture();
 
 }

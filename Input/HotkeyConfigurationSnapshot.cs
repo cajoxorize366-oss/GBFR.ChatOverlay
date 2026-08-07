@@ -24,6 +24,7 @@ internal sealed class HotkeyConfigurationSnapshot
         ControllerBinding quickActionsController,
         KeyboardBinding globalMuteKeyboard,
         ControllerBinding globalMuteController,
+        IReadOnlyList<ConfiguredRemotePlayerChatMute> remotePlayerChatMutes,
         IReadOnlyList<ConfiguredQuickAction> quickActions,
         DirectInputHotkeyBinding[] nativeBindings)
     {
@@ -38,6 +39,7 @@ internal sealed class HotkeyConfigurationSnapshot
         QuickActionsController = quickActionsController;
         GlobalMuteKeyboard = globalMuteKeyboard;
         GlobalMuteController = globalMuteController;
+        RemotePlayerChatMutes = remotePlayerChatMutes;
         QuickActions = quickActions;
         NativeBindings = nativeBindings;
     }
@@ -53,6 +55,7 @@ internal sealed class HotkeyConfigurationSnapshot
     internal ControllerBinding QuickActionsController { get; }
     internal KeyboardBinding GlobalMuteKeyboard { get; }
     internal ControllerBinding GlobalMuteController { get; }
+    internal IReadOnlyList<ConfiguredRemotePlayerChatMute> RemotePlayerChatMutes { get; }
     internal IReadOnlyList<ConfiguredQuickAction> QuickActions { get; }
     internal DirectInputHotkeyBinding[] NativeBindings { get; }
 
@@ -69,6 +72,12 @@ internal sealed class HotkeyConfigurationSnapshot
         var quickActionsController = ParseController(configuration.QuickActionsControllerBinding);
         var globalMuteKeyboard = ParseKeyboard(configuration.GlobalMuteKeyboardBinding);
         var globalMuteController = ParseController(configuration.GlobalMuteControllerBinding);
+        ConfiguredRemotePlayerChatMute[] remotePlayerChatMutes =
+        [
+            new(1, 2, ParseKeyboard(configuration.RemotePlayer1ChatMuteKeyboardBinding), ParseController(configuration.RemotePlayer1ChatMuteControllerBinding)),
+            new(2, 3, ParseKeyboard(configuration.RemotePlayer2ChatMuteKeyboardBinding), ParseController(configuration.RemotePlayer2ChatMuteControllerBinding)),
+            new(3, 4, ParseKeyboard(configuration.RemotePlayer3ChatMuteKeyboardBinding), ParseController(configuration.RemotePlayer3ChatMuteControllerBinding)),
+        ];
         var quickActions = (configuration.QuickActions ?? [])
             .Where(action => action is not null)
             .Select(action => new ConfiguredQuickAction(
@@ -78,18 +87,19 @@ internal sealed class HotkeyConfigurationSnapshot
                 action.Kind,
                 action.OfficialId,
                 action.Text ?? string.Empty,
-                ParseKeyboard(action.KeyboardBinding),
-                ParseController(action.ControllerBinding)))
+                ParseKeyboard(action.KeyboardBinding)))
             .DistinctBy(action => action.Id, StringComparer.Ordinal)
             .ToArray();
 
-        var nativeBindings = new List<DirectInputHotkeyBinding>(6 + quickActions.Length);
+        var nativeBindings = new List<DirectInputHotkeyBinding>(9 + quickActions.Length);
         AddNativeBinding(nativeBindings, openChatKeyboard, ActivationPolicy);
         AddNativeBinding(nativeBindings, settingsKeyboard, SettingsPolicy);
         AddNativeBinding(nativeBindings, EmergencySettingsKeyboard, SettingsPolicy);
         AddNativeBinding(nativeBindings, pushToTalkKeyboard, PushToTalkPolicy);
         AddNativeBinding(nativeBindings, quickActionsKeyboard, QuickActionsPolicy);
         AddNativeBinding(nativeBindings, globalMuteKeyboard, QuickActionsPolicy);
+        foreach (var remotePlayerChatMute in remotePlayerChatMutes)
+            AddNativeBinding(nativeBindings, remotePlayerChatMute.Keyboard, QuickActionsPolicy);
         foreach (var action in quickActions)
         {
             if (action.Enabled && action.IsConfigured)
@@ -108,6 +118,12 @@ internal sealed class HotkeyConfigurationSnapshot
             configuration.QuickActionsControllerBinding,
             configuration.GlobalMuteKeyboardBinding,
             configuration.GlobalMuteControllerBinding,
+            configuration.RemotePlayer1ChatMuteKeyboardBinding,
+            configuration.RemotePlayer1ChatMuteControllerBinding,
+            configuration.RemotePlayer2ChatMuteKeyboardBinding,
+            configuration.RemotePlayer2ChatMuteControllerBinding,
+            configuration.RemotePlayer3ChatMuteKeyboardBinding,
+            configuration.RemotePlayer3ChatMuteControllerBinding,
             string.Join('\u001E', quickActions.Select(action => action.Signature)));
 
         return new HotkeyConfigurationSnapshot(
@@ -122,6 +138,7 @@ internal sealed class HotkeyConfigurationSnapshot
             quickActionsController,
             globalMuteKeyboard,
             globalMuteController,
+            remotePlayerChatMutes,
             quickActions,
             distinctBindings);
     }
@@ -174,6 +191,12 @@ internal sealed class HotkeyConfigurationSnapshot
     }
 }
 
+internal readonly record struct ConfiguredRemotePlayerChatMute(
+    int RemotePlayerNumber,
+    int ChatPlayerNumber,
+    KeyboardBinding Keyboard,
+    ControllerBinding Controller);
+
 internal readonly record struct ConfiguredQuickAction(
     string Id,
     bool Enabled,
@@ -181,13 +204,12 @@ internal readonly record struct ConfiguredQuickAction(
     QuickActionKind Kind,
     int OfficialId,
     string Text,
-    KeyboardBinding Keyboard,
-    ControllerBinding Controller)
+    KeyboardBinding Keyboard)
 {
     internal bool IsConfigured => Kind == QuickActionKind.CustomText
         ? !string.IsNullOrWhiteSpace(Text)
         : OfficialId >= 0 && CommunicationCatalog.TryGetEntry(Kind, OfficialId, out _);
 
     internal string Signature =>
-        $"{Id}\u001D{Enabled}\u001D{Name}\u001D{Kind}\u001D{OfficialId}\u001D{Text}\u001D{Keyboard.Format()}\u001D{Controller.Format()}";
+        $"{Id}\u001D{Enabled}\u001D{Name}\u001D{Kind}\u001D{OfficialId}\u001D{Text}\u001D{Keyboard.Format()}";
 }

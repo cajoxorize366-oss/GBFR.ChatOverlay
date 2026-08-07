@@ -1,6 +1,7 @@
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
+using System.Text.Json;
 
 namespace GBFR.ChatOverlay.Tests;
 
@@ -70,5 +71,21 @@ public sealed class QuickActionConfigurationTests
         };
 
         Assert.False(action.IsConfigured);
+    }
+
+    [Fact]
+    public void LegacyControllerBinding_IsIgnoredBySerializationAndRuntimeSnapshot()
+    {
+        var action = JsonSerializer.Deserialize<QuickActionConfiguration>(
+            "{\"Text\":\"Ready!\",\"ControllerBinding\":\"X\"}")!;
+        var json = JsonSerializer.Serialize(action);
+        var snapshot = HotkeyConfigurationSnapshot.Create(new Config
+        {
+            QuickActions = [action],
+        });
+
+        Assert.Equal(string.Empty, action.ControllerBinding);
+        Assert.DoesNotContain("ControllerBinding", json, StringComparison.Ordinal);
+        Assert.False(snapshot.QuickActions[0].Keyboard.IsBound);
     }
 }

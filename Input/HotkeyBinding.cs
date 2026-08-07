@@ -137,8 +137,30 @@ public enum ControllerButtons : ushort
     Y = 0x8000,
 }
 
-public readonly record struct ControllerBinding(ControllerButtons Buttons)
+[Flags]
+public enum ExtendedControllerButtons : ushort
 {
+    None = 0,
+    C = 0x0001,
+    Z = 0x0002,
+    M1 = 0x0004,
+    M2 = 0x0008,
+    M3 = 0x0010,
+    M4 = 0x0020,
+    LM = 0x0040,
+    RM = 0x0080,
+    Circle = 0x0100,
+}
+
+public readonly record struct ControllerBinding(
+    ControllerButtons Buttons,
+    ExtendedControllerButtons ExtendedButtons)
+{
+    public ControllerBinding(ControllerButtons buttons)
+        : this(buttons, ExtendedControllerButtons.None)
+    {
+    }
+
     private static readonly (ControllerButtons Button, string Name)[] OrderedButtons =
     [
         (ControllerButtons.LeftBumper, "LB"),
@@ -157,20 +179,46 @@ public readonly record struct ControllerBinding(ControllerButtons Buttons)
         (ControllerButtons.Y, "Y"),
     ];
 
-    public bool IsBound => Buttons != ControllerButtons.None;
+    private static readonly (ExtendedControllerButtons Button, string Name)[] OrderedExtendedButtons =
+    [
+        (ExtendedControllerButtons.C, "C"),
+        (ExtendedControllerButtons.Z, "Z"),
+        (ExtendedControllerButtons.LM, "LM"),
+        (ExtendedControllerButtons.RM, "RM"),
+        (ExtendedControllerButtons.M1, "M1"),
+        (ExtendedControllerButtons.M2, "M2"),
+        (ExtendedControllerButtons.M3, "M3"),
+        (ExtendedControllerButtons.M4, "M4"),
+        (ExtendedControllerButtons.Circle, "Circle"),
+    ];
+
+    public bool IsBound =>
+        Buttons != ControllerButtons.None || ExtendedButtons != ExtendedControllerButtons.None;
 
     public string Format()
     {
         if (!IsBound)
             return string.Empty;
         var buttons = Buttons;
-        return string.Join('+', OrderedButtons
+        var extendedButtons = ExtendedButtons;
+        var names = OrderedButtons
             .Where(item => (buttons & item.Button) != 0)
-            .Select(item => item.Name));
+            .Select(item => item.Name)
+            .Concat(OrderedExtendedButtons
+                .Where(item => (extendedButtons & item.Button) != 0)
+                .Select(item => item.Name));
+        return string.Join('+', names);
     }
 
     public bool IsPressed(ControllerButtons pressed) =>
-        IsBound && (pressed & Buttons) == Buttons;
+        IsPressed(pressed, ExtendedControllerButtons.None);
+
+    public bool IsPressed(
+        ControllerButtons pressed,
+        ExtendedControllerButtons extendedPressed) =>
+        IsBound &&
+        (pressed & Buttons) == Buttons &&
+        (extendedPressed & ExtendedButtons) == ExtendedButtons;
 
     public static bool TryParse(string? value, out ControllerBinding binding)
     {
@@ -179,17 +227,46 @@ public readonly record struct ControllerBinding(ControllerButtons Buttons)
             return true;
 
         var buttons = ControllerButtons.None;
+        var extendedButtons = ExtendedControllerButtons.None;
         foreach (var rawToken in value.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
-            if (!TryParseButton(rawToken, out var button) || (buttons & button) != 0)
-                return false;
-            buttons |= button;
+            if (TryParseButton(rawToken, out var button))
+            {
+                if (button == ControllerButtons.DPadDown)
+                    return false;
+                if ((buttons & button) != 0)
+                    return false;
+                buttons |= button;
+                continue;
+            }
+            if (TryParseExtendedButton(rawToken, out var extendedButton))
+            {
+                if ((extendedButtons & extendedButton) != 0)
+                    return false;
+                extendedButtons |= extendedButton;
+                continue;
+            }
+            return false;
         }
 
-        if (buttons == ControllerButtons.None || BitOperations.PopCount((uint)buttons) > 2)
+        var buttonCount = BitOperations.PopCount((uint)buttons) +
+                          BitOperations.PopCount((uint)extendedButtons);
+        if (buttonCount is 0 or > 2)
             return false;
-        binding = new ControllerBinding(buttons);
+        binding = new ControllerBinding(buttons, extendedButtons);
         return true;
+    }
+
+    internal static bool ContainsReservedDPadDown(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+        foreach (var rawToken in value.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (TryParseButton(rawToken, out var button) && button == ControllerButtons.DPadDown)
+                return true;
+        }
+        return false;
     }
 
     private static bool TryParseButton(string value, out ControllerButtons button)
@@ -219,6 +296,32 @@ public readonly record struct ControllerBinding(ControllerButtons Buttons)
             _ => ControllerButtons.None,
         };
         return button != ControllerButtons.None;
+    }
+
+    private static bool TryParseExtendedButton(
+        string value,
+        out ExtendedControllerButtons button)
+    {
+        foreach (var item in OrderedExtendedButtons)
+        {
+            if (item.Name.Equals(value, StringComparison.OrdinalIgnoreCase))
+            {
+                button = item.Button;
+                return true;
+            }
+        }
+
+        var alias = value.Replace("-", string.Empty, StringComparison.Ordinal)
+            .Replace("_", string.Empty, StringComparison.Ordinal)
+            .Replace(" ", string.Empty, StringComparison.Ordinal);
+        button = alias.ToUpperInvariant() switch
+        {
+            "LEFTMIDDLE" => ExtendedControllerButtons.LM,
+            "RIGHTMIDDLE" => ExtendedControllerButtons.RM,
+            "O" => ExtendedControllerButtons.Circle,
+            _ => ExtendedControllerButtons.None,
+        };
+        return button != ExtendedControllerButtons.None;
     }
 }
 

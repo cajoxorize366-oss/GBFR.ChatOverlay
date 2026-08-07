@@ -6,28 +6,31 @@ param(
 $repositoryRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $otherRoot = [System.IO.Path]::GetFullPath($OtherRepository)
 $sharedFiles = @(
-    'GBFR.OverlayHub.Contracts/OverlayBroker.cs',
-    'GBFR.OverlayHub.Contracts/OverlayBrokerCapabilities.cs',
-    'GBFR.OverlayHub.Contracts/OverlayHubContracts.cs',
-    'OverlayBroker/OverlayBrokerElection.cs',
-    'OverlayBroker/OverlayBrokerHost.cs',
-    'OverlayBroker/OverlayWindowInputClassifier.cs',
-    'OverlayBroker/SharedImguiGraphicsBinding.cs'
+    [pscustomobject]@{ Path = 'GBFR.OverlayHub.Contracts/OverlayBroker.cs'; Other = @('GBFR.OverlayHub.Contracts/OverlayBroker.cs') },
+    [pscustomobject]@{ Path = 'GBFR.OverlayHub.Contracts/OverlayBrokerCapabilities.cs'; Other = @('GBFR.OverlayHub.Contracts/OverlayBrokerCapabilities.cs') },
+    [pscustomobject]@{ Path = 'GBFR.OverlayHub.Contracts/OverlayHubContracts.cs'; Other = @('GBFR.OverlayHub.Contracts/OverlayHubContracts.cs') },
+    [pscustomobject]@{ Path = 'OverlayBroker/OverlayBrokerElection.cs'; Other = @('OverlayBroker/OverlayBrokerElection.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/OverlayBrokerElection.cs') },
+    [pscustomobject]@{ Path = 'OverlayBroker/OverlayBrokerHost.cs'; Other = @('OverlayBroker/OverlayBrokerHost.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/OverlayBrokerHost.cs') },
+    [pscustomobject]@{ Path = 'OverlayBroker/OverlayWindowInputClassifier.cs'; Other = @('OverlayBroker/OverlayWindowInputClassifier.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/OverlayWindowInputClassifier.cs') },
+    [pscustomobject]@{ Path = 'OverlayBroker/SharedImguiGraphicsBinding.cs'; Other = @('OverlayBroker/SharedImguiGraphicsBinding.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/SharedImguiGraphicsBinding.cs') }
 )
 
 $differences = @()
-foreach ($relativePath in $sharedFiles) {
-    $localPath = Join-Path $repositoryRoot $relativePath
-    $otherPath = Join-Path $otherRoot $relativePath
-    if (-not (Test-Path -LiteralPath $localPath) -or -not (Test-Path -LiteralPath $otherPath)) {
-        $differences += "$relativePath (missing)"
+foreach ($entry in $sharedFiles) {
+    $localPath = Join-Path $repositoryRoot $entry.Path
+    $otherPath = $entry.Other |
+        ForEach-Object { Join-Path $otherRoot $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    if (-not (Test-Path -LiteralPath $localPath -PathType Leaf) -or -not $otherPath) {
+        $differences += "$($entry.Path) (missing)"
         continue
     }
 
     $localHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $localPath).Hash
     $otherHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $otherPath).Hash
     if ($localHash -ne $otherHash) {
-        $differences += "$relativePath (different)"
+        $differences += "$($entry.Path) (different)"
     }
 }
 

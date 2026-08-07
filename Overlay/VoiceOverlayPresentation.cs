@@ -30,7 +30,7 @@ internal static class VoiceOverlayPresenter
             PartyVoiceUiState.Ready =>
                 new(true, T(language, "[语音] 已就绪", "[Voice] Ready")),
             PartyVoiceUiState.Speaking =>
-                new(true, T(language, "[语音] 正在说话", "[Voice] Speaking")),
+                new(true, T(language, "[语音] 正在通话中", "[Voice] Transmitting")),
             PartyVoiceUiState.Disconnecting =>
                 new(true, T(language, "[语音] 正在断开", "[Voice] Disconnecting")),
             PartyVoiceUiState.Faulted =>

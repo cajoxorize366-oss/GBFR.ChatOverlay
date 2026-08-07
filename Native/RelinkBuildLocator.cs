@@ -19,28 +19,31 @@ public readonly record struct RelinkChatRvas(int SendMessage, int RpcMessage, in
     public int PlayFixedPhrase { get; init; }
 
     public int PlayEmotion { get; init; }
+
+    public int LobbyOwnerImportThunk { get; init; }
 }
 
 public static class RelinkBuildLocator
 {
     public const string SupportedSha256 =
-        "63340832bcf731fbc97796f686b05c988418e83d451d4a49b2244a85d00e297f";
+        "1bbbec61aab7f75fe328cf6bfe0247ebdbcec6c404cec12c032b8ffa41d22102";
 
-    private const int ExpectedSendMessageRva = 0x0090A2E0;
-    private const int ExpectedRpcMessageRva = 0x00B9D230;
-    private const int ExpectedManagerSlotRva = 0x07C25220;
-    private const int ExpectedSenderSlotResolverRva = 0x006D2EE0;
-    private const int ExpectedLobbyMemberLookupRva = 0x0037CDD0;
-    private const int ExpectedLobbyMemberManagerSlotRva = 0x07C23878;
-    private const int ExpectedPartyMemberIdentityManagerSlotRva = 0x07C4A168;
-    private const int ExpectedManagerInstructionRva = 0x025FAD2A;
-    private const int ExpectedLobbyMemberCallsiteRva = 0x003CEE70;
-    private const int ExpectedPartyMemberIdentityCallsiteRva = 0x003CE3FC;
-    private const int ExpectedSendStampRva = 0x00908F50;
-    private const int ExpectedSendFixedPhraseRva = 0x00909DE0;
-    private const int ExpectedSendEmotionRva = 0x00908C90;
-    private const int ExpectedPlayFixedPhraseRva = 0x006E93C0;
-    private const int ExpectedPlayEmotionRva = 0x006E84F0;
+    private const int ExpectedSendMessageRva = 0x00903A50;
+    private const int ExpectedRpcMessageRva = 0x00B969B0;
+    private const int ExpectedManagerSlotRva = 0x07C221E0;
+    private const int ExpectedSenderSlotResolverRva = 0x006CC580;
+    private const int ExpectedLobbyMemberLookupRva = 0x003760A0;
+    private const int ExpectedLobbyMemberManagerSlotRva = 0x07C20838;
+    private const int ExpectedPartyMemberIdentityManagerSlotRva = 0x07C47128;
+    private const int ExpectedManagerInstructionRva = 0x025F539A;
+    private const int ExpectedLobbyMemberCallsiteRva = 0x003C81B0;
+    private const int ExpectedPartyMemberIdentityCallsiteRva = 0x003C773C;
+    private const int ExpectedSendStampRva = 0x009026C0;
+    private const int ExpectedSendFixedPhraseRva = 0x00903550;
+    private const int ExpectedSendEmotionRva = 0x00902400;
+    private const int ExpectedPlayFixedPhraseRva = 0x006E2A60;
+    private const int ExpectedPlayEmotionRva = 0x006E1B90;
+    private const int ExpectedLobbyOwnerImportThunkRva = 0x049AC6E0;
 
     private static readonly SignaturePattern SendMessagePattern = SignaturePattern.Parse(
         "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC F8 02 00 00 " +
@@ -48,7 +51,7 @@ public static class RelinkBuildLocator
 
     private static readonly SignaturePattern RpcMessagePattern = SignaturePattern.Parse(
         "41 57 41 56 41 54 56 57 55 53 48 81 EC 20 01 00 00 48 89 CE " +
-        "48 8B 05 C5 75 0B 07 48 83 B8 58 01 00 00 00 48 8B 3D");
+        "48 8B 05 ?? ?? ?? ?? 48 83 B8 58 01 00 00 00 48 8B 3D");
 
     private static readonly SignaturePattern ManagerSlotPattern = SignaturePattern.Parse(
         "48 8B 3D ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 44 24 38 " +
@@ -79,7 +82,7 @@ public static class RelinkBuildLocator
 
     private static readonly SignaturePattern SendEmotionPattern = SignaturePattern.Parse(
         "56 57 48 81 EC B8 01 00 00 89 CE 48 8D 7C 24 2D " +
-        "48 8B 05 69 BB 34 07 8B 40 04");
+        "48 8B 05 ?? ?? ?? ?? 8B 40 04");
 
     private static readonly SignaturePattern PlayFixedPhrasePattern = SignaturePattern.Parse(
         "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 08 01 00 00 " +
@@ -88,6 +91,9 @@ public static class RelinkBuildLocator
     private static readonly SignaturePattern PlayEmotionPattern = SignaturePattern.Parse(
         "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 68 01 00 00 " +
         "48 8D AC 24 80 00 00 00 C5 78 29 85 D0 00 00 00");
+
+    private static readonly SignaturePattern LobbyOwnerImportThunkPattern = SignaturePattern.Parse(
+        "FF 25 42 49 91 01");
 
     public static RelinkChatRvas Resolve(string imagePath)
     {
@@ -123,6 +129,10 @@ public static class RelinkBuildLocator
             PlayFixedPhrasePattern,
             "communication fixed-phrase local play");
         preflight.RequirePattern(ExpectedPlayEmotionRva, PlayEmotionPattern, "communication emotion local play");
+        preflight.RequirePattern(
+            ExpectedLobbyOwnerImportThunkRva,
+            LobbyOwnerImportThunkPattern,
+            "PlayFab lobby-owner import thunk");
 
         var sendRva = ExpectedSendMessageRva;
         var rpcRva = ExpectedRpcMessageRva;
@@ -167,6 +177,7 @@ public static class RelinkBuildLocator
             SendEmotion = ExpectedSendEmotionRva,
             PlayFixedPhrase = ExpectedPlayFixedPhraseRva,
             PlayEmotion = ExpectedPlayEmotionRva,
+            LobbyOwnerImportThunk = ExpectedLobbyOwnerImportThunkRva,
         };
     }
 }

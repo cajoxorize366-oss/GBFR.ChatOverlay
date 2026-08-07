@@ -9,13 +9,17 @@ using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
 
 namespace GBFR.ChatOverlay.Native;
 
-public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSource
+public sealed unsafe class RelinkChatBridge :
+    IChatTransport,
+    IIncomingChatSource,
+    IAuthoritativeLocalEchoTransport
 {
     private const int MaximumQueuedIncomingMessages = 512;
 
     private readonly ReloadedHooksApi _hooks;
     private readonly Action<string> _log;
     private readonly RelinkGameContextProbe? _configuredGameContext;
+    private readonly ChatBlacklist _chatBlacklist;
     private readonly ConcurrentQueue<IncomingChatMessage> _incoming = new();
     private readonly RecentEchoSuppressor _echoSuppressor = new();
     private readonly object _lifecycleSync = new();
@@ -28,19 +32,26 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
     private PlayFixedPhraseDelegate? _playFixedPhrase;
     private PlayEmotionDelegate? _playEmotion;
     private RelinkPlayerNameResolver? _playerNameResolver;
+    private RelinkLobbyOwnerTracker? _lobbyOwnerTracker;
+    private string? _localPlayerName;
+    private int _localPlayerNumber;
+    private int _localIdentityLogged;
     private bool _initialized;
     private bool _suspended;
     private int _incomingCount;
     private int _decodeFailureLogged;
+    private int _localFallbackLogged;
 
     public RelinkChatBridge(
         ReloadedHooksApi hooks,
         Action<string> log,
-        RelinkGameContextProbe? gameContext = null)
+        RelinkGameContextProbe? gameContext = null,
+        ChatBlacklist? chatBlacklist = null)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _configuredGameContext = gameContext;
+        _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -86,9 +97,31 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                     moduleBase + rvas.RpcMessage);
                 _rpcHook.Activate();
 
+                try
+                {
+                    var partyIdentityResolver = RelinkPartyMemberIdentityResolver.CreateForCurrentProcess(
+                        moduleBase,
+                        rvas);
+                    var lobbyOwnerTracker = new RelinkLobbyOwnerTracker(
+                        _hooks,
+                        partyIdentityResolver,
+                        new CurrentProcessRelinkMemoryReader(),
+                        _log);
+                    lobbyOwnerTracker.Initialize(moduleBase, rvas);
+                    _lobbyOwnerTracker = lobbyOwnerTracker;
+                }
+                catch (Exception exception)
+                {
+                    _lobbyOwnerTracker?.Disable();
+                    _lobbyOwnerTracker = null;
+                    SafeLog(
+                        $"Relink lobby-owner marker unavailable; native chat remains active: " +
+                        $"{exception.Message}");
+                }
+
                 Volatile.Write(ref _initialized, true);
                 _log(
-                    $"Relink 2.0.2 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
+                    $"Relink 2.0.3 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
                     $"receive=0x{(nuint)(moduleBase + rvas.RpcMessage):X}.");
                 _log(
                     $"Relink incoming player-name resolver attached: senderSlot=0x" +
@@ -103,11 +136,13 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
             }
             catch
             {
+                _lobbyOwnerTracker?.Disable();
                 _rpcHook?.Disable();
                 _sendHook?.Disable();
                 _rpcHook = null;
                 _sendHook = null;
                 _playerNameResolver = null;
+                _lobbyOwnerTracker = null;
                 _sendStamp = null;
                 _sendFixedPhrase = null;
                 _sendEmotion = null;
@@ -166,6 +201,8 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
                     SafeLog($"Native chat send failed: {exception.Message}");
                     return ChatSendResult.Failed("Relink rejected the native chat call.");
                 }
+
+                CompleteLocalSend(echoToken, message, GetLocalIdentity());
             }
         }
 
@@ -246,11 +283,51 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
         return true;
     }
 
+    internal bool TryGetHostPlayerNumber(out int playerNumber)
+    {
+        if (_lobbyOwnerTracker?.TryGetHostPlayerNumber(out playerNumber) == true)
+            return true;
+        playerNumber = 0;
+        return false;
+    }
+
+    internal LocalChatIdentity GetLocalIdentity()
+    {
+        var cachedName = Volatile.Read(ref _localPlayerName);
+        var cachedNumber = Volatile.Read(ref _localPlayerNumber);
+        if (!string.IsNullOrWhiteSpace(cachedName))
+            return new LocalChatIdentity(cachedName, cachedNumber);
+
+        if (_playerNameResolver?.TryResolveName(0, 0, out var resolvedName) == true)
+        {
+            Volatile.Write(ref _localPlayerName, resolvedName);
+            return new LocalChatIdentity(resolvedName, cachedNumber);
+        }
+
+        return new LocalChatIdentity("Local", cachedNumber);
+    }
+
+    internal bool TryGetRemotePlayerName(int remotePlayerNumber, out string playerName)
+    {
+        playerName = string.Empty;
+        return remotePlayerNumber is >= 1 and <= 3 &&
+               _playerNameResolver?.TryResolveName(remotePlayerNumber, 0, out playerName) == true;
+    }
+
+    internal void ResetLobbyOwner()
+    {
+        _lobbyOwnerTracker?.Reset();
+        Volatile.Write(ref _localPlayerName, null);
+        Volatile.Write(ref _localPlayerNumber, 0);
+        Volatile.Write(ref _localIdentityLogged, 0);
+    }
+
     public void Suspend()
     {
         lock (_lifecycleSync)
         {
             Volatile.Write(ref _suspended, true);
+            _lobbyOwnerTracker?.Suspend();
             _rpcHook?.Disable();
             _sendHook?.Disable();
         }
@@ -262,20 +339,58 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
         {
             _sendHook?.Enable();
             _rpcHook?.Enable();
+            _lobbyOwnerTracker?.Resume();
             Volatile.Write(ref _suspended, false);
         }
     }
 
     private void SendMessage(nint manager, nint messageView, uint messageHash, nint senderView, int category)
     {
+        string? outgoingText = null;
+        long echoToken = 0;
+        if (!Volatile.Read(ref _suspended) &&
+            messageHash == RelinkChatPacketDecoder.RawTextHash &&
+            TryReadOutgoingText(messageView, out var decodedText))
+        {
+            outgoingText = decodedText;
+            echoToken = _echoSuppressor.Register(outgoingText, DateTimeOffset.UtcNow);
+        }
+
         try
         {
             _sendHook!.OriginalFunction(manager, messageView, messageHash, senderView, category);
         }
         catch (Exception exception)
         {
+            if (echoToken != 0)
+                _echoSuppressor.Cancel(echoToken);
             SafeLog($"Native sendMessage hook failed: {exception.Message}");
+            return;
         }
+
+        if (outgoingText is null)
+            return;
+
+        CompleteLocalSend(echoToken, outgoingText, ResolveLocalIdentity(senderView));
+    }
+
+    private static bool TryReadOutgoingText(nint messageView, out string text)
+    {
+        text = string.Empty;
+        if (messageView == nint.Zero)
+            return false;
+
+        var view = *(NativeStringView*)messageView;
+        if (view.Data == nint.Zero ||
+            view.Length == 0 ||
+            view.Length > RelinkChatPacketDecoder.MaximumMessageBytes)
+        {
+            return false;
+        }
+
+        return RelinkChatPacketDecoder.TryDecodeOutgoingText(
+            new ReadOnlySpan<byte>((void*)view.Data, checked((int)view.Length)),
+            out text);
     }
 
     private void RpcMessage(nint chat)
@@ -283,11 +398,25 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
         IncomingChatMessage pending = default;
         var decoded = false;
         var hasExplicitSenderLabel = false;
+        var senderId = 0u;
+        var memberSlot = -1;
         try
         {
             if (chat != nint.Zero)
             {
                 var packet = new ReadOnlySpan<byte>((void*)chat, RelinkChatPacketDecoder.PacketBytesToCopy);
+                if (RelinkChatPacketDecoder.TryReadSenderId(packet, out senderId))
+                {
+                    var resolvedMember =
+                        _playerNameResolver?.TryResolveMemberSlot(senderId, out memberSlot) == true;
+                    if ((resolvedMember && _chatBlacklist.IsMemberSlotMuted(memberSlot)) ||
+                        (!resolvedMember && _chatBlacklist.AreAllRemotePlayersMuted))
+                    {
+                        // This is the authoritative receive gate. Returning here prevents Relink's
+                        // own handler from accepting raw text, stamps and fixed phrases from the player.
+                        return;
+                    }
+                }
                 decoded = RelinkChatPacketDecoder.TryDecode(
                     packet,
                     DateTimeOffset.UtcNow,
@@ -311,16 +440,105 @@ public sealed unsafe class RelinkChatBridge : IChatTransport, IIncomingChatSourc
             return;
         }
 
-        if (!decoded || _echoSuppressor.TryConsume(pending.Text, pending.ReceivedAt))
+        if (!decoded)
             return;
 
+        if (memberSlot < 0)
+            _playerNameResolver?.TryResolveMemberSlot(pending.SenderId, out memberSlot);
+
+        var publishAuthoritativeEcho = _echoSuppressor.TryConsume(
+            pending.Text,
+            pending.ReceivedAt,
+            out var wasLocalEcho);
+        if (wasLocalEcho)
+        {
+            ObserveLocalEcho(memberSlot, pending.SenderId, pending.Sender, hasExplicitSenderLabel);
+            if (publishAuthoritativeEcho)
+            {
+                var identity = GetLocalIdentity();
+                EnqueueIncoming(pending with
+                {
+                    Sender = identity.Sender,
+                    PlayerNumber = identity.PlayerNumber,
+                    IsLocal = true,
+                });
+            }
+            return;
+        }
+
         if (!hasExplicitSenderLabel &&
-            _playerNameResolver?.TryResolve(pending.SenderId, out var playerName) == true)
+            memberSlot >= 0 &&
+            _playerNameResolver?.TryResolveName(memberSlot, pending.SenderId, out var playerName) == true)
         {
             pending = pending with { Sender = playerName };
         }
 
+        if (memberSlot >= 0)
+            pending = pending with { PlayerNumber = memberSlot + 1 };
+
         EnqueueIncoming(pending);
+    }
+
+    private void CompleteLocalSend(long echoToken, string text, LocalChatIdentity identity)
+    {
+        var completedAt = DateTimeOffset.UtcNow;
+        if (!_echoSuppressor.TryComplete(echoToken, completedAt))
+            return;
+
+        EnqueueIncoming(new IncomingChatMessage(
+            identity.Sender,
+            text,
+            0,
+            0,
+            0,
+            completedAt,
+            identity.PlayerNumber,
+            IsLocal: true));
+        if (Interlocked.Exchange(ref _localFallbackLogged, 1) == 0)
+        {
+            SafeLog(
+                "Relink local chat history fallback is active: successful native sends are published " +
+                "immediately, and any later authoritative RPC echo is identity-only and deduplicated.");
+        }
+    }
+
+    private LocalChatIdentity ResolveLocalIdentity(nint senderView)
+    {
+        if (TryReadOutgoingText(senderView, out var senderName) &&
+            !string.IsNullOrWhiteSpace(senderName))
+        {
+            Volatile.Write(ref _localPlayerName, senderName.Trim());
+        }
+
+        return GetLocalIdentity();
+    }
+
+    private void ObserveLocalEcho(
+        int memberSlot,
+        uint senderId,
+        string decodedSender,
+        bool hasExplicitSenderLabel)
+    {
+        if (memberSlot is < 0 or >= 4)
+            return;
+
+        string? playerName = null;
+        if (_playerNameResolver?.TryResolveName(memberSlot, senderId, out var resolvedName) == true)
+            playerName = resolvedName;
+        else if (hasExplicitSenderLabel && !string.IsNullOrWhiteSpace(decodedSender))
+            playerName = decodedSender.Trim();
+
+        if (!string.IsNullOrWhiteSpace(playerName))
+            Volatile.Write(ref _localPlayerName, playerName);
+        Volatile.Write(ref _localPlayerNumber, memberSlot + 1);
+
+        if (Interlocked.Exchange(ref _localIdentityLogged, 1) == 0)
+        {
+            SafeLog(
+                $"Relink local chat identity learned from the authoritative RPC echo: " +
+                $"member_slot={memberSlot}, player_number={memberSlot + 1}, " +
+                $"name='{playerName ?? "unavailable"}'.");
+        }
     }
 
     private void EnqueueIncoming(IncomingChatMessage message)

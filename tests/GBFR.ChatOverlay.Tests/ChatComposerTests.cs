@@ -37,4 +37,18 @@ public sealed class ChatComposerTests
         Assert.True(composer.TryGetSubmittableText(out var text));
         Assert.Equal("准备好了", text);
     }
+
+    [Fact]
+    public void Cancel_PreservesDraftUnlessRoomScopeRequestsClear()
+    {
+        var composer = new ChatComposer();
+        composer.OpenKeyboard();
+        composer.SetDraft("unfinished");
+
+        composer.Cancel();
+        Assert.Equal("unfinished", composer.Draft);
+
+        composer.Cancel(clearDraft: true);
+        Assert.Empty(composer.Draft);
+    }
 }

@@ -432,6 +432,25 @@ public sealed class PartyChatControlCanaryTests
     }
 
     [Fact]
+    public void VoiceActivitySnapshot_ReadsTalkingEntityIdWithoutWritingIncomingAudioMute()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "remote-player-one";
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        api.RemoteIndicator = PartyChatControlChatIndicator.Talking;
+        canary.RequestVoiceDiagnosticSample();
+
+        Assert.Equal(["remote-player-one"], canary.GetTalkingRemoteEntityIds());
+        Assert.Equal(0, api.IncomingAudioMuteWrites);
+    }
+
+    [Fact]
     public void VoiceDiagnostics_DoesNotTreatTalkingIndicatorAsEvidenceWhileInputIsMuted()
     {
         var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
@@ -1457,6 +1476,10 @@ public sealed class PartyChatControlCanaryTests
 
         public Dictionary<nint, PartyChatControlChatIndicator> RemoteIndicatorOverrides { get; } = [];
 
+        public Dictionary<nint, string> EntityIds { get; } = [];
+
+        public int IncomingAudioMuteWrites { get; private set; }
+
         public Dictionary<nint, PartyChatPermissionOptions> PermissionReadbackOverrides { get; } = [];
 
         public bool IncomingAudioMuted { get; set; }
@@ -1589,6 +1612,26 @@ public sealed class PartyChatControlCanaryTests
             muted = IncomingAudioMutedOverrides.TryGetValue(targetChatControl, out var configured)
                 ? configured
                 : IncomingAudioMuted;
+            return 0;
+        }
+
+        public uint GetEntityId(nint chatControl, out string? entityId)
+        {
+            DiagnosticCalls.Add($"GetEntityId:{(nuint)chatControl:X}");
+            ThrowIfDiagnosticGetterRequested();
+            entityId = EntityIds.TryGetValue(chatControl, out var configured)
+                ? configured
+                : $"entity-{(nuint)chatControl:X}";
+            return 0;
+        }
+
+        public uint SetIncomingAudioMuted(
+            nint localChatControl,
+            nint targetChatControl,
+            bool muted)
+        {
+            IncomingAudioMuteWrites++;
+            Calls.Add($"SetIncomingAudioMuted:{(nuint)targetChatControl:X}:{muted}");
             return 0;
         }
 

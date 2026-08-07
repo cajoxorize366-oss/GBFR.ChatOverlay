@@ -8,12 +8,19 @@ internal interface IRelinkPartyMemberIdentityResolver
     bool TryResolveSlot(int memberSlot, out string entityId);
 }
 
+internal interface IRelinkPartyMemberIdentitySnapshotResolver
+{
+    bool TryResolveSnapshot(out string[] entityIds);
+}
+
 /// <summary>
-/// Reads the verified 2.0.2 four-member identity table used by Relink's own online-member
+/// Reads the verified 2.0.3 four-member identity table used by Relink's own online-member
 /// serializer. The selected bank and <c>member_entity_id</c> field are taken directly from
-/// the validated native lookup at RVA 0x003A97C0.
+/// the validated native lookup callsite at RVA 0x003C773C.
 /// </summary>
-internal sealed class RelinkPartyMemberIdentityResolver : IRelinkPartyMemberIdentityResolver
+internal sealed class RelinkPartyMemberIdentityResolver :
+    IRelinkPartyMemberIdentityResolver,
+    IRelinkPartyMemberIdentitySnapshotResolver
 {
     internal const int MaximumEntityIdBytes = 512;
 
@@ -90,7 +97,45 @@ internal sealed class RelinkPartyMemberIdentityResolver : IRelinkPartyMemberIden
         return true;
     }
 
-    private bool TryReadNativeString(nint nativeString, out string value)
+    public bool TryResolveSnapshot(out string[] entityIds)
+    {
+        entityIds = [];
+        if (!_memory.TryReadPointer(_managerSlot, out var manager) ||
+            manager == nint.Zero ||
+            !TryReadByte(manager, OnlineStateOffset, out var onlineState))
+        {
+            return false;
+        }
+
+        var bankOffset = onlineState == 0 ? OfflineMemberBankOffset : OnlineMemberBankOffset;
+        var snapshot = new string[MemberCount];
+        for (var memberSlot = 0; memberSlot < MemberCount; memberSlot++)
+        {
+            if (!TryAdd(
+                    manager,
+                    checked(bankOffset + memberSlot * MemberStride + EntityIdStringOffset),
+                    out var nativeString) ||
+                !TryReadNativeString(nativeString, out snapshot[memberSlot], allowEmpty: true))
+            {
+                return false;
+            }
+        }
+
+        // A room transition can replace the manager or switch the online/offline bank
+        // between individual slot reads. Publish only one coherent four-member snapshot.
+        if (!_memory.TryReadPointer(_managerSlot, out var managerAfter) ||
+            managerAfter != manager ||
+            !TryReadByte(manager, OnlineStateOffset, out var onlineStateAfter) ||
+            onlineStateAfter != onlineState)
+        {
+            return false;
+        }
+
+        entityIds = snapshot;
+        return true;
+    }
+
+    private bool TryReadNativeString(nint nativeString, out string value, bool allowEmpty = false)
     {
         value = string.Empty;
         Span<byte> layout = stackalloc byte[NativeStringBytes];
@@ -99,8 +144,21 @@ internal sealed class RelinkPartyMemberIdentityResolver : IRelinkPartyMemberIden
 
         var length = BinaryPrimitives.ReadUInt64LittleEndian(layout[NativeStringLengthOffset..]);
         var capacity = BinaryPrimitives.ReadUInt64LittleEndian(layout[NativeStringCapacityOffset..]);
-        if (length is 0 or > MaximumEntityIdBytes || capacity < length || capacity > 0x10000)
+        if (length > MaximumEntityIdBytes || capacity < length || capacity > 0x10000)
             return false;
+
+        if (length == 0)
+        {
+            Span<byte> emptyLayoutAfter = stackalloc byte[NativeStringBytes];
+            if (!allowEmpty ||
+                !_memory.TryReadBytes(nativeString, emptyLayoutAfter) ||
+                !layout.SequenceEqual(emptyLayoutAfter))
+            {
+                return false;
+            }
+
+            return true;
+        }
 
         nint data;
         if (capacity < 0x10)

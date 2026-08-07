@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.2 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。按 `F10` 可打开语音与聊天框设置菜单，选择麦克风/扬声器并运行带实时输入电平的本地自检；双方安装相同测试包后，按住 `U` 会解除 Party 原生所选麦克风的静音，由 Party 自己完成采集、编码、传输与对端播放。
+项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.3 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。按 `F10` 可打开语音与聊天框设置菜单，选择麦克风/扬声器并运行带实时输入电平的本地自检；双方安装相同测试包后，按住 `U` 会解除 Party 原生所选麦克风的静音，由 Party 自己完成采集、编码、传输与对端播放。
 
 当前验证进度：
 
@@ -24,12 +24,20 @@
 14. `0.4.0` 已完成并作为队伍 HUD 语音图标的 release 基线。位置不使用截图坐标或参考分辨率缩放：Mod 通过唯一特征码跟踪游戏实际创建的 `ControllerPlParameterTown` / `ControllerPlParameter01`，读取角色信息区或 HP 槽的活动子节点、尺寸与最终 4×4 UI 变换，再投影到当前 Direct3D viewport。大厅/战斗自动随原生控制器切换，分辨率、超宽、安全区和 HUD 缩放由游戏矩阵决定。Preview.5 以实机只读内存快照纠正战斗节点：`0x250/0x270` 是正常/红血状态的完整 HP 行几何，本地宽 1504、队友宽 816，其右端投影与原生长/短 HP 条终点吻合；`0x370/0x390` 实为未激活的斜线节点，而 `0x3B0/0x3D0/0x3F0` 是局部动画/遮罩纹理，均不再作为位置锚点。Preview.7 按实机反馈把 2560×1440 图标直径调整为约 48px，并在 Preview.6 的位置基础上向血条右侧移动约 12px；正式 0.4.0 再向右移动 8px，最终中心位于血条右端外约 32px。其他分辨率仍随游戏原生 HUD 变换缩放，最终安全限制为 18–64px。Preview.11 保持严格的队伍 HUD 白名单，并把控制器条件收紧为仅接受 `state=2` 的稳定显示阶段；`state=1` 的进入动画不再提前出图标，`state=3` 的退出动画一开始便立即隐藏。对应 HP 行节点仍须处于活动状态，菜单、加载、结算及其他没有完整队伍 HP HUD 的画面默认都不绘制。Preview.12 保留这条白名单，并针对游戏仍在 Full Chain 插画下渲染 HP 条的特例，单独跟踪 `ControllerChainburst`；该控制器处于打开、显示或关闭状态时列入明确黑名单并压掉全部麦克风图标，演出结束后自动恢复。平台图标所在的名字/徽章区不作为锚点。图标空闲仍为 70% Alpha，并额外使用低亮度配色让待机/讲话区别清晰；讲话为 100%。`Voice Indicator Debug: Show All Slots` 默认在 CPU 队伍也显示所有活动 HUD 行；关闭后会 fail-closed 隐藏全部图标，直到远端 ChatControl 与游戏队伍槽的可靠身份映射完成，绝不把 CPU 或原版玩家误标为 Mod 语音成员。
 15. `0.5.0-preview.1` 直接移植因子槽（GBFR Extra Sigil Slots）已经实机证明的 RTSS 兼容边界：DX11 后端只安装 `Present` Hook，先解析 RTSS/其他 Overlay 留在入口处的跳板链并挂到链尾；不再安装 `ResizeBuffers` Hook。每帧仅在需要绘制时创建并释放 RTV/BackBuffer，调用下一个原始 `Present` 时进入单独的 x64 native SEH 边界。若该调用发生 `0xC0000005`，当前帧返回失败并在图形回调线程外停用本 Overlay Hook；后续帧回到游戏/既有 Hook 的 Present 路径，同时聊天、图标和输入捕获 fail-closed。这个实现只参考因子槽仓库，不使用 Luma/ReShade 路线。
 16. `0.5.0-preview.2` 新增 `F10` Discord 风格设置菜单。菜单打开时按因子槽的成熟边界拦截 Win32、Raw Input 与 DirectInput 键盘/鼠标，关闭后等待物理键和鼠标按钮松开再归还输入。菜单内可即时选择本地自检设备、调节输入增益/回放音量、查看实时输入电平；原 `I` 键不再被 Mod 占用。设置模式还会显示聊天框预览，可拖动顶部移动，并拖动右下角三角标记缩放；尺寸和按可用画面归一化的位置会写回 `Config.json`。
+17. `0.5.0-preview.7` 将原生聊天、玩家身份和队伍 HUD 的固定构建配置迁移到 Relink 2.0.3，并对 19 个代码锚点执行同步原字节预检。HUD 构造/析构还会重新计算并核对实际 call 与 vtable 目标，避免结构相同的 UI 控制器误通过。Overlay Broker 同步到 Extra Sigil Slots 0.8.0：失焦、激活和捕获生命周期消息继续交给游戏，鼠标释放不再每帧重复改写 `ClipCursor`，以避免焦点切换闪烁。
+18. `0.5.0-preview.8` 修复本地消息被硬编码成 `[房主] You`、Overlay Broker 客户端收不到 `U` 按键说话、按住或输入源抖动导致快捷动作重复发送的问题。发送成功后会等待游戏权威 RPC 回声提供真实玩家名和联机槽位；快捷动作只在物理按下边沿触发。新增 Flydigi Vader 5 Pro HID 支持，可绑定 `C/Z`、`LM/RM`、`M1-M4` 和 `Circle`，且不改变与 Extra Sigil Slots 同步的 Broker ABI。
+19. `0.5.0-preview.9` 删除模组自设的快捷动作 2 秒冷却，快速重按直接交给游戏原生发送流程和冷却判定；物理边沿仍保证按住只触发一次。`DPadDown` 作为游戏官方快捷短语保留键，不再允许绑定到模组功能。飞智 HID 只有在第三方接管状态通过并收到 Acquire 成功回应后才接收扩展键，避免 Steam Input/空间站映射与裸 HID 双路触发；必须保留 Steam Input 时，可在飞智空间站把扩展键映射到未占用的 `F13-F21`，再作为键盘热键绑定。
+20. `0.5.0-preview.10` 取消单个快捷动作的手柄绑定：快捷动作编辑页只保留键盘键，旧配置里的动作级 `ControllerBinding` 会被忽略且不再序列化。设置菜单、打开聊天、按住说话、快捷动作面板、全局禁言和玩家禁言仍保留截图页中的手柄绑定。
+21. `0.5.0-preview.11` 修复设置菜单中“快捷动作 / 自定义文”无法输入中文且 Backspace 无法删除：普通编辑键不再被设置页热键边界提前吞掉，设置页也会复用聊天框现有的 Unicode/CP936 IME 提交、候选与 UTF-8 输入路径；已配置的模组热键在菜单打开时仍只会被拦截，不会误触发。Overlay Broker/Present 同步到 Extra Sigil Slots 0.8.2，并把原生 DirectInput 的松键排水状态反馈给 Host，使 WndProc、DirectInput 与光标捕获在同一中性边界完成释放。
+22. `0.5.0-preview.12` 修复 Broker guest 模式下自定义文热键记录为成功但游戏没有实际发出的线程边界错误：WndProc/DirectInput 热键现在只把动作 ID 放入线程安全队列，下一次 Broker Render/Present 回调再统一调用游戏原生聊天或官方动作函数。快捷动作面板按钮仍直接在 Render 线程执行；物理按下边沿和由游戏处理发送冷却的规则保持不变。
+23. `0.5.0-preview.13` 修复游戏原生聊天气泡已有消息、模组聊天历史却为空：非联机帧不再提前抽干原生 RPC 接收队列，消息会等到联机房间 gate 恢复后再进入历史；短暂的 endpoint/生命周期重置也不再把已有聊天记录无条件清空。语音栏的“等待队友”仍只表示 Mod 语音握手状态，不参与聊天历史清理。
+24. `0.5.0-preview.14` 修复发送者本人只有游戏官方气泡、模组历史没有本地消息：游戏官方聊天输入和模组自定义文在原生发送函数成功返回后立即写入模组接收队列，不再要求 Relink 必须向发送者回送 RPC。同步或迟到的权威回声仍会更新真实姓名与槽位，但会被状态化 echo lifecycle 去重，不会产生第二行。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生代码 Hook 只在固定 RVA 的必要原始字节、RIP 相对目标以及 Party 路径/版本/导出全部通过同步预检时启用；完整 EXE/PartyWin SHA-256 在 Hook 安装后于后台计算，仅作为诊断信息。
 
 第三方组件及许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-Relink 2.0.2 的实机检查见 [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md)，单次双人语音排障步骤与判定矩阵见 [docs/VOICE_TROUBLESHOOTING_MATRIX.md](docs/VOICE_TROUBLESHOOTING_MATRIX.md)，聊天收发逆向边界见 [docs/CHAT_BRIDGE.md](docs/CHAT_BRIDGE.md)，联机与语音传输研究见 [docs/VOICE_TRANSPORT.md](docs/VOICE_TRANSPORT.md)。
+Relink 2.0.3 的实机检查见 [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md)，单次双人语音排障步骤与判定矩阵见 [docs/VOICE_TROUBLESHOOTING_MATRIX.md](docs/VOICE_TROUBLESHOOTING_MATRIX.md)，聊天收发逆向边界见 [docs/CHAT_BRIDGE.md](docs/CHAT_BRIDGE.md)，联机与语音传输研究见 [docs/VOICE_TRANSPORT.md](docs/VOICE_TRANSPORT.md)。
 
 ## 构建
 

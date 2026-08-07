@@ -6,10 +6,11 @@ public readonly record struct IncomingChatMessage(
     uint SenderId,
     uint Category,
     uint Metadata,
-    DateTimeOffset ReceivedAt);
+    DateTimeOffset ReceivedAt,
+    int PlayerNumber = 0,
+    bool IsLocal = false);
 
 public interface IIncomingChatSource
 {
     bool TryRead(out IncomingChatMessage message);
 }
-

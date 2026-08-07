@@ -60,6 +60,40 @@ public sealed class RelinkPartyMemberIdentityResolverTests
         Assert.False(resolver.TryResolveSlot(memberSlot, out _));
     }
 
+    [Fact]
+    public void TryResolveSnapshot_ReadsOneCoherentFourMemberBank()
+    {
+        var memory = new TestMemoryReader();
+        memory.WritePointer(ManagerSlot, Manager);
+        memory.WriteByte(Manager + 0x6CCE8, 1);
+        for (var memberSlot = 0; memberSlot < 4; memberSlot++)
+        {
+            WriteInlineString(
+                memory,
+                Manager + 0x1C288 + memberSlot * 0x58 + 0x28,
+                $"entity-{memberSlot + 1}");
+        }
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+
+        Assert.True(resolver.TryResolveSnapshot(out var entityIds));
+        Assert.Equal(["entity-1", "entity-2", "entity-3", "entity-4"], entityIds);
+    }
+
+    [Fact]
+    public void TryResolveSnapshot_AllowsUnoccupiedMemberSlots()
+    {
+        var memory = new TestMemoryReader();
+        memory.WritePointer(ManagerSlot, Manager);
+        memory.WriteByte(Manager + 0x6CCE8, 1);
+        WriteInlineString(memory, Manager + 0x1C288 + 0x28, "owner");
+        for (var memberSlot = 1; memberSlot < 4; memberSlot++)
+            WriteEmptyString(memory, Manager + 0x1C288 + memberSlot * 0x58 + 0x28);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+
+        Assert.True(resolver.TryResolveSnapshot(out var entityIds));
+        Assert.Equal(["owner", string.Empty, string.Empty, string.Empty], entityIds);
+    }
+
     private static void WriteInlineString(TestMemoryReader memory, nint address, string value)
     {
         var encoded = Encoding.UTF8.GetBytes(value);
@@ -87,6 +121,13 @@ public sealed class RelinkPartyMemberIdentityResolverTests
         var terminated = new byte[encoded.Length + 1];
         encoded.CopyTo(terminated, 0);
         memory.Write(data, terminated);
+    }
+
+    private static void WriteEmptyString(TestMemoryReader memory, nint address)
+    {
+        var layout = new byte[0x20];
+        BinaryPrimitives.WriteUInt64LittleEndian(layout.AsSpan(0x18), 0x0F);
+        memory.Write(address, layout);
     }
 
     private sealed class TestMemoryReader : IRelinkMemoryReader

@@ -37,6 +37,7 @@ public sealed class QuickActionConfiguration
     public string KeyboardBinding { get; set; } = string.Empty;
 
     [Browsable(false)]
+    [JsonIgnore]
     public string ControllerBinding { get; set; } = string.Empty;
 
     [Browsable(false)]

@@ -52,6 +52,9 @@ public sealed class RecentEchoSuppressor
     }
 
     public bool TryConsume(string text, DateTimeOffset now)
+        => TryConsume(text, now, out _);
+
+    public bool TryConsume(string text, DateTimeOffset now, out bool wasLocalEcho)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
 
@@ -63,8 +66,49 @@ public sealed class RecentEchoSuppressor
                 if (!string.Equals(node.Value.Text, text, StringComparison.Ordinal))
                     continue;
 
-                _entries.Remove(node);
-                return true;
+                wasLocalEcho = true;
+                switch (node.Value.State)
+                {
+                    case EchoState.Pending:
+                        node.Value = node.Value with { State = EchoState.EchoObserved };
+                        return true;
+
+                    case EchoState.FallbackPublished:
+                        _entries.Remove(node);
+                        return false;
+
+                    case EchoState.EchoObserved:
+                        return false;
+
+                    default:
+                        throw new InvalidOperationException("Unknown local echo state.");
+                }
+            }
+
+            wasLocalEcho = false;
+            return false;
+        }
+    }
+
+    public bool TryComplete(long id, DateTimeOffset now)
+    {
+        lock (_sync)
+        {
+            RemoveExpired(now);
+            for (var node = _entries.First; node is not null; node = node.Next)
+            {
+                if (node.Value.Id != id)
+                    continue;
+
+                if (node.Value.State == EchoState.Pending)
+                {
+                    node.Value = node.Value with { State = EchoState.FallbackPublished };
+                    return true;
+                }
+
+                if (node.Value.State == EchoState.EchoObserved)
+                    _entries.Remove(node);
+                return false;
             }
 
             return false;
@@ -82,5 +126,16 @@ public sealed class RecentEchoSuppressor
         }
     }
 
-    private readonly record struct Entry(long Id, string Text, DateTimeOffset ExpiresAt);
+    private enum EchoState
+    {
+        Pending,
+        EchoObserved,
+        FallbackPublished,
+    }
+
+    private readonly record struct Entry(
+        long Id,
+        string Text,
+        DateTimeOffset ExpiresAt,
+        EchoState State = EchoState.Pending);
 }

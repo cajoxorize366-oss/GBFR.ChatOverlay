@@ -11,14 +11,22 @@ internal readonly record struct RelinkHudRvas(
 
 internal static class RelinkHudBuildLocator
 {
-    private const int ExpectedTownFactoryRva = 0x02594A10;
-    private const int ExpectedTownDestructorRva = 0x025960B0;
-    private const int ExpectedBattleFactoryRva = 0x02608DA0;
-    private const int ExpectedBattleDestructorRva = 0x0260A200;
-    private const int ExpectedChainburstFactoryRva = 0x0262F690;
-    private const int ExpectedChainburstDestructorRva = 0x026307C0;
-    private const int ExpectedUiObjectQueryRva = 0x0261DDE0;
-    private const int ExpectedUiManagerSlotRva = 0x07C02358;
+    private const int ExpectedTownFactoryRva = 0x0258F080;
+    private const int ExpectedTownDestructorRva = 0x02590720;
+    private const int ExpectedBattleFactoryRva = 0x02603410;
+    private const int ExpectedBattleDestructorRva = 0x02604870;
+    private const int ExpectedChainburstFactoryRva = 0x0262BC20;
+    private const int ExpectedChainburstDestructorRva = 0x0262AE30;
+    private const int ExpectedUiObjectQueryRva = 0x02618450;
+    private const int ExpectedUiManagerSlotRva = 0x07BFF318;
+    private const int ExpectedHudFactoryTargetRva = 0x039C8940;
+    private const int ExpectedTownDestructorPrimaryTargetRva = 0x0258FE20;
+    private const int ExpectedBattleDestructorPrimaryTargetRva = 0x02604450;
+    private const int ExpectedHudDestructorSharedTargetRva = 0x0471201C;
+    private const int ExpectedChainburstPrimaryVtableRva = 0x05A64E68;
+    private const int ExpectedChainburstSecondaryVtableRva = 0x05A64F88;
+    private const int ExpectedChainburstTertiaryVtableRva = 0x05A64F98;
+    private const int ExpectedChainburstDestructorTargetRva = 0x00BB4DA0;
     private const int ChainburstFactoryPatternOffset = 0x128;
     private const int UiManagerInstructionOffset = 63;
     private const int ExpectedChainburstFactoryPatternRva =
@@ -35,20 +43,19 @@ internal static class RelinkHudBuildLocator
         "BA 80 08 00 00 41 B8 08 00 00 00 E8 ?? ?? ?? ??");
 
     private static readonly SignaturePattern TownDestructorPattern = SignaturePattern.Parse(
-        "56 57 48 83 EC 28 89 D7 48 89 CE E8 F0 F6 FF FF 85 FF 74 08 " +
-        "48 89 F1 E8 20 00 18 02 48 89 F0");
+        "56 57 48 83 EC 28 89 D7 48 89 CE E8 ?? ?? ?? ?? 85 FF 74 08 " +
+        "48 89 F1 E8 ?? ?? ?? ?? 48 89 F0");
 
     private static readonly SignaturePattern BattleDestructorPattern = SignaturePattern.Parse(
-        "56 57 48 83 EC 28 89 D7 48 89 CE E8 D0 FB FF FF 85 FF 74 08 " +
-        "48 89 F1 E8 D0 BE 10 02 48 89 F0");
+        "56 57 48 83 EC 28 89 D7 48 89 CE E8 ?? ?? ?? ?? 85 FF 74 08 " +
+        "48 89 F1 E8 ?? ?? ?? ?? 48 89 F0");
 
-    // Retain the exact RIP-relative displacement that identifies
-    // ControllerChainburst's primary vtable rather than accepting structurally
-    // identical UI-controller constructors during required-byte preflight.
+    // The constructor shape is shared by many UI controllers. Resolve and verify
+    // all three vtable targets below before accepting this fixed build profile.
     private static readonly SignaturePattern ChainburstFactoryPattern = SignaturePattern.Parse(
-        "48 8D 05 79 91 43 03 48 89 07 " +
-        "48 8D 05 8F 92 43 03 48 89 47 18 " +
-        "48 8D 05 94 92 43 03 48 89 47 40");
+        "48 8D 05 ?? ?? ?? ?? 48 89 07 " +
+        "48 8D 05 ?? ?? ?? ?? 48 89 47 18 " +
+        "48 8D 05 ?? ?? ?? ?? 48 89 47 40");
 
     private static readonly SignaturePattern ChainburstDestructorPattern = SignaturePattern.Parse(
         "56 57 53 48 83 EC 20 89 D7 48 89 CE 4C 8B 81 60 03 00 00 " +
@@ -58,7 +65,7 @@ internal static class RelinkHudBuildLocator
         "4C 3B 48 68 75 56 48 C1 E2 06 80 7C 10 7E 00 75 4B " +
         "48 8B 8C 10 90 00 00 00 49 89 08 4C 89 84 10 90 00 00 00 " +
         "FF 8C 10 88 00 00 00 74 40 C5 F8 57 C0 C5 F8 11 03 " +
-        "48 C7 43 10 00 00 00 00 48 89 F1 E8 D8 AD 58 FE");
+        "48 C7 43 10 00 00 00 00 48 89 F1 E8 ?? ?? ?? ??");
 
     private static readonly SignaturePattern UiObjectQueryPattern = SignaturePattern.Parse(
         "48 81 EC 98 00 00 00 C5 78 29 B4 24 80 00 00 00 " +
@@ -95,6 +102,48 @@ internal static class RelinkHudBuildLocator
         var chainburstFactory = ExpectedChainburstFactoryRva;
         var chainburstDestructor = ExpectedChainburstDestructorRva;
         var uiObjectQueryRva = ExpectedUiObjectQueryRva;
+        var townFactoryTarget = ResolveRelativeTarget(preflight, ExpectedTownFactoryRva, 47, 51);
+        var battleFactoryTarget = ResolveRelativeTarget(preflight, ExpectedBattleFactoryRva, 46, 50);
+        var townDestructorPrimaryTarget = ResolveRelativeTarget(
+            preflight,
+            ExpectedTownDestructorRva,
+            12,
+            16);
+        var townDestructorSharedTarget = ResolveRelativeTarget(
+            preflight,
+            ExpectedTownDestructorRva,
+            24,
+            28);
+        var battleDestructorPrimaryTarget = ResolveRelativeTarget(
+            preflight,
+            ExpectedBattleDestructorRva,
+            12,
+            16);
+        var battleDestructorSharedTarget = ResolveRelativeTarget(
+            preflight,
+            ExpectedBattleDestructorRva,
+            24,
+            28);
+        var chainburstPrimaryVtable = ResolveRelativeTarget(
+            preflight,
+            ExpectedChainburstFactoryPatternRva,
+            3,
+            7);
+        var chainburstSecondaryVtable = ResolveRelativeTarget(
+            preflight,
+            ExpectedChainburstFactoryPatternRva,
+            13,
+            17);
+        var chainburstTertiaryVtable = ResolveRelativeTarget(
+            preflight,
+            ExpectedChainburstFactoryPatternRva,
+            24,
+            28);
+        var chainburstDestructorTarget = ResolveRelativeTarget(
+            preflight,
+            ExpectedChainburstDestructorRva,
+            132,
+            136);
         var uiManagerInstructionRva = checked(ExpectedUiObjectQueryRva + UiManagerInstructionOffset);
         var uiManagerDisplacement = preflight.ReadInt32(uiManagerInstructionRva + 3);
         var uiManagerSlot = checked(uiManagerInstructionRva + 7 + uiManagerDisplacement);
@@ -106,6 +155,16 @@ internal static class RelinkHudBuildLocator
             chainburstFactory != ExpectedChainburstFactoryRva ||
             chainburstDestructor != ExpectedChainburstDestructorRva ||
             uiObjectQueryRva != ExpectedUiObjectQueryRva ||
+            townFactoryTarget != ExpectedHudFactoryTargetRva ||
+            battleFactoryTarget != ExpectedHudFactoryTargetRva ||
+            townDestructorPrimaryTarget != ExpectedTownDestructorPrimaryTargetRva ||
+            townDestructorSharedTarget != ExpectedHudDestructorSharedTargetRva ||
+            battleDestructorPrimaryTarget != ExpectedBattleDestructorPrimaryTargetRva ||
+            battleDestructorSharedTarget != ExpectedHudDestructorSharedTargetRva ||
+            chainburstPrimaryVtable != ExpectedChainburstPrimaryVtableRva ||
+            chainburstSecondaryVtable != ExpectedChainburstSecondaryVtableRva ||
+            chainburstTertiaryVtable != ExpectedChainburstTertiaryVtableRva ||
+            chainburstDestructorTarget != ExpectedChainburstDestructorTargetRva ||
             uiManagerSlot != ExpectedUiManagerSlotRva)
         {
             throw new InvalidDataException(
@@ -113,6 +172,11 @@ internal static class RelinkHudBuildLocator
                 $"townDestructor={townDestructor:X}, battleFactory={battleFactory:X}, " +
                 $"battleDestructor={battleDestructor:X}, chainburstFactory={chainburstFactory:X}, " +
                 $"chainburstDestructor={chainburstDestructor:X}, uiObjectQuery={uiObjectQueryRva:X}, " +
+                $"townFactoryTarget={townFactoryTarget:X}, battleFactoryTarget={battleFactoryTarget:X}, " +
+                $"townDestructorTargets={townDestructorPrimaryTarget:X}/{townDestructorSharedTarget:X}, " +
+                $"battleDestructorTargets={battleDestructorPrimaryTarget:X}/{battleDestructorSharedTarget:X}, " +
+                $"chainburstVtables={chainburstPrimaryVtable:X}/{chainburstSecondaryVtable:X}/" +
+                $"{chainburstTertiaryVtable:X}, chainburstDestructorTarget={chainburstDestructorTarget:X}, " +
                 $"uiManager={uiManagerSlot:X}.");
         }
 
@@ -124,5 +188,15 @@ internal static class RelinkHudBuildLocator
             chainburstFactory,
             chainburstDestructor,
             uiManagerSlot);
+    }
+
+    private static int ResolveRelativeTarget(
+        RelinkExecutablePreflight preflight,
+        int instructionRva,
+        int displacementOffset,
+        int instructionEndOffset)
+    {
+        var displacement = preflight.ReadInt32(checked(instructionRva + displacementOffset));
+        return checked(instructionRva + instructionEndOffset + displacement);
     }
 }

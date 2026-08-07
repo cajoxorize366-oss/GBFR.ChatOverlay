@@ -41,7 +41,7 @@ internal sealed class RelinkPartyHudTracker
     internal const float NativeRightEdgeGap = 48.0f;
 
     private static readonly int[] TownTargetPointerOffsets = [0x1B8, 0x230];
-    // Live Relink 2.0.2 memory confirms these two resolved UIObject pointers are
+    // Live Relink 2.0.3 memory confirms these two resolved UIObject pointers are
     // the normal/red full-width HP-row geometry. At 2560x1440 the local node is
     // 1504 units wide and the remote nodes are 816 units wide; projecting their
     // right edges lands at the native long/short bar endpoints. The animated
@@ -137,7 +137,7 @@ internal sealed class RelinkPartyHudTracker
                 _chainburstDestructorHook.Activate();
                 Volatile.Write(ref _initialized, true);
                 SafeLog(
-                    "Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, " +
+                    "Relink 2.0.3 native party-HUD tracker attached; lobby/battle mode, " +
                     "resolution, aspect ratio and HUD scale now follow the game's live UI node transforms. " +
                     "Microphone anchors are emitted only while the native party-HUD controller is visible, " +
                     "with the Full Chain illustration explicitly blacklisted.");

@@ -12,4 +12,6 @@ public sealed record ChatMessage(
     DateTimeOffset Timestamp,
     string Sender,
     string Text,
-    ChatMessageKind Kind);
+    ChatMessageKind Kind,
+    uint SenderId = 0,
+    int PlayerNumber = 0);

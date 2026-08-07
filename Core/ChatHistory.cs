@@ -16,17 +16,28 @@ public sealed class ChatHistory
         if (capacity <= 0)
             throw new ArgumentOutOfRangeException(nameof(capacity), "History capacity must be positive.");
 
-        Capacity = capacity;
+        _capacity = capacity;
         _messages = new Queue<ChatMessage>(capacity);
     }
 
-    public int Capacity { get; }
+    public int Capacity
+    {
+        get
+        {
+            lock (_sync)
+                return _capacity;
+        }
+    }
+
+    private int _capacity;
 
     public ChatMessage Add(
         string sender,
         string text,
         ChatMessageKind kind,
-        DateTimeOffset? timestamp = null)
+        DateTimeOffset? timestamp = null,
+        uint senderId = 0,
+        int playerNumber = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sender);
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
@@ -38,14 +49,32 @@ public sealed class ChatHistory
                 timestamp ?? DateTimeOffset.UtcNow,
                 sender,
                 text,
-                kind);
+                kind,
+                senderId,
+                playerNumber);
 
             _messages.Enqueue(message);
-            while (_messages.Count > Capacity)
+            while (_messages.Count > _capacity)
                 _messages.Dequeue();
             _cachedSnapshot = null;
 
             return message;
+        }
+    }
+
+    public void Resize(int capacity)
+    {
+        if (capacity <= 0)
+            throw new ArgumentOutOfRangeException(nameof(capacity), "History capacity must be positive.");
+
+        lock (_sync)
+        {
+            if (_capacity == capacity)
+                return;
+            _capacity = capacity;
+            while (_messages.Count > _capacity)
+                _messages.Dequeue();
+            _cachedSnapshot = null;
         }
     }
 

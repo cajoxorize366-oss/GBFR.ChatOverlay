@@ -127,4 +127,50 @@ public sealed class DirectInputMouseStateFilterTests
             nint.Zero,
             devices));
     }
+
+    [Fact]
+    public void BrokerHost_DoesNotSuppressInputWithoutARequestedDevice()
+    {
+        Assert.False(OverlayBrokerHost.ShouldSuppressWindowMessage(
+            0x0100,
+            nint.Zero,
+            OverlayInputDevices.None));
+    }
+
+    [Theory]
+    [InlineData(0, 7, 3, 7)]
+    [InlineData(0, 7, 1, 5)]
+    [InlineData(0, 7, 2, 2)]
+    [InlineData(0, 7, 0, 0)]
+    [InlineData(1, 7, 3, 3)]
+    [InlineData(4, 7, 3, 6)]
+    [InlineData(7, 0, 3, 7)]
+    public void BrokerHost_TwoPhaseReleaseTracksNativeEffectiveCapture(
+        int requested,
+        int previous,
+        int native,
+        int expected)
+    {
+        Assert.Equal(
+            (OverlayInputDevices)expected,
+            OverlayBrokerHost.ResolveEffectiveInputDevices(
+                (OverlayInputDevices)requested,
+                (OverlayInputDevices)previous,
+                (OverlayInputDevices)native));
+    }
+
+    [Theory]
+    [InlineData(0, OverlayInputDevices.Mouse, true)]
+    [InlineData(0, OverlayInputDevices.Keyboard, false)]
+    [InlineData(1, OverlayInputDevices.Keyboard, true)]
+    [InlineData(1, OverlayInputDevices.Mouse, false)]
+    [InlineData(2, OverlayInputDevices.Keyboard | OverlayInputDevices.Mouse, false)]
+    [InlineData(3, OverlayInputDevices.Keyboard | OverlayInputDevices.Mouse | OverlayInputDevices.Text, false)]
+    public void WindowClassifier_RawInputLeavesControllersAndUnknownDevicesAlone(
+        int rawInputType,
+        OverlayInputDevices devices,
+        bool expected)
+    {
+        Assert.Equal(expected, OverlayWindowInputClassifier.ShouldCaptureRawInputType(rawInputType, devices));
+    }
 }

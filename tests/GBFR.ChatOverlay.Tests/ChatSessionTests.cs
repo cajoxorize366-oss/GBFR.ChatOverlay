@@ -39,6 +39,7 @@ public sealed class ChatSessionTests
         Assert.Equal(ChatInputMode.Closed, composer.Mode);
         Assert.Empty(composer.Draft);
         Assert.Equal("hello party", Assert.Single(session.History.Snapshot()).Text);
+        Assert.Equal(new[] { "hello party" }, session.InputHistory.Entries);
     }
 
     [Fact]
@@ -76,7 +77,7 @@ public sealed class ChatSessionTests
     public void DrainIncoming_AppendsHookRecordsOnOwningThread()
     {
         var source = new StubIncomingSource(
-            new IncomingChatMessage("Lyria", "Ready!", 1, 2, 3, DateTimeOffset.UtcNow));
+            new IncomingChatMessage("Lyria", "Ready!", 1, 2, 3, DateTimeOffset.UtcNow, 3));
         var session = new ChatSession(
             new ChatHistory(10),
             new ChatComposer(),
@@ -88,7 +89,68 @@ public sealed class ChatSessionTests
         Assert.Equal("Lyria", message.Sender);
         Assert.Equal("Ready!", message.Text);
         Assert.Equal(ChatMessageKind.Party, message.Kind);
+        Assert.Equal(1u, message.SenderId);
+        Assert.Equal(3, message.PlayerNumber);
         Assert.Equal(0, session.DrainIncoming());
+    }
+
+    [Fact]
+    public void DrainIncoming_UsesLocalHistoryForGameNativeChatInput()
+    {
+        var source = new StubIncomingSource(
+            new IncomingChatMessage(
+                "Kuro",
+                "系统输入法发送",
+                0,
+                0,
+                0,
+                DateTimeOffset.UtcNow,
+                PlayerNumber: 3,
+                IsLocal: true));
+        var session = new ChatSession(
+            new ChatHistory(10),
+            new ChatComposer(),
+            new StubTransport(ChatSendResult.Sent()),
+            localSender: "Kuro",
+            incoming: source);
+
+        Assert.Equal(1, session.DrainIncoming());
+        var message = Assert.Single(session.History.Snapshot());
+        Assert.Equal("Kuro", message.Sender);
+        Assert.Equal("系统输入法发送", message.Text);
+        Assert.Equal(ChatMessageKind.Self, message.Kind);
+        Assert.Equal(3, message.PlayerNumber);
+    }
+
+    [Fact]
+    public void AuthoritativeTransport_WaitsForTheGameEchoBeforeAddingLocalHistory()
+    {
+        var source = new StubIncomingSource(
+            new IncomingChatMessage(
+                "Actual Name",
+                "Ready!",
+                0,
+                0,
+                0,
+                DateTimeOffset.UtcNow,
+                PlayerNumber: 4,
+                IsLocal: true));
+        var transport = new AuthoritativeStubTransport();
+        var session = new ChatSession(
+            new ChatHistory(10),
+            new ChatComposer(),
+            transport,
+            incoming: source,
+            getLocalIdentity: () => new LocalChatIdentity("Wrong Fallback", 1));
+
+        Assert.True(session.SendText("Ready!").Succeeded);
+        Assert.Empty(session.History.Snapshot());
+
+        Assert.Equal(1, session.DrainIncoming());
+        var message = Assert.Single(session.History.Snapshot());
+        Assert.Equal("Actual Name", message.Sender);
+        Assert.Equal(4, message.PlayerNumber);
+        Assert.Equal(ChatMessageKind.Self, message.Kind);
     }
 
     private sealed class StubTransport(ChatSendResult result) : IChatTransport
@@ -100,6 +162,11 @@ public sealed class ChatSessionTests
             LastMessage = message;
             return result;
         }
+    }
+
+    private sealed class AuthoritativeStubTransport : IChatTransport, IAuthoritativeLocalEchoTransport
+    {
+        public ChatSendResult Send(string message) => ChatSendResult.Sent();
     }
 
     private sealed class StubIncomingSource(params IncomingChatMessage[] messages) : IIncomingChatSource

@@ -25,6 +25,7 @@ public sealed class PartyLifecycleProbe
     private readonly bool _enableVoiceTest;
     private readonly ResolvedAudioEndpointSelection _audioInputSelection;
     private readonly ResolvedAudioEndpointSelection _audioOutputSelection;
+    private readonly Action _invalidateRoomIdentity;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentQueue<string> _pendingLogs = new();
     private readonly PartyRoomSessionTracker _onlineRoom = new();
@@ -36,6 +37,7 @@ public sealed class PartyLifecycleProbe
     private IHook<PartyFinishProcessingStateChangesDelegate>? _finishProcessingHook;
     private PartyChatControlCanary? _chatControlCanary;
     private PartyPlayerMuteController? _playerMuteController;
+    private RelinkPartyMemberIdentityResolver? _partyIdentityResolver;
     private PartyAudioWorkPump? _audioWorkPump;
     private nint _partyHandle;
     private bool _initialized;
@@ -46,6 +48,7 @@ public sealed class PartyLifecycleProbe
     private int _startFailureLogged;
     private int _finishFailureLogged;
     private int _diagnosticRequestFailureLogged;
+    private int _voiceActivityFailureLogged;
     private nint _audioWorkStartPendingManager;
 
     public PartyLifecycleProbe(
@@ -55,7 +58,8 @@ public sealed class PartyLifecycleProbe
         bool enableMutedChatControlCanary = false,
         bool enableVoiceTest = false,
         ResolvedAudioEndpointSelection? audioInputSelection = null,
-        ResolvedAudioEndpointSelection? audioOutputSelection = null)
+        ResolvedAudioEndpointSelection? audioOutputSelection = null,
+        Action? invalidateRoomIdentity = null)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -66,6 +70,7 @@ public sealed class PartyLifecycleProbe
             ResolvedAudioEndpointSelection.SystemDefault();
         _audioOutputSelection = audioOutputSelection ??
             ResolvedAudioEndpointSelection.SystemDefault();
+        _invalidateRoomIdentity = invalidateRoomIdentity ?? (() => { });
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -114,6 +119,39 @@ public sealed class PartyLifecycleProbe
             LogInspectionFailureOnce(exception);
             return PartyPlayerMuteSlotStatus.Unavailable(
                 "玩家身份读取失败。 / Player identity lookup failed.");
+        }
+    }
+
+    internal IReadOnlyList<int> GetTalkingRemotePlayers()
+    {
+        if (!IsInitialized || Volatile.Read(ref _suspended) || !_onlineRoom.IsActive)
+            return Array.Empty<int>();
+
+        try
+        {
+            var talkingEntityIds = _chatControlCanary?.GetTalkingRemoteEntityIds();
+            if (talkingEntityIds is null || talkingEntityIds.Count == 0 ||
+                _partyIdentityResolver?.TryResolveSnapshot(out var partyEntityIds) != true)
+            {
+                return Array.Empty<int>();
+            }
+
+            var talking = talkingEntityIds.ToHashSet(StringComparer.Ordinal);
+            return Enumerable.Range(1, 3)
+                .Where(remotePlayerNumber =>
+                    !string.IsNullOrEmpty(partyEntityIds[remotePlayerNumber]) &&
+                    talking.Contains(partyEntityIds[remotePlayerNumber]))
+                .ToArray();
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _voiceActivityFailureLogged, 1) == 0)
+            {
+                EnqueueLog(
+                    $"Read-only remote voice activity lookup failed; further failures are suppressed: " +
+                    $"{exception.GetType().Name}: {exception.Message}");
+            }
+            return Array.Empty<int>();
         }
     }
 
@@ -217,6 +255,7 @@ public sealed class PartyLifecycleProbe
                         var identityResolver = RelinkPartyMemberIdentityResolver.CreateForCurrentProcess(
                             mainModule.BaseAddress,
                             relinkRvas);
+                        _partyIdentityResolver = identityResolver;
                         _playerMuteController = new PartyPlayerMuteController(
                             partyApi,
                             identityResolver,
@@ -307,7 +346,9 @@ public sealed class PartyLifecycleProbe
                 _chatControlCanary = null;
                 _playerMuteController?.Reset();
                 _playerMuteController = null;
+                _partyIdentityResolver = null;
                 _onlineRoom.Reset();
+                InvalidateRoomIdentitySafely();
                 throw;
             }
         }
@@ -391,6 +432,7 @@ public sealed class PartyLifecycleProbe
             if (result == 0 && handleOutput != nint.Zero)
             {
                 var handle = Marshal.ReadIntPtr(handleOutput);
+                InvalidateRoomIdentitySafely();
                 _onlineRoom.Reset();
                 _playerMuteController?.Reset();
                 if (CapturePartyHandle(handle, "PartyInitialize"))
@@ -411,6 +453,7 @@ public sealed class PartyLifecycleProbe
 
     private uint PartyCleanup(nint handle)
     {
+        InvalidateRoomIdentitySafely();
         Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
         _audioWorkPump?.DetachManager(
             nint.Zero,
@@ -454,6 +497,7 @@ public sealed class PartyLifecycleProbe
 
     private uint PartyNetworkLeaveNetwork(nint network, nint asyncIdentifier)
     {
+        InvalidateRoomIdentitySafely();
         if (!Volatile.Read(ref _suspended))
         {
             try
@@ -608,6 +652,7 @@ public sealed class PartyLifecycleProbe
     {
         if (stateChangeCountOutput == nint.Zero || stateChangesOutput == nint.Zero)
         {
+            InvalidateRoomIdentitySafely();
             _onlineRoom.Reset();
             _playerMuteController?.Reset();
             _chatControlCanary?.DisableFailClosed(
@@ -620,6 +665,7 @@ public sealed class PartyLifecycleProbe
             return;
         if (count > MaximumStateChangesPerBatch)
         {
+            InvalidateRoomIdentitySafely();
             _onlineRoom.Reset();
             _playerMuteController?.Reset();
             _chatControlCanary?.DisableFailClosed(
@@ -631,6 +677,7 @@ public sealed class PartyLifecycleProbe
         var stateChanges = Marshal.ReadIntPtr(stateChangesOutput);
         if (stateChanges == nint.Zero)
         {
+            InvalidateRoomIdentitySafely();
             _onlineRoom.Reset();
             _playerMuteController?.Reset();
             _chatControlCanary?.DisableFailClosed(
@@ -643,6 +690,7 @@ public sealed class PartyLifecycleProbe
             var stateChange = Marshal.ReadIntPtr(stateChanges, checked((int)(index * (uint)nint.Size)));
             if (stateChange == nint.Zero)
             {
+                InvalidateRoomIdentitySafely();
                 _onlineRoom.Reset();
                 _playerMuteController?.Reset();
                 _chatControlCanary?.DisableFailClosed(
@@ -651,7 +699,10 @@ public sealed class PartyLifecycleProbe
             }
 
             var snapshot = PartyStateChangeReader.Read(stateChange);
+            var roomWasActive = _onlineRoom.IsActive;
             _onlineRoom.Observe(snapshot);
+            if (roomWasActive && !_onlineRoom.IsActive)
+                InvalidateRoomIdentitySafely();
             if (_enableLifecycleLogging && PartyStateChangeCatalog.IsLifecycle(snapshot.Type))
             {
                 EnqueueLog(
@@ -686,6 +737,7 @@ public sealed class PartyLifecycleProbe
             $"Party manager ownership conflict at {source}: retained 0x{(nuint)previous:X}, " +
             $"rejected 0x{(nuint)handle:X}; Stage 2 will fail closed.");
         _onlineRoom.Reset();
+        InvalidateRoomIdentitySafely();
         _playerMuteController?.Reset();
         _chatControlCanary?.CaptureManager(handle, source);
         return false;
@@ -701,6 +753,7 @@ public sealed class PartyLifecycleProbe
 
     private void LogInspectionFailureOnce(Exception exception)
     {
+        InvalidateRoomIdentitySafely();
         _onlineRoom.Reset();
         _playerMuteController?.Reset();
         _chatControlCanary?.DisableFailClosed(
@@ -751,6 +804,20 @@ public sealed class PartyLifecycleProbe
         catch
         {
             // Never allow a logger failure to escape the asynchronous probe drain.
+        }
+    }
+
+    private void InvalidateRoomIdentitySafely()
+    {
+        try
+        {
+            _invalidateRoomIdentity();
+        }
+        catch (Exception exception)
+        {
+            EnqueueLog(
+                $"Room identity invalidation failed closed: " +
+                $"{exception.GetType().Name}: {exception.Message}");
         }
     }
 

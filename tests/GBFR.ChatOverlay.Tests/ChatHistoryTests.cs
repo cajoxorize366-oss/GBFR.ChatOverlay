@@ -46,4 +46,18 @@ public sealed class ChatHistoryTests
         Assert.NotSame(first, changed);
         Assert.Equal(2, changed.Count);
     }
+
+    [Fact]
+    public void Resize_EvictsOldestMessagesAndUpdatesCapacity()
+    {
+        var history = new ChatHistory(4);
+        history.Add("Io", "one", ChatMessageKind.Party);
+        history.Add("Io", "two", ChatMessageKind.Party);
+        history.Add("Io", "three", ChatMessageKind.Party);
+
+        history.Resize(2);
+
+        Assert.Equal(2, history.Capacity);
+        Assert.Equal(new[] { "two", "three" }, history.Snapshot().Select(message => message.Text));
+    }
 }

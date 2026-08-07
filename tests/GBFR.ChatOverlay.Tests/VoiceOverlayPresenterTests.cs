@@ -16,7 +16,7 @@ public sealed class VoiceOverlayPresenterTests
     [InlineData((int)PartyVoiceUiState.LocalSelfTestSignalDetected, true, "测试通过")]
     [InlineData((int)PartyVoiceUiState.LocalSelfTestFailed, true, "测试失败")]
     [InlineData((int)PartyVoiceUiState.Ready, true, "已就绪")]
-    [InlineData((int)PartyVoiceUiState.Speaking, true, "正在说话")]
+    [InlineData((int)PartyVoiceUiState.Speaking, true, "正在通话中")]
     [InlineData((int)PartyVoiceUiState.Disconnecting, true, "正在断开")]
     [InlineData((int)PartyVoiceUiState.Faulted, true, "已静音")]
     public void Create_MapsRuntimeVoiceStateToStableUiText(

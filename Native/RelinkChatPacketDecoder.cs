@@ -21,6 +21,39 @@ public static class RelinkChatPacketDecoder
 
     private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
+    public static bool TryReadSenderId(ReadOnlySpan<byte> packet, out uint senderId)
+    {
+        senderId = 0;
+        if (packet.Length < SenderIdOffset + sizeof(uint))
+            return false;
+        senderId = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(SenderIdOffset, sizeof(uint)));
+        return true;
+    }
+
+    internal static bool TryDecodeOutgoingText(ReadOnlySpan<byte> encoded, out string text)
+    {
+        text = string.Empty;
+        if (encoded.IsEmpty || encoded.Length > MaximumMessageBytes || encoded.Contains((byte)0))
+            return false;
+
+        try
+        {
+            text = StrictUtf8.GetString(encoded);
+        }
+        catch (DecoderFallbackException)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            text = string.Empty;
+            return false;
+        }
+
+        return true;
+    }
+
     public static bool TryDecode(
         ReadOnlySpan<byte> packet,
         DateTimeOffset receivedAt,
@@ -51,7 +84,7 @@ public static class RelinkChatPacketDecoder
             return false;
         }
 
-        var senderId = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(SenderIdOffset, sizeof(uint)));
+        _ = TryReadSenderId(packet, out var senderId);
         var decodedSenderLabel = TryDecodeNullTerminated(
             packet.Slice(SenderLabelOffset, SenderLabelBufferSize),
             SenderLabelBufferSize - 1,

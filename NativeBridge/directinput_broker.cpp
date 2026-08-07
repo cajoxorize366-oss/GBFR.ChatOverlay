@@ -1079,3 +1079,24 @@ GBFRChatOverlay_GetDirectInputSnapshot(
         return 0;
     }
 }
+
+extern "C" __declspec(dllexport) uint32_t __cdecl
+GBFRChatOverlay_GetDirectInputEffectiveCapture()
+{
+    if (!g_active.load(std::memory_order_acquire))
+        return 0;
+
+    const uint32_t policy = g_policy_flags.load(std::memory_order_acquire);
+    uint32_t effective = 0;
+    if ((policy & kPolicyCaptureKeyboard) != 0 ||
+        g_keyboard_drain.load(std::memory_order_acquire))
+    {
+        effective |= kPolicyCaptureKeyboard;
+    }
+    if ((policy & kPolicyCaptureMouse) != 0 ||
+        g_mouse_drain.load(std::memory_order_acquire))
+    {
+        effective |= kPolicyCaptureMouse;
+    }
+    return effective;
+}

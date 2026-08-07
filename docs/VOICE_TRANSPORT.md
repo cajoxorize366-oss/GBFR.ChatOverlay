@@ -1,13 +1,13 @@
 # Relink online and voice transport research
 
-This note records the read-only investigation of the Windows Steam build of Granblue Fantasy: Relink 2.0.2. It is a technical feasibility result, not a statement that injecting a Mod or using a title's online services is authorized by Valve, Microsoft, Cygames, or the game's terms.
+This note records the read-only investigation of the Windows Steam build of Granblue Fantasy: Relink 2.0.3. It is a technical feasibility result, not a statement that injecting a Mod or using a title's online services is authorized by Valve, Microsoft, Cygames, or the game's terms.
 
 ## Verified build
 
 ```text
 granblue_fantasy_relink.exe
-SHA-256 63340832bcf731fbc97796f686b05c988418e83d451d4a49b2244a85d00e297f
-File/Product version 2.0.2
+SHA-256 1bbbec61aab7f75fe328cf6bfe0247ebdbcec6c404cec12c032b8ffa41d22102
+File/Product version 2.0.3
 
 PartyWin.dll
 SHA-256 3f0c6abbb735d81fa766a105982bda73f1d2c2cf01109fa2e7cf64813a52ce55
@@ -135,7 +135,7 @@ The observation probe is implemented in `Native/PartyLifecycleProbe.cs` and enab
 - `0.4.0` retains the completely separate hold-`I` local microphone monitor. It opens the configured Windows capture and render endpoints in WASAPI shared mode, copies microphone samples only to the local playback device, and measures a local peak for UI/log evidence. Release closes a one-way silence gate without taking the audio-buffer lock; potentially blocking NAudio endpoint cleanup runs on a dedicated background thread and cannot delay a subsequent `I` hold. It never calls Party, changes chat permissions or sends audio over the network. `U` has priority, and both paths are fail-closed on release, focus loss, input timeout, suspend or endpoint failure.
 - `0.5.0-preview.1` changes only the graphics compatibility boundary. It ports the Extra Sigil Slots Present-only backend: resolve existing DXGI entry jumps, install at the chain tail, avoid a managed `ResizeBuffers` hook, use frame-local render targets and invoke the next Present through a small x64 native SEH boundary. A contained access violation disables this Overlay hook off the graphics callback thread and releases Overlay/input state; it does not alter Party, ChatControl or audio ownership.
 - The Party troubleshooting sampler remains read-only. A complete online pass requires the speaking client to report `localIndicator=Talking` and the receiving client to report the same peer with permissions `0x0005`, incoming audio unmuted, positive render volume and `remoteIndicator=Talking`; evidence from different peers cannot be combined. See `VOICE_TROUBLESHOOTING_MATRIX.md`.
-- Per-player incoming-audio mute is implemented for fixed rows Player 2/3/4. The verified 2.0.2 native member lookup selects one of two four-entry banks with `manager+0x6CCE8`, indexes each member with a `0x58` stride, and exposes `member_entity_id` as the MSVC string at entry `+0x28`. The UI enables a row only when that exact EntityId equals `PartyChatControlGetEntityId`; it then calls `PartyChatControlSetIncomingAudioMuted` for every local/target pair and verifies `GetIncomingAudioMuted`. Empty slots, unstable native strings, missing exports, unmatched EntityIds and leave/destroy notifications all fail closed without join-order fallback.
+- Per-player incoming-audio mute is implemented for fixed rows Player 2/3/4. The verified 2.0.3 native member lookup selects one of two four-entry banks with `manager+0x6CCE8`, indexes each member with a `0x58` stride, and exposes `member_entity_id` as the MSVC string at entry `+0x28`. The UI enables a row only when that exact EntityId equals `PartyChatControlGetEntityId`; it then calls `PartyChatControlSetIncomingAudioMuted` for every local/target pair and verifies `GetIncomingAudioMuted`. Empty slots, unstable native strings, missing exports, unmatched EntityIds and leave/destroy notifications all fail closed without join-order fallback.
 - Controller push-to-talk and per-player volume remain future work.
 
 ## Safety and service boundary

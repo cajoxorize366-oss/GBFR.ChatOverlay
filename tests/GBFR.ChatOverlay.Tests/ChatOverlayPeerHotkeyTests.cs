@@ -1,7 +1,9 @@
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
+using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
 using GBFR.ChatOverlay.Overlay;
+using System.Reflection;
 
 namespace GBFR.ChatOverlay.Tests;
 
@@ -9,6 +11,7 @@ public sealed class ChatOverlayPeerHotkeyTests
 {
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
+    private const int VirtualKeyBackspace = 0x08;
     private const int VirtualKeyEscape = 0x1B;
 
     [Fact]
@@ -43,58 +46,150 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.Equal("Q", action.KeyboardBinding);
 
         PressAndRelease(peer, 'Q');
+        Assert.Equal(0, transport.SendCount);
+        Assert.Equal(1, peer.DrainQuickActionRequests());
         Assert.Equal("Hello from custom text", transport.LastMessage);
         Assert.Equal(1, transport.SendCount);
     }
 
     [Fact]
-    public void GlobalMuteHotkey_TogglesAllAvailablePlayersOncePerPress()
+    public void KeyboardCapture_ReplacesAnExistingConflictingBinding()
+    {
+        var configuration = new Config
+        {
+            OpenChatKeyboardBinding = "P",
+            QuickActionsKeyboardBinding = string.Empty,
+        };
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+        var request = new BindingCaptureRequest(
+            BindingTarget.QuickActionsPanel,
+            BindingCaptureDevice.Keyboard,
+            null);
+
+        peer.BeginBindingCapture(request);
+        PressAndRelease(peer, 'P');
+
+        Assert.Equal(string.Empty, configuration.OpenChatKeyboardBinding);
+        Assert.Equal("P", configuration.QuickActionsKeyboardBinding);
+    }
+
+    [Fact]
+    public void ControllerBinding_CanBeClearedWithoutAConnectedController()
+    {
+        var configuration = new Config
+        {
+            OpenChatControllerBinding = "RS",
+        };
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+        var request = new BindingCaptureRequest(
+            BindingTarget.OpenChat,
+            BindingCaptureDevice.Controller,
+            null);
+
+        var cleared = peer.ClearBinding(request);
+
+        Assert.True(cleared);
+        Assert.Equal(string.Empty, configuration.OpenChatControllerBinding);
+    }
+
+    [Fact]
+    public void ControllerCapture_RejectsGameReservedDPadDown()
+    {
+        var configuration = new Config();
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+        peer.BeginBindingCapture(new BindingCaptureRequest(
+            BindingTarget.QuickActionsPanel,
+            BindingCaptureDevice.Controller,
+            null));
+
+        peer.ObserveNativeInputSnapshot(new DirectInputBrokerSnapshot
+        {
+            AbiVersion = DirectInputBrokerSnapshot.ExpectedAbiVersion,
+            StructSize = DirectInputBrokerSnapshot.ExpectedStructSize,
+            Readiness = DirectInputBrokerReadiness.Controller,
+            ControllerButtons = ControllerButtons.DPadDown,
+        });
+
+        Assert.Equal(string.Empty, configuration.QuickActionsControllerBinding);
+        Assert.Contains("DPadDown", GetPrivateField<string>(peer, "_captureStatusText"));
+
+        peer.ObserveNativeInputSnapshot(new DirectInputBrokerSnapshot
+        {
+            AbiVersion = DirectInputBrokerSnapshot.ExpectedAbiVersion,
+            StructSize = DirectInputBrokerSnapshot.ExpectedStructSize,
+            Readiness = DirectInputBrokerReadiness.Controller,
+            ControllerButtons = ControllerButtons.None,
+        });
+        peer.ObserveNativeInputSnapshot(new DirectInputBrokerSnapshot
+        {
+            AbiVersion = DirectInputBrokerSnapshot.ExpectedAbiVersion,
+            StructSize = DirectInputBrokerSnapshot.ExpectedStructSize,
+            Readiness = DirectInputBrokerReadiness.Controller,
+            ControllerButtons = ControllerButtons.X,
+        });
+        peer.ObserveNativeInputSnapshot(new DirectInputBrokerSnapshot
+        {
+            AbiVersion = DirectInputBrokerSnapshot.ExpectedAbiVersion,
+            StructSize = DirectInputBrokerSnapshot.ExpectedStructSize,
+            Readiness = DirectInputBrokerReadiness.Controller,
+            ControllerButtons = ControllerButtons.None,
+        });
+
+        Assert.Equal("X", configuration.QuickActionsControllerBinding);
+    }
+
+    [Fact]
+    public void SettingsBinding_DoesNotClearItsOnlyConfiguredDevice()
+    {
+        var configuration = new Config
+        {
+            SettingsMenuKeyboardBinding = "F10",
+            SettingsMenuControllerBinding = string.Empty,
+        };
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+        var request = new BindingCaptureRequest(
+            BindingTarget.SettingsMenu,
+            BindingCaptureDevice.Keyboard,
+            null);
+
+        var cleared = peer.ClearBinding(request);
+
+        Assert.False(cleared);
+        Assert.Equal("F10", configuration.SettingsMenuKeyboardBinding);
+    }
+
+    [Fact]
+    public void GlobalMuteHotkey_TogglesRoomChatBlacklistOncePerPress()
     {
         var configuration = new Config
         {
             GlobalMuteKeyboardBinding = "M",
         };
-        var muted = new Dictionary<int, bool>
-        {
-            [2] = false,
-            [3] = false,
-        };
-        var operations = new List<(int Player, bool Muted)>();
+        var blacklist = new ChatBlacklist();
         using var peer = CreatePeer(
             configuration,
             new RecordingTransport(),
             isOnlineRoomActive: () => true,
-            getPlayerMuteSlots: () =>
-            [
-                new PartyPlayerMuteSlotStatus(2, true, muted[2], string.Empty),
-                new PartyPlayerMuteSlotStatus(3, true, muted[3], string.Empty),
-                new PartyPlayerMuteSlotStatus(4, false, false, string.Empty),
-            ],
-            setPlayerMuted: (player, targetMuted) =>
-            {
-                operations.Add((player, targetMuted));
-                muted[player] = targetMuted;
-                return new PartyPlayerMuteOperationResult(true, "ok");
-            });
+            chatBlacklist: blacklist);
 
         peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'M', nint.Zero);
         peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'M', nint.Zero);
+        Assert.True(blacklist.AreAllRemotePlayersMuted);
         peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'M', nint.Zero);
         PressAndRelease(peer, 'M');
 
-        Assert.Equal(
-            new[] { (2, true), (3, true), (2, false), (3, false) },
-            operations);
+        Assert.False(blacklist.AreAllRemotePlayersMuted);
     }
 
     [Fact]
-    public void GlobalMuteHotkey_DoesNotWriteUnavailableSlots()
+    public void GlobalMuteHotkey_DoesNotWriteVoiceMuteSlots()
     {
         var configuration = new Config
         {
             GlobalMuteKeyboardBinding = "N",
         };
         var operationCount = 0;
+        var blacklist = new ChatBlacklist();
         using var peer = CreatePeer(
             configuration,
             new RecordingTransport(),
@@ -104,11 +199,41 @@ public sealed class ChatOverlayPeerHotkeyTests
             {
                 operationCount++;
                 return new PartyPlayerMuteOperationResult(true, "unexpected");
-            });
+            },
+            chatBlacklist: blacklist);
 
         PressAndRelease(peer, 'N');
 
         Assert.Equal(0, operationCount);
+        Assert.True(blacklist.AreAllRemotePlayersMuted);
+    }
+
+    [Fact]
+    public void RemotePlayerChatMuteHotkey_MapsDisplayPlayerOneToChatSlotTwo_WithoutVoiceMute()
+    {
+        var configuration = new Config
+        {
+            RemotePlayer1ChatMuteKeyboardBinding = "B",
+        };
+        var voiceMuteOperationCount = 0;
+        var blacklist = new ChatBlacklist();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            setPlayerMuted: (_, _) =>
+            {
+                voiceMuteOperationCount++;
+                return new PartyPlayerMuteOperationResult(true, "unexpected");
+            },
+            chatBlacklist: blacklist);
+
+        PressAndRelease(peer, 'B');
+
+        Assert.Equal(0, voiceMuteOperationCount);
+        Assert.True(blacklist.IsMuted(2));
+        Assert.False(blacklist.IsMuted(3));
+        Assert.False(blacklist.IsMuted(4));
     }
 
     [Fact]
@@ -152,6 +277,51 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
+    public void SettingsMenu_ForwardsUnboundEditingKeysToImGui()
+    {
+        var configuration = new Config
+        {
+            GlobalMuteKeyboardBinding = "M",
+        };
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+
+        peer.SetSettingsMenuOpen(true);
+        var backspaceDown = peer.ObserveWindowMessage(
+            nint.Zero,
+            WmKeyDown,
+            new nint(VirtualKeyBackspace),
+            nint.Zero);
+        var backspaceUp = peer.ObserveWindowMessage(
+            nint.Zero,
+            WmKeyUp,
+            new nint(VirtualKeyBackspace),
+            nint.Zero);
+
+        Assert.False(backspaceDown.Handled);
+        Assert.False(backspaceUp.Handled);
+    }
+
+    [Theory]
+    [InlineData(true, false, false, false, false, true)]
+    [InlineData(false, true, true, true, true, true)]
+    [InlineData(false, true, false, true, true, false)]
+    public void ImeTextCapture_IncludesSettingsAndActiveChatComposer(
+        bool settingsMenuOpen,
+        bool overlayEnabled,
+        bool onlineRoomActive,
+        bool captureKeyboard,
+        bool composerOpen,
+        bool expected)
+    {
+        Assert.Equal(expected, ChatOverlayPeer.ShouldCaptureImeTextInput(
+            settingsMenuOpen,
+            overlayEnabled,
+            onlineRoomActive,
+            captureKeyboard,
+            composerOpen));
+    }
+
+    [Fact]
     public void QuickActionsPanel_CapturesKeysAndClosesOnEscapeWithoutDispatching()
     {
         var action = new QuickActionConfiguration
@@ -178,7 +348,126 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.Equal(0, transport.SendCount);
 
         PressAndRelease(peer, 'P');
+        Assert.Equal(1, peer.DrainQuickActionRequests());
         Assert.Equal("sent after close", transport.LastMessage);
+    }
+
+    [Fact]
+    public void NumpadCustomTextHotkey_SendsOnRenderThreadDrain()
+    {
+        var action = new QuickActionConfiguration
+        {
+            Kind = QuickActionKind.CustomText,
+            Text = "快放奥义",
+            KeyboardBinding = "VK_61",
+        };
+        var configuration = new Config { QuickActions = [action] };
+        var transport = new RecordingTransport();
+        using var peer = CreatePeer(
+            configuration,
+            transport,
+            isOnlineRoomActive: () => true);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, new nint(0x61), nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, new nint(0x61), nint.Zero);
+
+        Assert.Equal(0, transport.SendCount);
+        Assert.Equal(1, peer.DrainQuickActionRequests());
+        Assert.Equal("快放奥义", transport.LastMessage);
+        Assert.Equal(1, transport.SendCount);
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_ReportsOnlyPhysicalPressAndReleaseEdges()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var states = new List<bool>();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => true,
+            setVoicePushToTalkPressed: states.Add);
+        SetInitialized(peer);
+
+        var firstDown = peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        var repeatedDown = peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        Assert.Equal("[语音] 正在通话中", GetPrivateField<string>(peer, "_statusText"));
+        var release = peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+
+        Assert.True(firstDown.Handled);
+        Assert.True(repeatedDown.Handled);
+        Assert.True(release.Handled);
+        Assert.Equal([true, false], states);
+        Assert.Null(GetPrivateField<string>(peer, "_statusText"));
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_DoesNotActivateMidHoldWhenPeerBecomesReady()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var canUse = false;
+        var states = new List<bool>();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => canUse,
+            setVoicePushToTalkPressed: states.Add);
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        canUse = true;
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        Assert.Empty(states);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+
+        Assert.Equal([true, false], states);
+    }
+
+    [Fact]
+    public void QuickActionHotkeys_QueuePhysicalEdgesWithoutReplacingTheGamesCooldown()
+    {
+        var first = new QuickActionConfiguration
+        {
+            Kind = QuickActionKind.CustomText,
+            Text = "first",
+            KeyboardBinding = "P",
+        };
+        var second = new QuickActionConfiguration
+        {
+            Kind = QuickActionKind.CustomText,
+            Text = "second",
+            KeyboardBinding = "Q",
+        };
+        var configuration = new Config { QuickActions = [first, second] };
+        var transport = new RecordingTransport();
+        using var peer = CreatePeer(
+            configuration,
+            transport,
+            isOnlineRoomActive: () => true);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'P', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'P', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'P', nint.Zero);
+        PressAndRelease(peer, 'P');
+        PressAndRelease(peer, 'Q');
+
+        Assert.Equal(0, transport.SendCount);
+        Assert.Equal(3, peer.DrainQuickActionRequests());
+        Assert.Equal(3, transport.SendCount);
+        Assert.Equal("second", transport.LastMessage);
     }
 
     [Theory]
@@ -206,14 +495,88 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.Equal(expected, ChatOverlayPeer.LocalizeQuickActionName(language, stored));
     }
 
+    [Theory]
+    [InlineData(UiLanguage.SimplifiedChinese, true, "[房主] Kuro:")]
+    [InlineData(UiLanguage.English, true, "[Host] Kuro:")]
+    [InlineData(UiLanguage.SimplifiedChinese, false, "Kuro:")]
+    [InlineData(UiLanguage.English, false, "Kuro:")]
+    public void HistorySenderLabel_UsesCurrentUiLanguageOnly(
+        UiLanguage language,
+        bool isHost,
+        string expected)
+    {
+        Assert.Equal(expected, ChatOverlayPeer.FormatHistorySenderLabel("Kuro", isHost, language));
+    }
+
+    [Fact]
+    public void Tick_KeepsIncomingQueuedUntilTheOnlineRoomIsActive()
+    {
+        var onlineRoomActive = false;
+        var history = new ChatHistory(10);
+        var incoming = new StubIncomingSource(
+            new IncomingChatMessage(
+                "Lyria",
+                "Ready!",
+                1,
+                2,
+                3,
+                DateTimeOffset.UtcNow,
+                2));
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            isOnlineRoomActive: () => onlineRoomActive,
+            incoming: incoming,
+            history: history);
+        SetInitialized(peer);
+
+        peer.Tick();
+        Assert.Empty(history.Snapshot());
+
+        onlineRoomActive = true;
+        peer.Tick();
+
+        var message = Assert.Single(history.Snapshot());
+        Assert.Equal("Lyria", message.Sender);
+        Assert.Equal("Ready!", message.Text);
+    }
+
+    [Fact]
+    public void Tick_PreservesHistoryAcrossATemporaryOnlineRoomReset()
+    {
+        var onlineRoomActive = true;
+        var history = new ChatHistory(10);
+        history.Add("Lyria", "Still here", ChatMessageKind.Party, DateTimeOffset.UtcNow);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            isOnlineRoomActive: () => onlineRoomActive,
+            history: history);
+        SetInitialized(peer);
+
+        peer.Tick();
+        onlineRoomActive = false;
+        peer.Tick();
+        onlineRoomActive = true;
+        peer.Tick();
+
+        var message = Assert.Single(history.Snapshot());
+        Assert.Equal("Still here", message.Text);
+    }
+
     private static ChatOverlayPeer CreatePeer(
         Config configuration,
         IChatTransport transport,
         Func<bool>? isOnlineRoomActive = null,
         Func<IReadOnlyList<PartyPlayerMuteSlotStatus>>? getPlayerMuteSlots = null,
-        Func<int, bool, PartyPlayerMuteOperationResult>? setPlayerMuted = null) =>
+        Func<int, bool, PartyPlayerMuteOperationResult>? setPlayerMuted = null,
+        ChatBlacklist? chatBlacklist = null,
+        Func<bool>? canUseVoicePushToTalk = null,
+        Action<bool>? setVoicePushToTalkPressed = null,
+        IIncomingChatSource? incoming = null,
+        ChatHistory? history = null) =>
         new(
-            new ChatSession(new ChatHistory(10), new ChatComposer(), transport),
+            new ChatSession(history ?? new ChatHistory(10), new ChatComposer(), transport, incoming: incoming),
             () => configuration,
             isOnlineRoomActive ?? (() => false),
             () => { },
@@ -225,11 +588,22 @@ public sealed class ChatOverlayPeerHotkeyTests
             null,
             update => update(configuration),
             _ => { },
-            () => false,
-            _ => { },
+            canUseVoicePushToTalk ?? (() => false),
+            setVoicePushToTalkPressed ?? (_ => { }),
             () => { },
             _ => { },
-            _ => { });
+            _ => { },
+            chatBlacklist);
+
+    private static void SetInitialized(ChatOverlayPeer peer) =>
+        typeof(ChatOverlayPeer)
+            .GetField("_initialized", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(peer, true);
+
+    private static T? GetPrivateField<T>(ChatOverlayPeer peer, string name) =>
+        (T?)typeof(ChatOverlayPeer)
+            .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(peer);
 
     private static void PressAndRelease(ChatOverlayPeer peer, char key)
     {
@@ -248,5 +622,12 @@ public sealed class ChatOverlayPeerHotkeyTests
             SendCount++;
             return ChatSendResult.Sent();
         }
+    }
+
+    private sealed class StubIncomingSource(params IncomingChatMessage[] messages) : IIncomingChatSource
+    {
+        private readonly Queue<IncomingChatMessage> _messages = new(messages);
+
+        public bool TryRead(out IncomingChatMessage message) => _messages.TryDequeue(out message);
     }
 }

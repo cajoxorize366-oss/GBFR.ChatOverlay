@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Numerics;
@@ -53,15 +54,25 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly Action _forceReleaseVoiceInputs;
     private readonly Action<string> _requestOverlayBrokerRecovery;
     private readonly Action<string> _log;
+    private readonly ChatBlacklist _chatBlacklist;
+    private readonly Func<int?> _getHostPlayerNumber;
+    private readonly Func<int, string?> _getRemotePlayerName;
+    private readonly Func<IReadOnlyList<int>> _getTalkingRemotePlayers;
     private readonly XInputControllerPoller _controllerInputPoller = new();
+    private readonly FlydigiExtendedControllerPoller _flydigiControllerInputPoller = new();
     private readonly MouseInteractionGate _mouseInteractionGate = new();
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private readonly byte[] _quickActionNameBuffer = new byte[256];
     private readonly byte[] _quickActionTextBuffer = new byte[InputBufferSize];
     private readonly Dictionary<string, int> _quickActionKeyDown = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, bool> _controllerQuickActionWasDown = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> _pendingQuickActions = new();
+    private int _voicePushToTalkKeyDown;
+    private int _windowVoicePushToTalkPhysicalDown;
     private int _globalMuteKeyDown;
     private bool _controllerGlobalMuteWasDown;
+    private readonly int[] _remotePlayerChatMuteKeyDown = new int[3];
+    private readonly bool[] _controllerRemotePlayerChatMuteWasDown = new bool[3];
+    private readonly HashSet<int> _talkingRemotePlayers = [];
     private readonly object _bindingCaptureSync = new();
     private ImeCandidateSnapshot? _imeCandidateSnapshot;
     private int _openRequested;
@@ -102,23 +113,31 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private string? _statusText;
     private string? _selectedQuickActionId;
     private BindingCaptureRequest? _bindingCapture;
-    private PendingBindingConflict? _bindingConflictPending;
+    private BindingCaptureRequest? _bindingResultRequest;
+    private string? _bindingResultText;
     private KeyboardBinding _keyboardCaptureCandidate;
-    private ControllerButtons _controllerCaptureCandidate;
+    private ControllerBinding _controllerCaptureCandidate;
     private int _latestControllerButtonsMask;
+    private int _latestExtendedControllerButtonsMask;
     private int _controllerInputAvailable;
     private int _nativeControllerInputAvailable;
     private int _managedControllerApiAvailable;
     private int _managedControllerConnected;
+    private int _flydigiControllerConnected;
+    private int _flydigiControllerReady;
+    private int _flydigiControllerStatus;
     private ulong _lastManagedControllerSequence = ulong.MaxValue;
+    private ulong _lastFlydigiControllerSequence = ulong.MaxValue;
     private bool _controllerSettingsWasDown;
     private bool _controllerOpenChatWasDown;
     private bool _controllerPushToTalkWasDown;
+    private bool _controllerPushToTalkPhysicalWasDown;
     private bool _controllerQuickActionsWasDown;
     private bool _managedControllerReleasePending = true;
     private bool _captureWaitingForRelease;
     private string? _captureStatusText;
     private string? _playerMuteStatusText;
+    private string? _voiceMuteStatusText;
 
     internal ChatOverlayPeer(
         ChatSession session,
@@ -137,7 +156,11 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Action<bool> setVoicePushToTalkPressed,
         Action forceReleaseVoiceInputs,
         Action<string> requestOverlayBrokerRecovery,
-        Action<string> log)
+        Action<string> log,
+        ChatBlacklist? chatBlacklist = null,
+        Func<int?>? getHostPlayerNumber = null,
+        Func<int, string?>? getRemotePlayerName = null,
+        Func<IReadOnlyList<int>>? getTalkingRemotePlayers = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -163,6 +186,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _requestOverlayBrokerRecovery = requestOverlayBrokerRecovery ??
             throw new ArgumentNullException(nameof(requestOverlayBrokerRecovery));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
+        _getHostPlayerNumber = getHostPlayerNumber ?? (() => null);
+        _getRemotePlayerName = getRemotePlayerName ?? (_ => null);
+        _getTalkingRemotePlayers = getTalkingRemotePlayers ?? (() => Array.Empty<int>());
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -256,11 +283,50 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 shouldSend = true;
         }
         if (shouldSend)
-            SendQuickAction(actionId);
+            _pendingQuickActions.Enqueue(actionId);
+    }
+
+    public void ObserveVoicePushToTalkKey(bool pressed) =>
+        ObserveVoicePushToTalkKey(pressed, NativeHotkeySource);
+
+    private void ObserveVoicePushToTalkKey(bool pressed, int source)
+    {
+        if (pressed && (!Volatile.Read(ref _initialized) || Volatile.Read(ref _suspended) != 0))
+            return;
+
+        var previous = UpdateSourceMask(ref _voicePushToTalkKeyDown, source, pressed);
+        var current = pressed ? previous | source : previous & ~source;
+        if (previous == 0 && current != 0)
+        {
+            _setVoicePushToTalkPressed(true);
+            _statusText = T("[语音] 正在通话中", "[Voice] Transmitting");
+        }
+        else if (previous != 0 && current == 0)
+        {
+            _setVoicePushToTalkPressed(false);
+            var activeStatus = T("[语音] 正在通话中", "[Voice] Transmitting");
+            if (string.Equals(_statusText, activeStatus, StringComparison.Ordinal))
+                _statusText = null;
+        }
     }
 
     public void ObserveGlobalMuteKey(bool pressed) =>
         ObserveGlobalMuteKey(pressed, NativeHotkeySource);
+
+    public void ObserveRemotePlayerChatMuteKey(int remotePlayerNumber, bool pressed) =>
+        ObserveRemotePlayerChatMuteKey(remotePlayerNumber, pressed, NativeHotkeySource);
+
+    private void ObserveRemotePlayerChatMuteKey(int remotePlayerNumber, bool pressed, int source)
+    {
+        if (remotePlayerNumber is < 1 or > 3)
+            return;
+        var previous = UpdateSourceMask(
+            ref _remotePlayerChatMuteKeyDown[remotePlayerNumber - 1],
+            source,
+            pressed);
+        if (pressed && previous == 0)
+            TogglePlayerMute(remotePlayerNumber + 1);
+    }
 
     private void ObserveGlobalMuteKey(bool pressed, int source)
     {
@@ -273,54 +339,21 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     {
         try
         {
-            var available = _getPlayerMuteSlots()
-                .Where(status =>
-                    status.PlayerNumber is >= 2 and <= 4 &&
-                    status.IsAvailable)
-                .GroupBy(status => status.PlayerNumber)
-                .Select(group => group.First())
-                .OrderBy(status => status.PlayerNumber)
-                .ToArray();
-            if (available.Length == 0)
-            {
-                var unavailable = T("玩家状态不可用。", "Player status unavailable.");
-                _playerMuteStatusText = unavailable;
-                _statusText = unavailable;
-                LogSafely("Global mute hotkey ignored: no available player slots.");
-                return;
-            }
-
-            var targetMuted = available.Any(status => !status.IsMuted);
-            var changed = 0;
-            var failed = 0;
-            foreach (var status in available)
-            {
-                if (status.IsMuted == targetMuted)
-                    continue;
-                changed++;
-                var operation = _setPlayerMuted(status.PlayerNumber, targetMuted);
-                if (!operation.Succeeded)
-                    failed++;
-            }
-
-            var message = failed == 0
-                ? targetMuted
-                    ? T("已全局禁言。", "All players muted.")
-                    : T("已取消全局禁言。", "All players unmuted.")
-                : T("部分玩家操作失败。", "Some player mute changes failed.");
+            var targetMuted = _chatBlacklist.ToggleAllRemotePlayers();
+            var message = targetMuted
+                ? T("已全局禁言。", "All chat muted.")
+                : T("已解除全局禁言。", "Global chat mute cleared.");
             _playerMuteStatusText = message;
             _statusText = message;
-            LogSafely(
-                $"Global mute hotkey completed: target_muted={targetMuted}, " +
-                $"available={available.Length}, changed={changed}, failed={failed}.");
+            LogSafely($"Global chat blacklist toggled: blocked={targetMuted}.");
         }
         catch (Exception exception)
         {
-            var message = T("全局禁言失败。", "Could not toggle global mute.");
+            var message = T("全局聊天禁言失败。", "Could not toggle the chat blacklist.");
             _playerMuteStatusText = message;
             _statusText = message;
             LogSafely(
-                $"Global mute hotkey recovered from an exception: " +
+                $"Global chat blacklist hotkey recovered from an exception: " +
                 $"{exception.GetType().Name}: {exception.Message}.");
         }
     }
@@ -329,36 +362,87 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     {
         try
         {
-            var status = _getPlayerMuteSlots().FirstOrDefault(candidate =>
-                candidate.PlayerNumber == playerNumber);
-            if (status.PlayerNumber != playerNumber || !status.IsAvailable)
-            {
-                var message = status.PlayerNumber == playerNumber &&
-                              !string.IsNullOrWhiteSpace(status.Detail)
-                    ? status.Detail
-                    : T("玩家状态不可用。", "Player status unavailable.");
-                _playerMuteStatusText = message;
-                _statusText = LocalizeLegacyText(message);
-                LogSafely($"Player {playerNumber} mute hotkey ignored: status unavailable.");
-                return;
-            }
-
-            var operation = _setPlayerMuted(playerNumber, !status.IsMuted);
-            _playerMuteStatusText = operation.Message;
-            _statusText = LocalizeLegacyText(operation.Message);
-            LogSafely(
-                $"Player {playerNumber} mute hotkey completed: target_muted={!status.IsMuted}, " +
-                $"succeeded={operation.Succeeded}.");
+            var muted = _chatBlacklist.Toggle(playerNumber);
+            var remotePlayerNumber = playerNumber - 1;
+            var playerName = ResolveRemotePlayerName(remotePlayerNumber);
+            var message = muted
+                ? T($"已禁言 {playerName}。", $"Muted {playerName}.")
+                : T($"已解除禁言 {playerName}。", $"Unmuted {playerName}.");
+            _playerMuteStatusText = message;
+            _statusText = message;
         }
         catch (Exception exception)
         {
-            var message = T("切换禁言失败。", "Could not toggle player mute.");
+            var message = T("切换聊天禁言失败。", "Could not toggle the chat blacklist.");
             _playerMuteStatusText = message;
             _statusText = message;
             LogSafely(
                 $"Player {playerNumber} mute hotkey recovered from an exception: " +
                 $"{exception.GetType().Name}: {exception.Message}.");
         }
+    }
+
+    private string ResolveRemotePlayerName(
+        int remotePlayerNumber,
+        int? fallbackPlayerNumber = null)
+    {
+        try
+        {
+            var playerName = _getRemotePlayerName(remotePlayerNumber)?.Trim();
+            if (!string.IsNullOrWhiteSpace(playerName))
+                return playerName;
+        }
+        catch (Exception exception)
+        {
+            LogSafely(
+                $"Remote player {remotePlayerNumber} name lookup failed; the stable slot label was kept: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+        }
+
+        var displayedPlayerNumber = fallbackPlayerNumber ?? remotePlayerNumber;
+        return T($"玩家 {displayedPlayerNumber}", $"Player {displayedPlayerNumber}");
+    }
+
+    private void ObserveRemoteVoiceActivity()
+    {
+        IReadOnlyList<int> talkingPlayers;
+        try
+        {
+            talkingPlayers = _getTalkingRemotePlayers() ?? Array.Empty<int>();
+        }
+        catch (Exception exception)
+        {
+            _talkingRemotePlayers.Clear();
+            LogSafely(
+                $"Remote voice activity lookup failed closed: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+            return;
+        }
+
+        var current = talkingPlayers
+            .Where(static playerNumber => playerNumber is >= 1 and <= 3)
+            .Distinct()
+            .ToHashSet();
+        var started = current
+            .Where(playerNumber => !_talkingRemotePlayers.Contains(playerNumber))
+            .OrderBy(static playerNumber => playerNumber)
+            .ToArray();
+        _talkingRemotePlayers.Clear();
+        _talkingRemotePlayers.UnionWith(current);
+        if (started.Length == 0)
+            return;
+
+        _statusText = string.Join(
+            Environment.NewLine,
+            started.Select(FormatRemotePlayerSpeaking));
+    }
+
+    private string FormatRemotePlayerSpeaking(int remotePlayerNumber)
+    {
+        var playerName = ResolveRemotePlayerName(remotePlayerNumber);
+        return T(
+            $"玩家 {remotePlayerNumber}：{playerName} 正在开语音。",
+            $"Player {remotePlayerNumber}: {playerName} is speaking.");
     }
 
     internal void ObserveNativeInputSnapshot(DirectInputBrokerSnapshot snapshot)
@@ -371,28 +455,52 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
         if (Volatile.Read(ref _nativeControllerInputAvailable) != 0 &&
             Volatile.Read(ref _managedControllerApiAvailable) == 0)
-            ObserveControllerBindingCapture(snapshot.ControllerButtons);
+        {
+            ObserveControllerBindingCapture(
+                snapshot.ControllerButtons,
+                (ExtendedControllerButtons)Volatile.Read(ref _latestExtendedControllerButtonsMask));
+        }
     }
 
     private void PollManagedControllerInput()
     {
         var snapshot = _controllerInputPoller.Poll();
+        var flydigiSnapshot = _flydigiControllerInputPoller.Poll();
         Volatile.Write(ref _managedControllerApiAvailable, snapshot.ApiAvailable ? 1 : 0);
         Volatile.Write(ref _managedControllerConnected, snapshot.IsConnected ? 1 : 0);
+        Volatile.Write(ref _flydigiControllerConnected, flydigiSnapshot.IsConnected ? 1 : 0);
+        Volatile.Write(
+            ref _flydigiControllerReady,
+            flydigiSnapshot.IsReady ? 1 : 0);
+        ObserveFlydigiControllerStatus(flydigiSnapshot);
         UpdateControllerInputAvailability();
 
-        if (!snapshot.ApiAvailable)
+        var xinputChanged = snapshot.Sequence != _lastManagedControllerSequence;
+        var flydigiChanged = flydigiSnapshot.Sequence != _lastFlydigiControllerSequence;
+        if (!snapshot.ApiAvailable && !flydigiSnapshot.IsConnected)
         {
             ResetManagedControllerHotkeys();
             return;
         }
-        if (snapshot.Sequence == _lastManagedControllerSequence)
+        if (!xinputChanged && !flydigiChanged)
             return;
 
         _lastManagedControllerSequence = snapshot.Sequence;
-        Volatile.Write(ref _latestControllerButtonsMask, (int)snapshot.Buttons);
+        _lastFlydigiControllerSequence = flydigiSnapshot.Sequence;
+        var standardButtons = snapshot.ApiAvailable
+            ? snapshot.Buttons
+            : ControllerButtons.None;
+        var extendedButtons = flydigiSnapshot.IsReady
+            ? flydigiSnapshot.Buttons
+            : ExtendedControllerButtons.None;
+        if (snapshot.ApiAvailable)
+            Volatile.Write(ref _latestControllerButtonsMask, (int)standardButtons);
+        Volatile.Write(ref _latestExtendedControllerButtonsMask, (int)extendedButtons);
         var captureWasActive = IsControllerBindingCaptureActive();
-        ObserveControllerBindingCapture(snapshot.Buttons);
+        var captureStandardButtons = snapshot.ApiAvailable
+            ? standardButtons
+            : (ControllerButtons)Volatile.Read(ref _latestControllerButtonsMask);
+        ObserveControllerBindingCapture(captureStandardButtons, extendedButtons);
         if (captureWasActive || IsControllerBindingCaptureActive())
         {
             ResetManagedControllerHotkeys();
@@ -401,49 +509,64 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (_managedControllerReleasePending)
         {
             ResetManagedControllerHotkeys();
-            if (snapshot.Buttons == ControllerButtons.None)
+            if (standardButtons == ControllerButtons.None &&
+                extendedButtons == ExtendedControllerButtons.None)
+            {
                 _managedControllerReleasePending = false;
+            }
             return;
         }
-        ProcessManagedControllerHotkeys(snapshot.Buttons);
+        ProcessManagedControllerHotkeys(standardButtons, extendedButtons);
     }
 
-    private void ObserveControllerBindingCapture(ControllerButtons buttons)
+    private void ObserveControllerBindingCapture(
+        ControllerButtons buttons,
+        ExtendedControllerButtons extendedButtons)
     {
         lock (_bindingCaptureSync)
         {
             if (_bindingCapture is not { Device: BindingCaptureDevice.Controller })
                 return;
+            var allReleased = buttons == ControllerButtons.None &&
+                              extendedButtons == ExtendedControllerButtons.None;
             if (_captureWaitingForRelease)
             {
-                if (buttons == ControllerButtons.None)
+                if (allReleased)
                 {
                     _captureWaitingForRelease = false;
-                    _captureStatusText = T(
-                        "请按下一个或两个手柄按键，然后松开确认。",
-                        "Press one or two controller buttons, then release to confirm.");
+                    _captureStatusText = GetControllerCapturePrompt();
                 }
                 return;
             }
-            if (_controllerCaptureCandidate == ControllerButtons.None)
+            if (!_controllerCaptureCandidate.IsBound)
             {
-                if (buttons == ControllerButtons.None)
+                if (allReleased)
                     return;
-                if (BitOperations.PopCount((uint)buttons) > 2)
+                if ((buttons & ControllerButtons.DPadDown) != 0)
                 {
                     _captureStatusText = T(
-                        "最多绑定两个手柄按键。",
-                        "Controller bindings are limited to two buttons.");
+                        "DPadDown 是游戏官方快捷短语保留键，不能绑定到模组功能。",
+                        "DPadDown is reserved for the game's official quick phrase and cannot be bound to a mod action.");
                     return;
                 }
-                _controllerCaptureCandidate = buttons;
+                var candidate = new ControllerBinding(buttons, extendedButtons);
+                var buttonCount = BitOperations.PopCount((uint)buttons) +
+                                  BitOperations.PopCount((uint)extendedButtons);
+                if (buttonCount > 2)
+                {
+                    _captureStatusText = T(
+                        "最多两个按键。",
+                        "Two buttons maximum.");
+                    return;
+                }
+                _controllerCaptureCandidate = candidate;
                 _captureStatusText = T(
-                    $"已捕获 {new ControllerBinding(buttons).Format()}，松开确认。",
-                    $"Captured {new ControllerBinding(buttons).Format()}. Release to confirm.");
+                    $"{candidate.Format()}，松开确认。",
+                    $"{candidate.Format()}; release to confirm.");
                 return;
             }
-            if (buttons == ControllerButtons.None)
-                CompleteBindingCapture(new ControllerBinding(_controllerCaptureCandidate).Format());
+            if (allReleased)
+                CompleteBindingCapture(_controllerCaptureCandidate.Format());
         }
     }
 
@@ -453,74 +576,94 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             return _bindingCapture is { Device: BindingCaptureDevice.Controller };
     }
 
-    private void ProcessManagedControllerHotkeys(ControllerButtons buttons)
+    private void ProcessManagedControllerHotkeys(
+        ControllerButtons buttons,
+        ExtendedControllerButtons extendedButtons)
     {
         var configuration = _getConfiguration();
         var settingsDown = IsControllerBindingPressed(
             configuration.SettingsMenuControllerBinding,
-            buttons);
+            buttons,
+            extendedButtons);
         if (settingsDown != _controllerSettingsWasDown)
             ObserveSettingsMenuKey(settingsDown, ControllerHotkeySource);
         _controllerSettingsWasDown = settingsDown;
 
         var inputCaptured = ShouldCaptureKeyboard();
         var openChatDown = !inputCaptured &&
-            IsControllerBindingPressed(configuration.OpenChatControllerBinding, buttons);
+            IsControllerBindingPressed(
+                configuration.OpenChatControllerBinding,
+                buttons,
+                extendedButtons);
         if (openChatDown && !_controllerOpenChatWasDown)
             TryRequestOpen();
         _controllerOpenChatWasDown = openChatDown;
 
-        var pushToTalkDown = !inputCaptured &&
-            _canUseVoicePushToTalk() &&
-            IsControllerBindingPressed(configuration.PushToTalkControllerBinding, buttons);
-        if (pushToTalkDown != _controllerPushToTalkWasDown)
-            _setVoicePushToTalkPressed(pushToTalkDown);
-        _controllerPushToTalkWasDown = pushToTalkDown;
+        var pushToTalkPhysicalDown = !inputCaptured &&
+            IsControllerBindingPressed(
+                configuration.PushToTalkControllerBinding,
+                buttons,
+                extendedButtons);
+        if (!pushToTalkPhysicalDown)
+        {
+            if (_controllerPushToTalkWasDown)
+                ObserveVoicePushToTalkKey(false, ControllerHotkeySource);
+            _controllerPushToTalkWasDown = false;
+        }
+        else if (!_controllerPushToTalkPhysicalWasDown && _canUseVoicePushToTalk())
+        {
+            ObserveVoicePushToTalkKey(true, ControllerHotkeySource);
+            _controllerPushToTalkWasDown = true;
+        }
+        else if (_controllerPushToTalkWasDown && !_canUseVoicePushToTalk())
+        {
+            ObserveVoicePushToTalkKey(false, ControllerHotkeySource);
+            _controllerPushToTalkWasDown = false;
+        }
+        _controllerPushToTalkPhysicalWasDown = pushToTalkPhysicalDown;
 
         var officialActionsAvailable = configuration.EnableOverlay;
         var customActionsAvailable = configuration.EnableOverlay;
         var quickActionsPanelAvailable = officialActionsAvailable || customActionsAvailable;
         var quickActionsDown = !inputCaptured &&
             quickActionsPanelAvailable &&
-            IsControllerBindingPressed(configuration.QuickActionsControllerBinding, buttons);
+            IsControllerBindingPressed(
+                configuration.QuickActionsControllerBinding,
+                buttons,
+                extendedButtons);
         if (quickActionsDown != _controllerQuickActionsWasDown)
             ObserveQuickActionsMenuKey(quickActionsDown, ControllerHotkeySource);
         _controllerQuickActionsWasDown = quickActionsDown;
 
         var globalMuteDown = !inputCaptured &&
             IsOnlineRoomActive() &&
-            IsControllerBindingPressed(configuration.GlobalMuteControllerBinding, buttons);
+            IsControllerBindingPressed(
+                configuration.GlobalMuteControllerBinding,
+                buttons,
+                extendedButtons);
         if (globalMuteDown != _controllerGlobalMuteWasDown)
             ObserveGlobalMuteKey(globalMuteDown, ControllerHotkeySource);
         _controllerGlobalMuteWasDown = globalMuteDown;
 
-        var liveIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var action in configuration.QuickActions ?? [])
+        for (var remotePlayerNumber = 1; remotePlayerNumber <= 3; remotePlayerNumber++)
         {
-            if (string.IsNullOrWhiteSpace(action.Id))
-                continue;
-            liveIds.Add(action.Id);
-            var available = action.Kind == QuickActionKind.CustomText
-                ? customActionsAvailable
-                : officialActionsAvailable;
-            var down = !inputCaptured &&
-                available &&
-                action.Enabled &&
-                action.IsConfigured &&
-                IsControllerBindingPressed(action.ControllerBinding, buttons);
-            _controllerQuickActionWasDown.TryGetValue(action.Id, out var wasDown);
-            if (down != wasDown)
-                ObserveQuickActionKey(action.Id, down, ControllerHotkeySource);
-            _controllerQuickActionWasDown[action.Id] = down;
+            var index = remotePlayerNumber - 1;
+            var playerMuteDown = !inputCaptured &&
+                IsOnlineRoomActive() &&
+                IsControllerBindingPressed(
+                    GetRemotePlayerChatMuteControllerBinding(configuration, remotePlayerNumber),
+                    buttons,
+                    extendedButtons);
+            if (playerMuteDown != _controllerRemotePlayerChatMuteWasDown[index])
+            {
+                ObserveRemotePlayerChatMuteKey(
+                    remotePlayerNumber,
+                    playerMuteDown,
+                    ControllerHotkeySource);
+            }
+            _controllerRemotePlayerChatMuteWasDown[index] = playerMuteDown;
         }
-        foreach (var staleId in _controllerQuickActionWasDown.Keys
-                     .Where(id => !liveIds.Contains(id))
-                     .ToArray())
-        {
-            if (_controllerQuickActionWasDown[staleId])
-                ObserveQuickActionKey(staleId, false, ControllerHotkeySource);
-            _controllerQuickActionWasDown.Remove(staleId);
-        }
+
     }
 
     private void ResetManagedControllerHotkeys()
@@ -528,30 +671,96 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (_controllerSettingsWasDown)
             ObserveSettingsMenuKey(false, ControllerHotkeySource);
         if (_controllerPushToTalkWasDown)
-            _setVoicePushToTalkPressed(false);
+            ObserveVoicePushToTalkKey(false, ControllerHotkeySource);
         if (_controllerQuickActionsWasDown)
             ObserveQuickActionsMenuKey(false, ControllerHotkeySource);
-        foreach (var action in _controllerQuickActionWasDown.Where(item => item.Value))
-            ObserveQuickActionKey(action.Key, false, ControllerHotkeySource);
         if (_controllerGlobalMuteWasDown)
             ObserveGlobalMuteKey(false, ControllerHotkeySource);
+        for (var index = 0; index < _controllerRemotePlayerChatMuteWasDown.Length; index++)
+        {
+            if (_controllerRemotePlayerChatMuteWasDown[index])
+                ObserveRemotePlayerChatMuteKey(index + 1, false, ControllerHotkeySource);
+            _controllerRemotePlayerChatMuteWasDown[index] = false;
+        }
         _controllerSettingsWasDown = false;
         _controllerOpenChatWasDown = false;
         _controllerPushToTalkWasDown = false;
+        _controllerPushToTalkPhysicalWasDown = false;
         _controllerQuickActionsWasDown = false;
         _controllerGlobalMuteWasDown = false;
-        _controllerQuickActionWasDown.Clear();
     }
 
     private static bool IsControllerBindingPressed(
         string? value,
-        ControllerButtons buttons) =>
-        ControllerBinding.TryParse(value, out var binding) && binding.IsPressed(buttons);
+        ControllerButtons buttons,
+        ExtendedControllerButtons extendedButtons) =>
+        ControllerBinding.TryParse(value, out var binding) &&
+        binding.IsPressed(buttons, extendedButtons);
+
+    private static string GetRemotePlayerChatMuteKeyboardBinding(
+        Config configuration,
+        int remotePlayerNumber) => remotePlayerNumber switch
+        {
+            1 => configuration.RemotePlayer1ChatMuteKeyboardBinding,
+            2 => configuration.RemotePlayer2ChatMuteKeyboardBinding,
+            3 => configuration.RemotePlayer3ChatMuteKeyboardBinding,
+            _ => string.Empty,
+        };
+
+    private static string GetRemotePlayerChatMuteControllerBinding(
+        Config configuration,
+        int remotePlayerNumber) => remotePlayerNumber switch
+        {
+            1 => configuration.RemotePlayer1ChatMuteControllerBinding,
+            2 => configuration.RemotePlayer2ChatMuteControllerBinding,
+            3 => configuration.RemotePlayer3ChatMuteControllerBinding,
+            _ => string.Empty,
+        };
+
+    private static void SetRemotePlayerChatMuteKeyboardBinding(
+        Config configuration,
+        int remotePlayerNumber,
+        string value)
+    {
+        switch (remotePlayerNumber)
+        {
+            case 1:
+                configuration.RemotePlayer1ChatMuteKeyboardBinding = value;
+                break;
+            case 2:
+                configuration.RemotePlayer2ChatMuteKeyboardBinding = value;
+                break;
+            case 3:
+                configuration.RemotePlayer3ChatMuteKeyboardBinding = value;
+                break;
+        }
+    }
+
+    private static void SetRemotePlayerChatMuteControllerBinding(
+        Config configuration,
+        int remotePlayerNumber,
+        string value)
+    {
+        switch (remotePlayerNumber)
+        {
+            case 1:
+                configuration.RemotePlayer1ChatMuteControllerBinding = value;
+                break;
+            case 2:
+                configuration.RemotePlayer2ChatMuteControllerBinding = value;
+                break;
+            case 3:
+                configuration.RemotePlayer3ChatMuteControllerBinding = value;
+                break;
+        }
+    }
 
     private void UpdateControllerInputAvailability() =>
         Volatile.Write(
             ref _controllerInputAvailable,
             Volatile.Read(ref _managedControllerConnected) != 0 ||
+            (Volatile.Read(ref _flydigiControllerConnected) != 0 &&
+             Volatile.Read(ref _flydigiControllerReady) != 0) ||
             (Volatile.Read(ref _managedControllerApiAvailable) == 0 &&
              Volatile.Read(ref _nativeControllerInputAvailable) != 0)
                 ? 1
@@ -567,6 +776,87 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 return previous;
         }
     }
+
+    private void ForceReleaseVoicePushToTalkSources()
+    {
+        Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
+        if (Interlocked.Exchange(ref _voicePushToTalkKeyDown, 0) != 0)
+            _setVoicePushToTalkPressed(false);
+    }
+
+    private void ObserveFlydigiControllerStatus(FlydigiExtendedControllerSnapshot snapshot)
+    {
+        var current = snapshot.AccessBlocked
+            ? 5
+            : !snapshot.IsConnected
+            ? 0
+            : !snapshot.TakeoverStatusKnown
+                ? 1
+                : !snapshot.TakeoverAllowed
+                    ? 3
+                    : snapshot.AcquisitionStatusKnown && !snapshot.AcquisitionSucceeded
+                        ? 4
+                        : snapshot.IsReady ? 2 : 1;
+        var previous = Interlocked.Exchange(ref _flydigiControllerStatus, current);
+        if (current == previous)
+            return;
+
+        if (current == 2)
+        {
+            _managedControllerReleasePending = true;
+            LogSafely("Flydigi Vader 5 Pro extended buttons are ready.");
+        }
+        else if (current == 3)
+        {
+            lock (_bindingCaptureSync)
+            {
+                if (_bindingCapture is { Device: BindingCaptureDevice.Controller } &&
+                    !_controllerCaptureCandidate.IsBound)
+                {
+                    _captureStatusText = GetControllerCapturePrompt();
+                }
+            }
+            LogSafely("Flydigi Vader 5 Pro is connected, but third-party mapping takeover is disabled.");
+        }
+        else if (current == 4)
+        {
+            lock (_bindingCaptureSync)
+            {
+                if (_bindingCapture is { Device: BindingCaptureDevice.Controller } &&
+                    !_controllerCaptureCandidate.IsBound)
+                {
+                    _captureStatusText = GetControllerCapturePrompt();
+                }
+            }
+            LogSafely("Flydigi Vader 5 Pro acquisition was rejected; Steam Input or another mapping client may already own it.");
+        }
+        else if (current == 5)
+        {
+            lock (_bindingCaptureSync)
+            {
+                if (_bindingCapture is { Device: BindingCaptureDevice.Controller } &&
+                    !_controllerCaptureCandidate.IsBound)
+                {
+                    _captureStatusText = GetControllerCapturePrompt();
+                }
+            }
+            LogSafely("Flydigi Vader 5 Pro was detected, but its HID interface could not be opened.");
+        }
+    }
+
+    private string GetControllerCapturePrompt() => Volatile.Read(ref _flydigiControllerStatus) switch
+    {
+        1 => T(
+            "正在等待飞智接管回应。若一直无响应，Steam Input、飞智空间站或其他程序可能正在占用；也可把扩展键映射到 F13–F21，再点“键盘”绑定。",
+            "Waiting for the Flydigi takeover response. If this persists, Steam Input, Space Station, or another program may own it; you can also map extras to F13–F21 and bind them as Keyboard keys."),
+        3 => T(
+            "请按 1–2 个手柄键。飞智扩展键可关闭本游戏的 Steam Input 后启用第三方接管；若必须保留 Steam Input，请在空间站把扩展键映射到 F13–F21，再点“键盘”绑定。",
+            "Press 1–2 controller buttons. For Flydigi extras, disable Steam Input for this game and enable third-party takeover; to keep Steam Input, map extras to F13–F21 in Space Station and bind them as Keyboard keys."),
+        4 or 5 => T(
+            "飞智扩展接口正被 Steam Input、飞智空间站或其他程序占用。请关闭其中一个接管方后重连；或把扩展键映射到 F13–F21，再点“键盘”绑定。",
+            "The Flydigi extra-button interface is occupied by Steam Input, Space Station, or another program. Close one mapping client and reconnect, or map extras to F13–F21 and bind them as Keyboard keys."),
+        _ => T("请按 1–2 个手柄键。", "Press 1–2 controller buttons."),
+    };
 
     public bool WantsRender
     {
@@ -591,7 +881,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (!Volatile.Read(ref _initialized) || Volatile.Read(ref _suspended) != 0)
             return;
         PollManagedControllerInput();
-        _session.DrainIncoming();
         var configuration = _getConfiguration();
         if (!configuration.EnableImeCandidateFallback)
             ClearImeCandidateSnapshot();
@@ -601,16 +890,33 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             onlineRoomActive ? 0 : 1);
         if (!onlineRoomActive && previousOnlineRoomInactive == 0)
         {
+            _chatBlacklist.Clear();
+            _session.Composer.Cancel(clearDraft: true);
+            _session.InputHistory.ResetNavigation();
+            Array.Clear(_inputBuffer);
             _playerMuteStatusText = null;
+            _voiceMuteStatusText = null;
+            _talkingRemotePlayers.Clear();
             NotifyOnlineRoomUnavailable();
             ResetChatInteractionState();
         }
         else if (onlineRoomActive && previousOnlineRoomInactive != 0)
         {
+            _chatBlacklist.Clear();
+            _session.Composer.Cancel(clearDraft: true);
+            _session.InputHistory.ResetNavigation();
+            Array.Clear(_inputBuffer);
             _playerMuteStatusText = null;
+            _voiceMuteStatusText = null;
+            _talkingRemotePlayers.Clear();
             LogSafely(
                 "Relink online Party room became active; configured chat, voice and quick-action hotkeys are enabled. " +
                 "The configured settings binding remains available in every scene.");
+        }
+        if (onlineRoomActive)
+        {
+            ObserveRemoteVoiceActivity();
+            _session.DrainIncoming();
         }
     }
 
@@ -644,11 +950,18 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Interlocked.Exchange(ref _quickActionsPanelOpen, 0);
         lock (_quickActionKeyDown)
             _quickActionKeyDown.Clear();
+        ClearPendingQuickActions();
+        ForceReleaseVoicePushToTalkSources();
         ResetManagedControllerHotkeys();
         Interlocked.Exchange(ref _globalMuteKeyDown, 0);
+        Array.Clear(_remotePlayerChatMuteKeyDown);
+        _talkingRemotePlayers.Clear();
         CancelBindingCapture();
         lock (_bindingCaptureSync)
-            _bindingConflictPending = null;
+        {
+            _bindingResultRequest = null;
+            _bindingResultText = null;
+        }
         Interlocked.Exchange(ref _captureKeyboard, 0);
         Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
@@ -657,6 +970,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _focusInputNextFrame = false;
         _statusText = null;
         _playerMuteStatusText = null;
+        _voiceMuteStatusText = null;
         _registration?.SetInputCapture(OverlayInputDevices.None);
         _registration?.SetEnabled(false);
     }
@@ -741,6 +1055,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 DrawChatWindow(configuration, openedThisFrame: false, voiceUiStatus, editMode: true);
                 return;
             }
+
+            DrainQuickActionRequests();
 
             if (_releaseCaptureFrames > 0 && --_releaseCaptureFrames == 0 && !_session.Composer.IsOpen)
             {
@@ -830,11 +1146,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             if (!began)
                 return;
 
+            ImGui.SetWindowFontScale(Math.Clamp((float)configuration.ChatFontSize / 18.0f, 0.67f, 1.67f));
             var imeCandidateText = composerOpen
                 ? GetImeCandidateFallbackText(configuration.EnableImeCandidateFallback)
                 : null;
             DrawVoiceStatus(voiceUiStatus);
-            DrawHistory(composerOpen, imeCandidateText);
+            DrawHistory(configuration, composerOpen, imeCandidateText);
             if (composerOpen)
                 DrawComposer(openedThisFrame, imeCandidateText);
             else if (!string.IsNullOrEmpty(_statusText))
@@ -899,8 +1216,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     {
                         DrawSettingsTab(T("00 通用设置", "00 General"), DrawGeneralSettingsTab);
                         DrawSettingsTab(T("01 语音", "01 Voice"), DrawVoiceSettingsTab);
-                        DrawSettingsTab(T("02 玩家禁言", "02 Player Mute"), DrawPlayerMuteSettingsTab);
-                        DrawSettingsTab(T("03 快捷动作", "03 Quick Actions"), DrawQuickActionSettingsTab);
+                        DrawSettingsTab(T("02 快捷动作", "02 Quick Actions"), DrawQuickActionSettingsTab);
                     }
                     finally
                     {
@@ -1064,49 +1380,54 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             T(
                 "设备选择和测试立即生效。Party 语音设备将在重启 Mod 后应用。",
                 "Device and test changes apply now. Party voice devices apply after restarting the mod."));
+        ImGui.Separator();
+        DrawVoiceMuteSettingsSection();
     }
 
-    private void DrawPlayerMuteSettingsTab()
+    private void DrawVoiceMuteSettingsSection()
     {
-        ImGui.TextWrapped(T("按玩家 2、3、4 显示。", "Shows players 2, 3 and 4."));
-        if (!string.IsNullOrWhiteSpace(_playerMuteStatusText))
-            ImGui.TextWrapped(LocalizeLegacyText(_playerMuteStatusText));
-        ImGui.Separator();
+        ImGui.Text(T("玩家语音禁言", "Player Voice Mute"));
+        if (!string.IsNullOrWhiteSpace(_voiceMuteStatusText))
+            ImGui.TextWrapped(LocalizeLegacyText(_voiceMuteStatusText));
+
         var slots = _getPlayerMuteSlots();
-        using var buttonSize = CreateVector2(OverlayUiScale.Scale(190.0f), OverlayUiScale.Scale(36.0f));
-        for (var player = 2; player <= 4; player++)
+        using var buttonSize = CreateVector2(
+            OverlayUiScale.Scale(190.0f),
+            OverlayUiScale.Scale(36.0f));
+        for (var playerNumber = 2; playerNumber <= 4; playerNumber++)
         {
-            var status = slots.FirstOrDefault(candidate => candidate.PlayerNumber == player);
-            if (status.PlayerNumber != player)
+            var status = slots.FirstOrDefault(candidate => candidate.PlayerNumber == playerNumber);
+            if (status.PlayerNumber != playerNumber)
             {
                 status = new PartyPlayerMuteSlotStatus(
-                    player,
+                    playerNumber,
                     false,
                     false,
-                    T("玩家状态不可用。", "Player status unavailable."));
+                    string.Empty);
             }
 
-            ImGui.Text(T($"玩家 {player}", $"Player {player}"));
-            ImGui.SameLine(OverlayUiScale.Scale(280.0f), OverlayUiScale.Scale(12.0f));
+            var remotePlayerNumber = playerNumber - 1;
+            var playerName = ResolveRemotePlayerName(remotePlayerNumber, playerNumber);
+            ImGui.Text($"{T($"玩家 {playerNumber}", $"Player {playerNumber}")}：{playerName}");
+            ImGui.SameLine(OverlayUiScale.Scale(360.0f), OverlayUiScale.Scale(12.0f));
             ImGui.BeginDisabled(!status.IsAvailable);
             try
             {
                 var label = status.IsAvailable
                     ? status.IsMuted
-                        ? $"{T("取消禁言", "Unmute")}##MutePlayer{player}"
-                        : $"{T("禁言", "Mute")}##MutePlayer{player}"
-                    : $"{T("不可用", "Unavailable")}##MutePlayer{player}";
+                        ? $"{T("解除语音禁言", "Unmute Voice")}##VoiceMutePlayer{playerNumber}"
+                        : $"{T("语音禁言", "Mute Voice")}##VoiceMutePlayer{playerNumber}"
+                    : $"{T("不可用", "Unavailable")}##VoiceMutePlayer{playerNumber}";
                 if (ImGui.Button(label, buttonSize))
                 {
-                    var operation = _setPlayerMuted(player, !status.IsMuted);
-                    _playerMuteStatusText = operation.Message;
+                    var operation = _setPlayerMuted(playerNumber, !status.IsMuted);
+                    _voiceMuteStatusText = operation.Message;
                 }
             }
             finally
             {
                 ImGui.EndDisabled();
             }
-            ImGui.TextWrapped(LocalizeLegacyText(status.Detail));
             ImGui.Separator();
         }
     }
@@ -1125,8 +1446,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         DrawBindingRow(T("打开聊天", "Open Chat"), BindingTarget.OpenChat);
         DrawBindingRow(T("按住说话", "Push-to-Talk"), BindingTarget.PushToTalk);
         DrawBindingRow(T("快捷动作面板", "Quick Actions Panel"), BindingTarget.QuickActionsPanel);
-        DrawBindingRow(T("全局禁言", "Global Mute"), BindingTarget.GlobalMute);
-        DrawBindingCapturePanel();
+        DrawBindingRow(T("全局聊天禁言", "Block All Chat"), BindingTarget.GlobalMute);
+        DrawBindingRow(T("玩家 1 聊天禁言", "Player 1 Chat Mute"), BindingTarget.RemotePlayerChatMute, playerNumber: 1);
+        DrawBindingRow(T("玩家 2 聊天禁言", "Player 2 Chat Mute"), BindingTarget.RemotePlayerChatMute, playerNumber: 2);
+        DrawBindingRow(T("玩家 3 聊天禁言", "Player 3 Chat Mute"), BindingTarget.RemotePlayerChatMute, playerNumber: 3);
     }
 
     private unsafe void DrawQuickActionSettingsTab()
@@ -1240,7 +1563,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 UpdateQuickAction(selected.Id, action => action.OfficialId = officialId);
             }
 
-            DrawBindingRow(T("此动作", "This Action"), BindingTarget.QuickAction, selected.Id);
+            DrawKeyboardBindingRow(T("此动作", "This Action"), BindingTarget.QuickAction, selected.Id);
             using var moveSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
             using var deleteSize = CreateVector2(OverlayUiScale.Scale(170.0f), OverlayUiScale.Scale(34.0f));
             if (ImGui.Button($"{T("上移", "Move Up")}##QuickActionUp{selected.Id}", moveSize))
@@ -1251,7 +1574,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ImGui.SameLine(0.0f, OverlayUiScale.Scale(8.0f));
             if (ImGui.Button($"{T("删除", "Delete")}##QuickActionDelete{selected.Id}", deleteSize))
                 DeleteQuickAction(selected.Id);
-            DrawBindingCapturePanel();
         }
         finally
         {
@@ -1281,10 +1603,76 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             UpdateConfigurationSafely(value => value.BackgroundOpacity = opacity);
         }
+
+        var fontSize = Math.Clamp((float)configuration.ChatFontSize, 12.0f, 30.0f);
+        if (ImGui.SliderFloat(T("字体大小", "Font Size"), ref fontSize, 12.0f, 30.0f, "%.0f", 0))
+            UpdateConfigurationSafely(value => value.ChatFontSize = fontSize);
+        DrawConfigurationCheckbox(
+            T("显示时间戳", "Show Timestamps"),
+            configuration.ShowTimestamps,
+            (value, enabled) => value.ShowTimestamps = enabled);
+
+        var historyCapacity = Math.Clamp(configuration.HistoryCapacity, 10, 5_000);
+        if (ImGui.SliderInt(
+                T("聊天记录上限", "Chat History Limit"),
+                ref historyCapacity,
+                10,
+                5_000,
+                "%d",
+                0))
+        {
+            UpdateConfigurationSafely(value => value.HistoryCapacity = historyCapacity);
+        }
+
+        ImGui.Separator();
+        ImGui.Text(T("玩家名字", "Player Names"));
+        var nameSize = Math.Clamp((float)configuration.PlayerNameFontSize, 12.0f, 30.0f);
+        if (ImGui.SliderFloat(T("名字大小", "Name Size"), ref nameSize, 12.0f, 30.0f, "%.0f", 0))
+            UpdateConfigurationSafely(value => value.PlayerNameFontSize = nameSize);
+        var nameWeight = Math.Clamp(configuration.PlayerNameWeight, 1, 3);
+        if (ImGui.SliderInt(T("名字粗细", "Name Weight"), ref nameWeight, 1, 3, "%d", 0))
+            UpdateConfigurationSafely(value => value.PlayerNameWeight = nameWeight);
+        DrawPlayerColorSetting(1, configuration.Player1NameColor);
+        DrawPlayerColorSetting(2, configuration.Player2NameColor);
+        DrawPlayerColorSetting(3, configuration.Player3NameColor);
+        DrawPlayerColorSetting(4, configuration.Player4NameColor);
         ImGui.Separator();
         ImGui.TextWrapped(T(
             "拖动聊天框顶部移动，拖动右下角缩放。",
             "Drag the chat header to move it and the lower-right corner to resize it."));
+    }
+
+    private void DrawPlayerColorSetting(int playerNumber, string configured)
+    {
+        if (!ChatColor.TryParseRgb(configured, out var color))
+            color = [0.85f, 0.85f, 0.85f, 1.0f];
+        if (!ImGui.ColorEdit4(
+                T($"玩家 {playerNumber} 颜色", $"Player {playerNumber} Color"),
+                color,
+                (int)ImGuiColorEditFlags.NoAlpha))
+        {
+            return;
+        }
+
+        var hex = ChatColor.ToHex(color);
+        UpdateConfigurationSafely(configuration =>
+        {
+            switch (playerNumber)
+            {
+                case 1:
+                    configuration.Player1NameColor = hex;
+                    break;
+                case 2:
+                    configuration.Player2NameColor = hex;
+                    break;
+                case 3:
+                    configuration.Player3NameColor = hex;
+                    break;
+                case 4:
+                    configuration.Player4NameColor = hex;
+                    break;
+            }
+        });
     }
 
     private void DrawConfigurationCheckbox(
@@ -1318,21 +1706,36 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         var controller = GetBindingValue(configuration, requestController);
 
         ImGui.Text(label);
-        using var keyboardSize = CreateVector2(OverlayUiScale.Scale(230.0f), OverlayUiScale.Scale(34.0f));
-        using var controllerSize = CreateVector2(OverlayUiScale.Scale(230.0f), OverlayUiScale.Scale(34.0f));
+        using var bindingSize = CreateVector2(OverlayUiScale.Scale(185.0f), OverlayUiScale.Scale(34.0f));
+        using var clearSize = CreateVector2(OverlayUiScale.Scale(64.0f), OverlayUiScale.Scale(34.0f));
         if (ImGui.Button(
                 $"{T("键盘", "Keyboard")}: {DescribeBinding(keyboard)}##Keyboard{target}{quickActionId}{playerNumber}",
-                keyboardSize))
+                bindingSize))
         {
             BeginBindingCapture(requestKeyboard);
+        }
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(6.0f));
+        ImGui.BeginDisabled(string.IsNullOrWhiteSpace(keyboard));
+        try
+        {
+            if (ImGui.Button(
+                    $"{T("清除", "Clear")}##ClearKeyboard{target}{quickActionId}{playerNumber}",
+                    clearSize))
+            {
+                ClearBinding(requestKeyboard);
+            }
+        }
+        finally
+        {
+            ImGui.EndDisabled();
         }
         ImGui.SameLine(0.0f, OverlayUiScale.Scale(10.0f));
         ImGui.BeginDisabled(Volatile.Read(ref _controllerInputAvailable) == 0);
         try
         {
             if (ImGui.Button(
-                    $"{T("手柄", "Controller")}: {DescribeBinding(controller)}##Controller{target}{quickActionId}{playerNumber}",
-                    controllerSize))
+                    $"{T("手柄", "Controller")}: {DescribeControllerBinding(controller)}##Controller{target}{quickActionId}{playerNumber}",
+                    bindingSize))
             {
                 BeginBindingCapture(requestController);
             }
@@ -1341,76 +1744,126 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             ImGui.EndDisabled();
         }
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(6.0f));
+        ImGui.BeginDisabled(string.IsNullOrWhiteSpace(controller));
+        try
+        {
+            if (ImGui.Button(
+                    $"{T("清除", "Clear")}##ClearController{target}{quickActionId}{playerNumber}",
+                    clearSize))
+            {
+                ClearBinding(requestController);
+            }
+        }
+        finally
+        {
+            ImGui.EndDisabled();
+        }
+        DrawBindingRowFeedback(requestKeyboard, requestController);
         ImGui.Separator();
     }
 
-    private void DrawBindingCapturePanel()
+    private void DrawKeyboardBindingRow(
+        string label,
+        BindingTarget target,
+        string? quickActionId = null,
+        int playerNumber = 0)
     {
-        PendingBindingConflict? pendingConflict;
+        var requestKeyboard = new BindingCaptureRequest(
+            target,
+            BindingCaptureDevice.Keyboard,
+            quickActionId,
+            playerNumber);
+        var keyboard = GetBindingValue(_getConfiguration(), requestKeyboard);
+
+        ImGui.Text(label);
+        using var bindingSize = CreateVector2(OverlayUiScale.Scale(185.0f), OverlayUiScale.Scale(34.0f));
+        using var clearSize = CreateVector2(OverlayUiScale.Scale(64.0f), OverlayUiScale.Scale(34.0f));
+        if (ImGui.Button(
+                $"{T("键盘", "Keyboard")}: {DescribeBinding(keyboard)}##KeyboardOnly{target}{quickActionId}{playerNumber}",
+                bindingSize))
+        {
+            BeginBindingCapture(requestKeyboard);
+        }
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(6.0f));
+        ImGui.BeginDisabled(string.IsNullOrWhiteSpace(keyboard));
+        try
+        {
+            if (ImGui.Button(
+                    $"{T("清除", "Clear")}##ClearKeyboardOnly{target}{quickActionId}{playerNumber}",
+                    clearSize))
+            {
+                ClearBinding(requestKeyboard);
+            }
+        }
+        finally
+        {
+            ImGui.EndDisabled();
+        }
+        DrawBindingRowFeedback(requestKeyboard, null);
+        ImGui.Separator();
+    }
+
+    private void DrawBindingRowFeedback(
+        BindingCaptureRequest keyboardRequest,
+        BindingCaptureRequest? controllerRequest)
+    {
         BindingCaptureRequest? activeCapture;
-        string? captureStatusText;
+        BindingCaptureRequest? resultRequest;
+        string? feedback;
         lock (_bindingCaptureSync)
         {
-            pendingConflict = _bindingConflictPending;
             activeCapture = _bindingCapture;
-            captureStatusText = _captureStatusText;
+            resultRequest = _bindingResultRequest;
+            feedback = activeCapture is not null ? _captureStatusText : _bindingResultText;
         }
 
-        if (pendingConflict is { } conflict)
+        var request = activeCapture ?? resultRequest;
+        if (request is not { } resolvedRequest)
+            return;
+        var matchesRequest = resolvedRequest == keyboardRequest ||
+                             (controllerRequest is { } controller && resolvedRequest == controller);
+        if (!matchesRequest ||
+            string.IsNullOrWhiteSpace(feedback))
         {
-            ImGui.TextWrapped(
-                T(
-                    $"与“{conflict.Description}”冲突，仍要保存吗？",
-                    $"Conflicts with “{conflict.Description}”. Save anyway?"));
-            using var saveSize = CreateVector2(OverlayUiScale.Scale(180.0f), OverlayUiScale.Scale(34.0f));
-            using var cancelSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
-            if (ImGui.Button(T("仍然保存", "Save Anyway"), saveSize))
-            {
-                PersistBinding(conflict.Request, conflict.Value);
-                lock (_bindingCaptureSync)
-                {
-                    if (_bindingConflictPending == conflict)
-                        _bindingConflictPending = null;
-                }
-            }
-            ImGui.SameLine(0.0f, OverlayUiScale.Scale(10.0f));
-            if (ImGui.Button($"{T("取消", "Cancel")}##Conflict", cancelSize))
-            {
-                lock (_bindingCaptureSync)
-                {
-                    if (_bindingConflictPending == conflict)
-                        _bindingConflictPending = null;
-                }
-            }
             return;
         }
 
-        if (activeCapture is not { } capture)
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(10.0f));
+        var deviceLabel = resolvedRequest.Device == BindingCaptureDevice.Keyboard
+            ? T("键盘", "Keyboard")
+            : T("手柄", "Controller");
+        ImGui.TextUnformatted($"{deviceLabel}：{feedback}", null!);
+        if (activeCapture is null)
             return;
-        ImGui.TextWrapped(
-            T(
-                $"正在设置“{DescribeTarget(capture)}”。{captureStatusText} Esc 取消，Backspace 清除。",
-                $"Setting “{DescribeTarget(capture)}”. {captureStatusText} Esc cancels; Backspace clears."));
-        using var cancelButtonSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
-        if (ImGui.Button(T("取消设置", "Cancel Binding"), cancelButtonSize))
+
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(8.0f));
+        using var cancelSize = CreateVector2(OverlayUiScale.Scale(72.0f), OverlayUiScale.Scale(34.0f));
+        if (ImGui.Button(
+                $"{T("取消", "Cancel")}##CancelBinding{resolvedRequest.Target}{resolvedRequest.Device}{resolvedRequest.QuickActionId}{resolvedRequest.PlayerNumber}",
+                cancelSize))
+        {
             CancelBindingCapture();
+        }
     }
 
     internal void BeginBindingCapture(BindingCaptureRequest request)
     {
         lock (_bindingCaptureSync)
         {
-            _bindingConflictPending = null;
+            _bindingResultRequest = null;
+            _bindingResultText = null;
             _bindingCapture = request;
             _keyboardCaptureCandidate = default;
-            _controllerCaptureCandidate = ControllerButtons.None;
+            _controllerCaptureCandidate = default;
             _captureWaitingForRelease = request.Device == BindingCaptureDevice.Controller &&
-                                        Volatile.Read(ref _latestControllerButtonsMask) != 0;
+                                        (Volatile.Read(ref _latestControllerButtonsMask) != 0 ||
+                                         Volatile.Read(ref _latestExtendedControllerButtonsMask) != 0);
             _captureStatusText = _captureWaitingForRelease
                 ? T("请先松开所有按键。", "Release all buttons first.")
                 : request.Device == BindingCaptureDevice.Keyboard
-                    ? T("请按下键盘按键，松开后确认。", "Press a keyboard key, then release to confirm.")
-                    : T("请按下一个或两个手柄按键，松开后确认。", "Press one or two controller buttons, then release to confirm.");
+                    ? T("请按键。", "Press a key.")
+                    : GetControllerCapturePrompt();
         }
         ResetManagedControllerHotkeys();
         _forceReleaseVoiceInputs();
@@ -1422,7 +1875,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             _bindingCapture = null;
             _keyboardCaptureCandidate = default;
-            _controllerCaptureCandidate = ControllerButtons.None;
+            _controllerCaptureCandidate = default;
             _captureWaitingForRelease = false;
             _captureStatusText = null;
         }
@@ -1449,79 +1902,134 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     return;
                 }
             }
-            var conflict = FindBindingConflict(request, value);
+            var conflicts = FindBindingConflicts(request, value);
+            var conflictDescription = string.Join(
+                "、",
+                conflicts
+                    .Select(DescribeTarget)
+                    .Distinct(StringComparer.Ordinal));
             CancelBindingCapture();
-            if (conflict is not null)
+            PersistBindingReplacingConflicts(request, value, conflicts);
+            _bindingResultRequest = request;
+            _bindingResultText = conflicts.Length == 0
+                ? T("已保存。", "Saved.")
+                : T(
+                    $"冲突：已清除 {conflictDescription}。",
+                    $"Conflict cleared: {conflictDescription}.");
+        }
+    }
+
+    internal bool ClearBinding(BindingCaptureRequest request)
+    {
+        lock (_bindingCaptureSync)
+        {
+            var configuration = _getConfiguration();
+            if (request.Target == BindingTarget.SettingsMenu)
             {
-                _bindingConflictPending = new PendingBindingConflict(request, value, conflict);
-                return;
+                var alternate = request.Device == BindingCaptureDevice.Keyboard
+                    ? configuration.SettingsMenuControllerBinding
+                    : configuration.SettingsMenuKeyboardBinding;
+                if (string.IsNullOrWhiteSpace(alternate))
+                {
+                    _bindingResultRequest = request;
+                    _bindingResultText = T(
+                        "请先设置另一种菜单按键。",
+                        "Set the other Settings binding first.");
+                    return false;
+                }
             }
-            PersistBinding(request, value);
+
+            if (_bindingCapture == request)
+                CancelBindingCapture();
+            PersistBinding(request, string.Empty);
+            _bindingResultRequest = request;
+            _bindingResultText = T("已清除。", "Cleared.");
+            return true;
         }
     }
 
     private void PersistBinding(BindingCaptureRequest request, string value)
     {
+        UpdateConfigurationSafely(configuration => SetBindingValue(configuration, request, value));
+    }
+
+    private void PersistBindingReplacingConflicts(
+        BindingCaptureRequest request,
+        string value,
+        IReadOnlyList<BindingCaptureRequest> conflicts)
+    {
         UpdateConfigurationSafely(configuration =>
         {
-            switch (request.Target)
-            {
-                case BindingTarget.SettingsMenu when request.Device == BindingCaptureDevice.Keyboard:
-                    configuration.SettingsMenuKeyboardBinding = value;
-                    break;
-                case BindingTarget.SettingsMenu:
-                    configuration.SettingsMenuControllerBinding = value;
-                    break;
-                case BindingTarget.OpenChat when request.Device == BindingCaptureDevice.Keyboard:
-                    configuration.OpenChatKeyboardBinding = value;
-                    break;
-                case BindingTarget.OpenChat:
-                    configuration.OpenChatControllerBinding = value;
-                    break;
-                case BindingTarget.PushToTalk when request.Device == BindingCaptureDevice.Keyboard:
-                    configuration.PushToTalkKeyboardBinding = value;
-                    break;
-                case BindingTarget.PushToTalk:
-                    configuration.PushToTalkControllerBinding = value;
-                    break;
-                case BindingTarget.QuickActionsPanel when request.Device == BindingCaptureDevice.Keyboard:
-                    configuration.QuickActionsKeyboardBinding = value;
-                    break;
-                case BindingTarget.QuickActionsPanel:
-                    configuration.QuickActionsControllerBinding = value;
-                    break;
-                case BindingTarget.GlobalMute when request.Device == BindingCaptureDevice.Keyboard:
-                    configuration.GlobalMuteKeyboardBinding = value;
-                    break;
-                case BindingTarget.GlobalMute:
-                    configuration.GlobalMuteControllerBinding = value;
-                    break;
-                case BindingTarget.QuickAction:
-                    var action = configuration.QuickActions.FirstOrDefault(candidate =>
-                        string.Equals(candidate.Id, request.QuickActionId, StringComparison.Ordinal));
-                    if (action is null)
-                        return;
-                    if (request.Device == BindingCaptureDevice.Keyboard)
-                        action.KeyboardBinding = value;
-                    else
-                        action.ControllerBinding = value;
-                    break;
-            }
+            foreach (var conflict in conflicts)
+                SetBindingValue(configuration, conflict, string.Empty);
+            SetBindingValue(configuration, request, value);
         });
     }
 
-    private string? FindBindingConflict(BindingCaptureRequest request, string value)
+    private static void SetBindingValue(
+        Config configuration,
+        BindingCaptureRequest request,
+        string value)
+    {
+        switch (request.Target)
+        {
+            case BindingTarget.SettingsMenu when request.Device == BindingCaptureDevice.Keyboard:
+                configuration.SettingsMenuKeyboardBinding = value;
+                break;
+            case BindingTarget.SettingsMenu:
+                configuration.SettingsMenuControllerBinding = value;
+                break;
+            case BindingTarget.OpenChat when request.Device == BindingCaptureDevice.Keyboard:
+                configuration.OpenChatKeyboardBinding = value;
+                break;
+            case BindingTarget.OpenChat:
+                configuration.OpenChatControllerBinding = value;
+                break;
+            case BindingTarget.PushToTalk when request.Device == BindingCaptureDevice.Keyboard:
+                configuration.PushToTalkKeyboardBinding = value;
+                break;
+            case BindingTarget.PushToTalk:
+                configuration.PushToTalkControllerBinding = value;
+                break;
+            case BindingTarget.QuickActionsPanel when request.Device == BindingCaptureDevice.Keyboard:
+                configuration.QuickActionsKeyboardBinding = value;
+                break;
+            case BindingTarget.QuickActionsPanel:
+                configuration.QuickActionsControllerBinding = value;
+                break;
+            case BindingTarget.GlobalMute when request.Device == BindingCaptureDevice.Keyboard:
+                configuration.GlobalMuteKeyboardBinding = value;
+                break;
+            case BindingTarget.GlobalMute:
+                configuration.GlobalMuteControllerBinding = value;
+                break;
+            case BindingTarget.RemotePlayerChatMute when request.Device == BindingCaptureDevice.Keyboard:
+                SetRemotePlayerChatMuteKeyboardBinding(configuration, request.PlayerNumber, value);
+                break;
+            case BindingTarget.RemotePlayerChatMute:
+                SetRemotePlayerChatMuteControllerBinding(configuration, request.PlayerNumber, value);
+                break;
+            case BindingTarget.QuickAction when request.Device == BindingCaptureDevice.Keyboard:
+                var action = configuration.QuickActions.FirstOrDefault(candidate =>
+                    string.Equals(candidate.Id, request.QuickActionId, StringComparison.Ordinal));
+                if (action is null)
+                    return;
+                action.KeyboardBinding = value;
+                break;
+        }
+    }
+
+    private BindingCaptureRequest[] FindBindingConflicts(BindingCaptureRequest request, string value)
     {
         if (string.IsNullOrWhiteSpace(value))
-            return null;
-        var matches = EnumerateBindings(_getConfiguration())
+            return [];
+        return EnumerateBindings(_getConfiguration())
             .Where(item => item.Request.Device == request.Device &&
                            item.Request != request &&
                            string.Equals(item.Value, value, StringComparison.OrdinalIgnoreCase))
-            .Select(item => DescribeTarget(item.Request))
-            .Distinct(StringComparer.Ordinal)
+            .Select(item => item.Request)
+            .Distinct()
             .ToArray();
-        return matches.Length == 0 ? null : string.Join("、", matches);
     }
 
     private static IEnumerable<(BindingCaptureRequest Request, string Value)> EnumerateBindings(
@@ -1537,11 +2045,17 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         yield return (new(BindingTarget.QuickActionsPanel, BindingCaptureDevice.Controller, null), configuration.QuickActionsControllerBinding);
         yield return (new(BindingTarget.GlobalMute, BindingCaptureDevice.Keyboard, null), configuration.GlobalMuteKeyboardBinding);
         yield return (new(BindingTarget.GlobalMute, BindingCaptureDevice.Controller, null), configuration.GlobalMuteControllerBinding);
-        foreach (var action in configuration.QuickActions ?? [])
+        for (var remotePlayerNumber = 1; remotePlayerNumber <= 3; remotePlayerNumber++)
         {
-            yield return (new(BindingTarget.QuickAction, BindingCaptureDevice.Keyboard, action.Id), action.KeyboardBinding);
-            yield return (new(BindingTarget.QuickAction, BindingCaptureDevice.Controller, action.Id), action.ControllerBinding);
+            yield return (
+                new(BindingTarget.RemotePlayerChatMute, BindingCaptureDevice.Keyboard, null, remotePlayerNumber),
+                GetRemotePlayerChatMuteKeyboardBinding(configuration, remotePlayerNumber));
+            yield return (
+                new(BindingTarget.RemotePlayerChatMute, BindingCaptureDevice.Controller, null, remotePlayerNumber),
+                GetRemotePlayerChatMuteControllerBinding(configuration, remotePlayerNumber));
         }
+        foreach (var action in configuration.QuickActions ?? [])
+            yield return (new(BindingTarget.QuickAction, BindingCaptureDevice.Keyboard, action.Id), action.KeyboardBinding);
     }
 
     private static string GetBindingValue(Config configuration, BindingCaptureRequest request)
@@ -1553,13 +2067,21 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private string DescribeBinding(string value) =>
         string.IsNullOrWhiteSpace(value) ? T("未绑定", "Unbound") : value;
 
+    private string DescribeControllerBinding(string value) =>
+        ControllerBinding.ContainsReservedDPadDown(value)
+            ? T("不可用：DPadDown 为游戏保留键", "Unavailable: DPadDown is reserved by the game")
+            : DescribeBinding(value);
+
     private string DescribeTarget(BindingCaptureRequest request) => request.Target switch
     {
         BindingTarget.SettingsMenu => T("设置菜单", "Settings Menu"),
         BindingTarget.OpenChat => T("打开聊天", "Open Chat"),
         BindingTarget.PushToTalk => T("按住说话", "Push-to-Talk"),
         BindingTarget.QuickActionsPanel => T("快捷动作面板", "Quick Actions Panel"),
-        BindingTarget.GlobalMute => T("全局禁言", "Global Mute"),
+        BindingTarget.GlobalMute => T("全局聊天禁言", "Block All Chat"),
+        BindingTarget.RemotePlayerChatMute => T(
+            $"玩家 {request.PlayerNumber} 聊天禁言",
+            $"Player {request.PlayerNumber} Chat Mute"),
         _ => T("快捷动作", "Quick Action"),
     };
 
@@ -1965,6 +2487,24 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
     }
 
+    internal int DrainQuickActionRequests()
+    {
+        var count = 0;
+        while (_pendingQuickActions.TryDequeue(out var actionId))
+        {
+            SendQuickAction(actionId);
+            count++;
+        }
+        return count;
+    }
+
+    private void ClearPendingQuickActions()
+    {
+        while (_pendingQuickActions.TryDequeue(out _))
+        {
+        }
+    }
+
     private string DescribeQuickActionPayload(QuickActionConfiguration action)
     {
         if (action.Kind == QuickActionKind.CustomText)
@@ -2052,7 +2592,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         LocalMicrophoneMonitorState.SignalDetected => T("已检测到麦克风输入。", "Microphone input detected."),
         LocalMicrophoneMonitorState.Faulted => T("测试失败，请重新选择设备。", "Test failed. Select another device."),
         LocalMicrophoneMonitorState.Suspended => T("Mod 已暂停，测试不可用。", "The mod is suspended; testing is unavailable."),
-        _ => T("点击“测试麦克风”查看输入电平。", "Select “Test Microphone” to view the input level."),
+        _ => T("点击测试麦克风按钮查看输入电平。", "Click Test Microphone to view the input level."),
     };
 
     private static uint PackColor(byte red, byte green, byte blue, float alpha)
@@ -2071,7 +2611,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ImGui.Separator();
     }
 
-    private void DrawHistory(bool composerOpen, string? imeCandidateText)
+    private void DrawHistory(Config configuration, bool composerOpen, string? imeCandidateText)
     {
         var candidateHeight = MeasureWrappedTextItemHeight(imeCandidateText);
         var childHeight = CalculateHistoryChildHeight(composerOpen, candidateHeight);
@@ -2088,11 +2628,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
             var wasNearBottom = IsHistoryNearBottom(ImGui.GetScrollY(), ImGui.GetScrollMaxY());
             var snapshot = _session.History.Snapshot();
+            var hostPlayerNumber = _getHostPlayerNumber();
             foreach (var message in snapshot)
-            {
-                var prefix = $"[{message.Timestamp:HH:mm}] {message.Sender}: ";
-                ImGui.TextWrapped(prefix + message.Text);
-            }
+                DrawHistoryMessage(configuration, message, hostPlayerNumber);
 
             if (snapshot.Count > 0 && snapshot[^1].Sequence != _lastRenderedSequence)
             {
@@ -2106,6 +2644,111 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             ImGui.EndChild();
         }
+    }
+
+    private void DrawHistoryMessage(Config configuration, ChatMessage message, int? hostPlayerNumber)
+    {
+        var baseScale = Math.Clamp((float)configuration.ChatFontSize / 18.0f, 0.67f, 1.67f);
+        if (configuration.ShowTimestamps)
+        {
+            ImGui.TextUnformatted($"[{message.Timestamp.ToLocalTime():HH:mm}]", null!);
+            ImGui.SameLine(0.0f, OverlayUiScale.Scale(4.0f));
+        }
+
+        var playerNumber = message.PlayerNumber > 0 ? message.PlayerNumber : 0;
+        var color = GetPlayerNameColor(configuration, playerNumber);
+        var name = FormatHistorySenderLabel(
+            message.Sender,
+            playerNumber > 0 && playerNumber == hostPlayerNumber,
+            configuration.InterfaceLanguage);
+        var nameScale = playerNumber > 0
+            ? Math.Clamp((float)configuration.PlayerNameFontSize / 18.0f, 0.67f, 1.67f)
+            : baseScale;
+        ImGui.SetWindowFontScale(nameScale);
+        using var namePosition = CreateVector2(0.0f, 0.0f);
+        ImGui.GetCursorScreenPos(namePosition);
+        ImGui.PushStyleColorU32((int)ImGuiCol.Text, color);
+        try
+        {
+            ImGui.TextUnformatted(name, null!);
+        }
+        finally
+        {
+            ImGui.PopStyleColor(1);
+        }
+
+        var weight = playerNumber > 0
+            ? Math.Clamp(configuration.PlayerNameWeight, 1, 3)
+            : 1;
+        var drawList = ImGui.GetWindowDrawList();
+        for (var pass = 1; pass < weight; pass++)
+        {
+            using var extraPosition = CreateVector2(
+                namePosition.X + OverlayUiScale.Scale(pass * 0.55f),
+                namePosition.Y);
+            ImGui.ImDrawListAddTextVec2(drawList, extraPosition, color, name, null!);
+        }
+
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(5.0f));
+        ImGui.SetWindowFontScale(baseScale);
+        ImGui.TextWrapped(message.Text);
+        DrawMessageContextMenu(message, playerNumber);
+    }
+
+    internal static string FormatHistorySenderLabel(
+        string sender,
+        bool isHost,
+        UiLanguage language) =>
+        isHost
+            ? $"[{UiLocalization.Select(language, "房主", "Host")}] {sender}:"
+            : $"{sender}:";
+
+    private void DrawMessageContextMenu(ChatMessage message, int playerNumber)
+    {
+        if (!ImGui.BeginPopupContextItem($"##GBFRChatMessage{message.Sequence}", 1))
+            return;
+
+        try
+        {
+            if (ImGui.MenuItemBool(T("复制消息", "Copy Message"), string.Empty, false, true))
+                ImGui.SetClipboardText(message.Text);
+            if (ImGui.MenuItemBool(T("复制玩家名", "Copy Player Name"), string.Empty, false, true))
+                ImGui.SetClipboardText(message.Sender);
+            if (playerNumber is >= 2 and <= 4)
+            {
+                ImGui.Separator();
+                var muted = _chatBlacklist.IsMuted(playerNumber);
+                if (ImGui.MenuItemBool(
+                        muted
+                            ? T("解除聊天禁言", "Unblock Chat")
+                            : T("聊天禁言", "Block Chat"),
+                        string.Empty,
+                        muted,
+                        true))
+                {
+                    TogglePlayerMute(playerNumber);
+                }
+            }
+        }
+        finally
+        {
+            ImGui.EndPopup();
+        }
+    }
+
+    private static uint GetPlayerNameColor(Config configuration, int playerNumber)
+    {
+        var configured = playerNumber switch
+        {
+            1 => configuration.Player1NameColor,
+            2 => configuration.Player2NameColor,
+            3 => configuration.Player3NameColor,
+            4 => configuration.Player4NameColor,
+            _ => "#D8D8D8",
+        };
+        return ChatColor.TryParseImGuiColor(configured, out var color)
+            ? color
+            : 0xFFD8D8D8;
     }
 
     internal static bool IsHistoryNearBottom(float scrollY, float scrollMaxY) =>
@@ -2167,7 +2810,23 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 nint.Zero);
         }
 
-        _session.Composer.SetDraft(ReadInputBuffer());
+        var currentDraft = ReadInputBuffer();
+        if (ImGui.IsItemActive() && ImGui.IsItemHovered(0))
+        {
+            var wheel = ImGui.GetIO().MouseWheel;
+            var recalled = wheel > 0.0f
+                ? _session.InputHistory.MovePrevious(currentDraft)
+                : wheel < 0.0f
+                    ? _session.InputHistory.MoveNext(currentDraft)
+                    : null;
+            if (recalled is not null)
+            {
+                WriteUtf8Buffer(_inputBuffer, recalled);
+                currentDraft = recalled;
+            }
+        }
+
+        _session.Composer.SetDraft(currentDraft);
         if (submitRequested)
         {
             var result = _session.SendDraft();
@@ -2190,7 +2849,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ImGui.TextWrapped(_statusText);
     }
 
-    public OverlayWindowMessageResult ObserveWindowMessage(
+    public unsafe OverlayWindowMessageResult ObserveWindowMessage(
         nint windowHandle,
         uint message,
         nint wParam,
@@ -2212,6 +2871,16 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 lParam);
             if (message == Win32ImeCompatibility.WmImeSetContext && wParam != nint.Zero)
                 LogImeCandidateUi(lParam, forwardedLParam);
+
+            // The peer returns a completed DefWindowProc result below, so the Broker will not
+            // invoke Dear ImGui's backend for this message. Feed the IME lifecycle into ImGui
+            // here first; otherwise system IMEs can switch layouts but never establish a live
+            // composition on Relink's ANSI game window.
+            ImGui.ImplWin32_WndProcHandler(
+                (void*)windowHandle,
+                message,
+                wParam,
+                forwardedLParam);
             return OverlayWindowMessageResult.HandledWith(
                 Win32ImeCompatibility.CallDefaultWindowProc(
                     windowHandle,
@@ -2235,6 +2904,13 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             return true;
 
         var configuration = _getConfiguration();
+        var pushToTalkBinding = configuration.PushToTalkKeyboardBinding;
+        if (isUp && MatchesWindowBindingPrimary(pushToTalkBinding, virtualKey))
+        {
+            Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
+            ObserveVoicePushToTalkKey(false, WindowHotkeySource);
+            return true;
+        }
         var emergencySettings = HotkeyConfigurationSnapshot.EmergencySettingsKeyboard.Format();
         if ((isDown &&
              (MatchesWindowBinding(configuration.SettingsMenuKeyboardBinding, virtualKey) ||
@@ -2247,10 +2923,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             return true;
         }
 
-        // Settings owns the complete keyboard while it is open. The settings
-        // binding above remains available as the intentional close/emergency key.
+        // Let ImGui receive normal editing keys while settings are open, but
+        // keep configured mod hotkeys from firing behind the settings window.
         if (Volatile.Read(ref _settingsMenuOpen) != 0)
-            return true;
+            return MatchesConfiguredWindowHotkey(configuration, virtualKey, isDown);
 
         // The quick-action panel captures keyboard input so Escape and its own
         // toggle never leak into the game or trigger an action behind the panel.
@@ -2267,6 +2943,26 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
 
         var onlineRoomActive = IsOnlineRoomActive();
+        if (isDown &&
+            configuration.EnableVoiceInput &&
+            onlineRoomActive &&
+            MatchesWindowBinding(pushToTalkBinding, virtualKey))
+        {
+            var firstPhysicalDown = Interlocked.Exchange(
+                ref _windowVoicePushToTalkPhysicalDown,
+                1) == 0;
+            if (firstPhysicalDown && _canUseVoicePushToTalk())
+            {
+                ObserveVoicePushToTalkKey(true, WindowHotkeySource);
+            }
+            else if (firstPhysicalDown)
+            {
+                _statusText = T(
+                    "[语音] 尚未就绪，正在等待另一位安装相同版本模组的队友。",
+                    "[Voice] Not ready; waiting for another player with the same mod version.");
+            }
+            return true;
+        }
         if (configuration.EnableOverlay && onlineRoomActive)
         {
             var composerOpen = _session.Composer.IsOpen;
@@ -2292,6 +2988,22 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             ObserveGlobalMuteKey(isDown, WindowHotkeySource);
             return true;
+        }
+
+        for (var remotePlayerNumber = 1; remotePlayerNumber <= 3; remotePlayerNumber++)
+        {
+            var playerMuteBinding = GetRemotePlayerChatMuteKeyboardBinding(
+                configuration,
+                remotePlayerNumber);
+            if ((isDown && onlineRoomActive && MatchesWindowBinding(playerMuteBinding, virtualKey)) ||
+                (isUp && MatchesWindowBindingPrimary(playerMuteBinding, virtualKey)))
+            {
+                ObserveRemotePlayerChatMuteKey(
+                    remotePlayerNumber,
+                    isDown,
+                    WindowHotkeySource);
+                return true;
+            }
         }
 
         if (!configuration.EnableOverlay)
@@ -2330,6 +3042,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (!deactivated)
             return;
 
+        Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
+        ObserveVoicePushToTalkKey(false, WindowHotkeySource);
+
         lock (_bindingCaptureSync)
         {
             if (_bindingCapture is not { Device: BindingCaptureDevice.Keyboard })
@@ -2338,8 +3053,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             _keyboardCaptureCandidate = default;
             _captureWaitingForRelease = false;
             _captureStatusText = T(
-                "窗口失去焦点，请重新按键。",
-                "The window lost focus. Press the binding again.");
+                "窗口失焦，请重试。",
+                "Focus lost; try again.");
         }
     }
 
@@ -2374,8 +3089,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     virtualKey,
                     ReadWindowModifiers());
                 _captureStatusText = T(
-                    $"已捕获 {_keyboardCaptureCandidate.Format()}，松开确认。",
-                    $"Captured {_keyboardCaptureCandidate.Format()}. Release to confirm.");
+                    $"{_keyboardCaptureCandidate.Format()}，松开确认。",
+                    $"{_keyboardCaptureCandidate.Format()}; release to confirm.");
                 return true;
             }
             if (isUp &&
@@ -2411,6 +3126,36 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         binding.IsBound &&
         binding.VirtualKey == virtualKey;
 
+    private static bool MatchesConfiguredWindowHotkey(
+        Config configuration,
+        ushort virtualKey,
+        bool isDown)
+    {
+        bool Matches(string? value) => isDown
+            ? MatchesWindowBinding(value, virtualKey)
+            : MatchesWindowBindingPrimary(value, virtualKey);
+
+        if (Matches(configuration.PushToTalkKeyboardBinding) ||
+            Matches(configuration.OpenChatKeyboardBinding) ||
+            Matches(configuration.SettingsMenuKeyboardBinding) ||
+            Matches(configuration.QuickActionsKeyboardBinding) ||
+            Matches(configuration.GlobalMuteKeyboardBinding) ||
+            Matches(configuration.RemotePlayer1ChatMuteKeyboardBinding) ||
+            Matches(configuration.RemotePlayer2ChatMuteKeyboardBinding) ||
+            Matches(configuration.RemotePlayer3ChatMuteKeyboardBinding))
+        {
+            return true;
+        }
+
+        foreach (var action in configuration.QuickActions ?? [])
+        {
+            if (action.Enabled && action.IsConfigured && Matches(action.KeyboardBinding))
+                return true;
+        }
+
+        return false;
+    }
+
     private static KeyboardModifiers ReadWindowModifiers()
     {
         var modifiers = KeyboardModifiers.None;
@@ -2427,20 +3172,30 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         VirtualKeyShift or VirtualKeyControl or VirtualKeyAlt or
         0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5;
 
-    private bool IsCapturingTextInput() =>
-        _getConfiguration().EnableOverlay &&
-        IsOnlineRoomActive() &&
-        Volatile.Read(ref _captureKeyboard) != 0 &&
-        _session.Composer.IsOpen;
+    internal static bool ShouldCaptureImeTextInput(
+        bool settingsMenuOpen,
+        bool overlayEnabled,
+        bool onlineRoomActive,
+        bool captureKeyboard,
+        bool composerOpen) =>
+        settingsMenuOpen ||
+        (overlayEnabled && onlineRoomActive && captureKeyboard && composerOpen);
+
+    private bool IsImeTextContextActive() => ShouldCaptureImeTextInput(
+        Volatile.Read(ref _settingsMenuOpen) != 0,
+        _getConfiguration().EnableOverlay,
+        IsOnlineRoomActive(),
+        Volatile.Read(ref _captureKeyboard) != 0,
+        _session.Composer.IsOpen);
 
     private bool ShouldIgnoreUnactivateBeforeBackend(uint message, nint wParam) =>
-        IsCapturingTextInput() &&
+        IsImeTextContextActive() &&
         (message == WmKillFocus ||
          ((message is WmActivate or WmActivateApp) && wParam == nint.Zero));
 
     private bool TryHandleImeCharacter(nint windowHandle, uint message, nint wParam)
     {
-        if (!IsCapturingTextInput())
+        if (!IsImeTextContextActive())
         {
             Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
             return false;
@@ -2507,7 +3262,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     private bool ShouldRouteImeUiToDefault(uint message)
     {
-        if (!IsCapturingTextInput() || !Win32ImeCompatibility.IsImeUiMessage(message))
+        if (!IsImeTextContextActive() || !Win32ImeCompatibility.IsImeUiMessage(message))
             return false;
 
         if (message == Win32ImeCompatibility.WmImeEndComposition)
@@ -2718,7 +3473,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _editedChatRect = null;
         CancelBindingCapture();
         lock (_bindingCaptureSync)
-            _bindingConflictPending = null;
+        {
+            _bindingResultRequest = null;
+            _bindingResultText = null;
+        }
         LogSafely("Settings closed; held DirectInput keys and mouse buttons will drain before release.");
     }
 
@@ -2745,7 +3503,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             }
             else if (Volatile.Read(ref _captureKeyboard) != 0)
             {
-                devices = OverlayInputDevices.Keyboard | OverlayInputDevices.Text;
+                devices = OverlayInputDevices.Keyboard |
+                          OverlayInputDevices.Mouse |
+                          OverlayInputDevices.Text;
             }
         }
         _registration?.SetInputCapture(devices);
@@ -2792,6 +3552,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Interlocked.Exchange(ref _quickActionsPanelOpen, 0);
         Interlocked.Exchange(ref _quickActionsToggleRequested, 0);
         Interlocked.Exchange(ref _quickActionsToggleKeyDown, 0);
+        ClearPendingQuickActions();
         _focusInputNextFrame = false;
         _statusText = null;
         UpdateInputCapture();
@@ -2837,6 +3598,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Suspend();
         Volatile.Write(ref _initialized, false);
         Interlocked.Exchange(ref _registration, null)?.Dispose();
+        _flydigiControllerInputPoller.Dispose();
     }
 
     private void LogImeCompatibility(nint windowHandle, uint codePage)
@@ -2910,6 +3672,7 @@ internal enum BindingTarget
     PushToTalk,
     QuickActionsPanel,
     GlobalMute,
+    RemotePlayerChatMute,
     QuickAction,
 }
 
@@ -2924,8 +3687,3 @@ internal readonly record struct BindingCaptureRequest(
     BindingCaptureDevice Device,
     string? QuickActionId,
     int PlayerNumber = 0);
-
-internal readonly record struct PendingBindingConflict(
-    BindingCaptureRequest Request,
-    string Value,
-    string Description);

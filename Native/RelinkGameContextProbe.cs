@@ -3,7 +3,7 @@ using System.Diagnostics;
 namespace GBFR.ChatOverlay.Native;
 
 /// <summary>
-/// Resolves the verified Relink 2.0.2 native chat manager used as the first
+/// Resolves the verified Relink 2.0.3 native chat manager used as the first
 /// argument of the send bridge. Online-room UI lifetime is tracked separately
 /// from PlayFab Party state changes.
 /// </summary>

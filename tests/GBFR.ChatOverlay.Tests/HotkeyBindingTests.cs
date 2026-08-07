@@ -13,6 +13,7 @@ public sealed class HotkeyBindingTests
     [InlineData("Shift+Alt+Y", "Shift+Alt+Y")]
     [InlineData("PageDown", "PageDown")]
     [InlineData("VK_BA", "VK_BA")]
+    [InlineData("F13", "F13")]
     public void KeyboardBinding_ParsesAndFormatsCanonicalText(string input, string expected)
     {
         Assert.True(KeyboardBinding.TryParse(input, out var binding));
@@ -43,6 +44,8 @@ public sealed class HotkeyBindingTests
     [InlineData(0x15, KeyboardModifiers.None, "Y")]
     [InlineData(0x15, KeyboardModifiers.Control | KeyboardModifiers.Shift, "Ctrl+Shift+Y")]
     [InlineData(0xC8, KeyboardModifiers.None, "Up")]
+    [InlineData(0x64, KeyboardModifiers.None, "F13")]
+    [InlineData(0x6C, KeyboardModifiers.None, "F21")]
     public void KeyboardBinding_ConvertsDirectInputScanCodes(
         byte scanCode,
         KeyboardModifiers modifiers,
@@ -58,6 +61,9 @@ public sealed class HotkeyBindingTests
     [InlineData("A", "A")]
     [InlineData("lb+dpad-up", "LB+DPadUp")]
     [InlineData("RightBumper+Y", "RB+Y")]
+    [InlineData("m4", "M4")]
+    [InlineData("RM+Z", "Z+RM")]
+    [InlineData("LeftMiddle+A", "A+LM")]
     public void ControllerBinding_ParsesAtMostTwoButtons(string input, string expected)
     {
         Assert.True(ControllerBinding.TryParse(input, out var binding));
@@ -68,6 +74,28 @@ public sealed class HotkeyBindingTests
     public void ControllerBinding_RejectsThreeButtonChord()
     {
         Assert.False(ControllerBinding.TryParse("LB+RB+Y", out _));
+    }
+
+    [Theory]
+    [InlineData("DPadDown")]
+    [InlineData("LB+DPadDown")]
+    public void ControllerBinding_RejectsGameReservedDPadDown(string input)
+    {
+        Assert.False(ControllerBinding.TryParse(input, out _));
+        Assert.True(ControllerBinding.ContainsReservedDPadDown(input));
+    }
+
+    [Fact]
+    public void ControllerBinding_MatchesStandardAndFlydigiButtonsTogether()
+    {
+        Assert.True(ControllerBinding.TryParse("LB+M2", out var binding));
+
+        Assert.True(binding.IsPressed(
+            ControllerButtons.LeftBumper,
+            ExtendedControllerButtons.M2));
+        Assert.False(binding.IsPressed(
+            ControllerButtons.LeftBumper,
+            ExtendedControllerButtons.None));
     }
 
     [Fact]
@@ -103,7 +131,7 @@ public sealed class HotkeyBindingTests
 
         Assert.Equal(6, snapshot.NativeBindings.Length);
         Assert.Single(snapshot.QuickActions);
-        Assert.Equal("LB+Y", snapshot.QuickActions[0].Controller.Format());
+        Assert.Equal("Alt+1", snapshot.QuickActions[0].Keyboard.Format());
         Assert.Equal("M", snapshot.GlobalMuteKeyboard.Format());
         Assert.Equal("LB+X", snapshot.GlobalMuteController.Format());
         Assert.Contains(

@@ -72,10 +72,62 @@ public class Config : Configurable<Config>
     public double BackgroundOpacity { get; set; } = 0.55;
 
     [Category("00 通用设置 / General")]
+    [DisplayName("字体大小 / Font Size")]
+    [Description("聊天消息的字体大小。 / Chat message font size.")]
+    [DefaultValue(18.0)]
+    [SliderControlParams(minimum: 12.0, maximum: 30.0)]
+    public double ChatFontSize { get; set; } = 18.0;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("显示时间戳 / Show Timestamps")]
+    [Description("在消息前显示小时和分钟。 / Show hours and minutes before messages.")]
+    [DefaultValue(false)]
+    public bool ShowTimestamps { get; set; }
+
+    [Category("00 通用设置 / General")]
     [DisplayName("聊天记录上限 / Chat History Limit")]
     [Description("最多保留的聊天消息数量。 / Maximum number of chat messages kept.")]
     [DefaultValue(200)]
+    [SliderControlParams(minimum: 10.0, maximum: 5000.0)]
     public int HistoryCapacity { get; set; } = 200;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家名字大小 / Player Name Size")]
+    [Description("玩家名字的字体大小。 / Player name font size.")]
+    [DefaultValue(18.0)]
+    [SliderControlParams(minimum: 12.0, maximum: 30.0)]
+    public double PlayerNameFontSize { get; set; } = 18.0;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家名字粗细 / Player Name Weight")]
+    [Description("玩家名字的加粗程度。 / Player name weight.")]
+    [DefaultValue(2)]
+    [SliderControlParams(minimum: 1.0, maximum: 3.0)]
+    public int PlayerNameWeight { get; set; } = 2;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 1 颜色 / Player 1 Color")]
+    [Description("玩家 1 的名字颜色（#RRGGBB）。 / Player 1 name color (#RRGGBB).")]
+    [DefaultValue("#5ED9FF")]
+    public string Player1NameColor { get; set; } = "#5ED9FF";
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 2 颜色 / Player 2 Color")]
+    [Description("玩家 2 的名字颜色（#RRGGBB）。 / Player 2 name color (#RRGGBB).")]
+    [DefaultValue("#FFAD5E")]
+    public string Player2NameColor { get; set; } = "#FFAD5E";
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 3 颜色 / Player 3 Color")]
+    [Description("玩家 3 的名字颜色（#RRGGBB）。 / Player 3 name color (#RRGGBB).")]
+    [DefaultValue("#71DF8A")]
+    public string Player3NameColor { get; set; } = "#71DF8A";
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 4 颜色 / Player 4 Color")]
+    [Description("玩家 4 的名字颜色（#RRGGBB）。 / Player 4 name color (#RRGGBB).")]
+    [DefaultValue("#C69CFF")]
+    public string Player4NameColor { get; set; } = "#C69CFF";
 
     [Category("00 通用设置 / General")]
     [DisplayName("输入法兼容 / IME Compatibility")]
@@ -96,16 +148,52 @@ public class Config : Configurable<Config>
     public string QuickActionsControllerBinding { get; set; } = string.Empty;
 
     [Category("00 通用设置 / General")]
-    [DisplayName("全局禁言（手柄） / Global Mute (Controller)")]
-    [Description("切换所有玩家的禁言状态。 / Toggle mute for all players.")]
+    [DisplayName("全局聊天禁言（手柄） / Block All Chat (Controller)")]
+    [Description("切换所有玩家的聊天黑名单。 / Toggle the chat blacklist for all players.")]
     [DefaultValue("")]
     public string GlobalMuteControllerBinding { get; set; } = string.Empty;
 
     [Category("00 通用设置 / General")]
-    [DisplayName("全局禁言（键盘） / Global Mute (Keyboard)")]
-    [Description("切换所有玩家的禁言状态。 / Toggle mute for all players.")]
+    [DisplayName("全局聊天禁言（键盘） / Block All Chat (Keyboard)")]
+    [Description("切换所有玩家的聊天黑名单。 / Toggle the chat blacklist for all players.")]
     [DefaultValue("")]
     public string GlobalMuteKeyboardBinding { get; set; } = string.Empty;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 1 聊天禁言（手柄） / Player 1 Chat Mute (Controller)")]
+    [Description("切换远端玩家 1 的聊天黑名单。 / Toggle remote Player 1 in the chat blacklist.")]
+    [DefaultValue("")]
+    public string RemotePlayer1ChatMuteControllerBinding { get; set; } = string.Empty;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 1 聊天禁言（键盘） / Player 1 Chat Mute (Keyboard)")]
+    [Description("切换远端玩家 1 的聊天黑名单。 / Toggle remote Player 1 in the chat blacklist.")]
+    [DefaultValue("")]
+    public string RemotePlayer1ChatMuteKeyboardBinding { get; set; } = string.Empty;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 2 聊天禁言（手柄） / Player 2 Chat Mute (Controller)")]
+    [Description("切换远端玩家 2 的聊天黑名单。 / Toggle remote Player 2 in the chat blacklist.")]
+    [DefaultValue("")]
+    public string RemotePlayer2ChatMuteControllerBinding { get; set; } = string.Empty;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 2 聊天禁言（键盘） / Player 2 Chat Mute (Keyboard)")]
+    [Description("切换远端玩家 2 的聊天黑名单。 / Toggle remote Player 2 in the chat blacklist.")]
+    [DefaultValue("")]
+    public string RemotePlayer2ChatMuteKeyboardBinding { get; set; } = string.Empty;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 3 聊天禁言（手柄） / Player 3 Chat Mute (Controller)")]
+    [Description("切换远端玩家 3 的聊天黑名单。 / Toggle remote Player 3 in the chat blacklist.")]
+    [DefaultValue("")]
+    public string RemotePlayer3ChatMuteControllerBinding { get; set; } = string.Empty;
+
+    [Category("00 通用设置 / General")]
+    [DisplayName("玩家 3 聊天禁言（键盘） / Player 3 Chat Mute (Keyboard)")]
+    [Description("切换远端玩家 3 的聊天黑名单。 / Toggle remote Player 3 in the chat blacklist.")]
+    [DefaultValue("")]
+    public string RemotePlayer3ChatMuteKeyboardBinding { get; set; } = string.Empty;
 
     [Category("03 语音 / Voice")]
     [DisplayName("播放设备 / Playback Device")]

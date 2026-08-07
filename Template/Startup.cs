@@ -100,6 +100,8 @@ public class Startup : IMod, IExports
                     _overlayBrokerHost = new OverlayBrokerHost(
                         election.HostControl!,
                         moduleLog,
+                        getNativeInputCapture:
+                            DirectInputBrokerBridge.Instance.GetEffectiveInputDevices,
                         setNativeCursorRelease: capture =>
                         {
                             var installed = DxgiPresentBridge.SetCursorReleaseActive(capture);
@@ -191,6 +193,8 @@ public class Startup : IMod, IExports
                 var recoveredHost = new OverlayBrokerHost(
                     claimedHost!,
                     moduleLog,
+                    getNativeInputCapture:
+                        DirectInputBrokerBridge.Instance.GetEffectiveInputDevices,
                     setNativeCursorRelease: capture =>
                     {
                         var installed = DxgiPresentBridge.SetCursorReleaseActive(capture);

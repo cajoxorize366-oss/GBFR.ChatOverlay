@@ -13,7 +13,7 @@ internal interface IRelinkPlayerNameNativeApi
 
 /// <summary>
 /// Resolves the opaque sender identifier carried by Relink's chat RPC through the
-/// same four-slot member table used by the verified 2.0.2 executable when it exports
+/// same four-slot member table used by the verified 2.0.3 executable when it exports
 /// <c>member_name</c> to the online UI.
 /// </summary>
 internal sealed class RelinkPlayerNameResolver
@@ -73,8 +73,50 @@ internal sealed class RelinkPlayerNameResolver
         playerName = string.Empty;
         try
         {
-            if (!_native.TryResolveMemberSlot(senderId, out var memberSlot) ||
-                memberSlot is < 0 or >= 4 ||
+            if (!TryResolveMemberSlot(senderId, out var memberSlot))
+                return false;
+            return TryResolveName(memberSlot, senderId, out playerName);
+        }
+        catch (Exception exception)
+        {
+            playerName = string.Empty;
+            LogFailureOnce(
+                senderId,
+                $"the resolver failed closed with {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+    }
+
+    internal bool TryResolveMemberSlot(uint senderId, out int memberSlot)
+    {
+        memberSlot = -1;
+        try
+        {
+            if (!_native.TryResolveMemberSlot(senderId, out memberSlot) || memberSlot is < 0 or >= 4)
+            {
+                memberSlot = -1;
+                LogFailureOnce(senderId, "the member slot was unavailable");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception exception)
+        {
+            memberSlot = -1;
+            LogFailureOnce(
+                senderId,
+                $"the member-slot resolver failed closed with {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+    }
+
+    internal bool TryResolveName(int memberSlot, uint senderId, out string playerName)
+    {
+        playerName = string.Empty;
+        try
+        {
+            if (memberSlot is < 0 or >= 4 ||
                 !_memory.TryReadPointer(_memberManagerSlot, out var memberManager) ||
                 memberManager == nint.Zero)
             {

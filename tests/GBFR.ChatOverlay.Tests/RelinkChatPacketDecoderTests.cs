@@ -7,6 +7,22 @@ namespace GBFR.ChatOverlay.Tests;
 public sealed class RelinkChatPacketDecoderTests
 {
     [Fact]
+    public void TryDecodeOutgoingText_AcceptsStrictUtf8FromTheNativeGameInput()
+    {
+        var encoded = Encoding.UTF8.GetBytes("电脑自带输入法");
+
+        Assert.True(RelinkChatPacketDecoder.TryDecodeOutgoingText(encoded, out var text));
+        Assert.Equal("电脑自带输入法", text);
+    }
+
+    [Fact]
+    public void TryDecodeOutgoingText_RejectsInvalidUtf8AndEmbeddedNul()
+    {
+        Assert.False(RelinkChatPacketDecoder.TryDecodeOutgoingText([0xC3, 0x28], out _));
+        Assert.False(RelinkChatPacketDecoder.TryDecodeOutgoingText("a\0b"u8, out _));
+    }
+
+    [Fact]
     public void TryDecode_ReadsRawUtf8MessageAndSenderLabel()
     {
         var packet = CreatePacket("你好，骑空士", "Djeeta", 0x1234, 7, 9);
@@ -49,6 +65,8 @@ public sealed class RelinkChatPacketDecoderTests
         BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(0x17C, 4), 0x12345678);
 
         Assert.False(RelinkChatPacketDecoder.TryDecode(packet, DateTimeOffset.UtcNow, out _));
+        Assert.True(RelinkChatPacketDecoder.TryReadSenderId(packet, out var senderId));
+        Assert.Equal(1u, senderId);
     }
 
     [Fact]

@@ -50,6 +50,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private readonly HashSet<nint> _permissionedRemoteChatControls = [];
     private readonly Dictionary<nint, string> _lastPeerVoiceDiagnosticFingerprints = [];
     private readonly Dictionary<nint, PeerVoiceDiagnosticEvidence> _peerVoiceDiagnosticEvidence = [];
+    private readonly HashSet<string> _talkingRemoteEntityIds = new(StringComparer.Ordinal);
     private readonly GCHandle _createTokenHandle;
     private readonly GCHandle _inputTokenHandle;
     private readonly GCHandle _outputTokenHandle;
@@ -117,6 +118,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private uint _audioOutputStateErrorDetail;
     private bool _voiceDiagnosticRequested;
     private long _nextVoiceDiagnosticTimestamp;
+    private long _remoteVoiceActivityTimestamp;
     private string? _lastLocalVoiceDiagnosticFingerprint;
     private bool _voiceDiagnosticSnapshotObserved;
     private bool _diagnosticLocalTalkingObserved;
@@ -191,6 +193,20 @@ internal sealed class PartyChatControlCanary : IDisposable
         {
             lock (_stateSync)
                 return IsRemoteVoiceReadyLocked();
+        }
+    }
+
+    internal IReadOnlyCollection<string> GetTalkingRemoteEntityIds()
+    {
+        lock (_stateSync)
+        {
+            if (_talkingRemoteEntityIds.Count == 0 ||
+                Stopwatch.GetTimestamp() - _remoteVoiceActivityTimestamp > Stopwatch.Frequency)
+            {
+                return Array.Empty<string>();
+            }
+
+            return _talkingRemoteEntityIds.ToArray();
         }
     }
 
@@ -387,6 +403,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _microphoneMayBeOpen = false;
                 EnqueueVoiceDiagnosticSummaryLocked("local ChatControl destroyed");
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 _lastPeerVoiceDiagnosticFingerprints.Clear();
                 _peerVoiceDiagnosticEvidence.Clear();
@@ -495,6 +512,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 StopActiveCaptureLocked("Relink network leave");
                 EnqueueVoiceDiagnosticSummaryLocked("Relink network leave");
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 _lastPeerVoiceDiagnosticFingerprints.Clear();
                 _peerVoiceDiagnosticEvidence.Clear();
@@ -683,6 +701,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 if (chatControl == nint.Zero)
                     _inputUnmuted = false;
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 _lastPeerVoiceDiagnosticFingerprints.Clear();
                 _peerVoiceDiagnosticEvidence.Clear();
@@ -727,6 +746,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 StopActiveCaptureLocked("Mod suspension");
                 EnqueueVoiceDiagnosticSummaryLocked("Mod suspension");
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 _lastPeerVoiceDiagnosticFingerprints.Clear();
                 _peerVoiceDiagnosticEvidence.Clear();
@@ -818,6 +838,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 StopActiveCaptureLocked("Mod disposal");
                 EnqueueVoiceDiagnosticSummaryLocked("Mod disposal");
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 _lastPeerVoiceDiagnosticFingerprints.Clear();
                 _peerVoiceDiagnosticEvidence.Clear();
@@ -1127,6 +1148,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             StopActiveCaptureLocked("local ChatControl left network");
             EnqueueVoiceDiagnosticSummaryLocked("local ChatControl left network");
             _remoteChatControls.Clear();
+            _talkingRemoteEntityIds.Clear();
             _permissionedRemoteChatControls.Clear();
             _lastPeerVoiceDiagnosticFingerprints.Clear();
             _peerVoiceDiagnosticEvidence.Clear();
@@ -1154,6 +1176,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 if (_remoteChatControls.Count == 0)
                     EnqueueVoiceDiagnosticSummaryLocked("last remote ChatControl left network");
                 _peerVoiceDiagnosticEvidence.Remove(state.ChatControl);
+                _talkingRemoteEntityIds.Clear();
             }
             EnqueueLogLocked(
                 $"Stage 2 ChatControlLeftNetwork (remote/other): reason={state.Reason}, " +
@@ -1202,6 +1225,7 @@ internal sealed class PartyChatControlCanary : IDisposable
             if (_remoteChatControls.Count == 0)
                 EnqueueVoiceDiagnosticSummaryLocked("last remote ChatControl destroyed");
             _peerVoiceDiagnosticEvidence.Remove(state.ChatControl);
+            _talkingRemoteEntityIds.Clear();
             EnqueueLogLocked(
                 $"Stage 2 ChatControlDestroyed (remote/other): reason={state.Reason}, " +
                 $"chatControl={Hex(state.ChatControl)}.");
@@ -1223,6 +1247,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         StopActiveCaptureLocked("Party network cleanup state");
         EnqueueVoiceDiagnosticSummaryLocked("Party network cleanup state");
         _remoteChatControls.Clear();
+        _talkingRemoteEntityIds.Clear();
         _permissionedRemoteChatControls.Clear();
         _lastPeerVoiceDiagnosticFingerprints.Clear();
         _peerVoiceDiagnosticEvidence.Clear();
@@ -1242,6 +1267,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         StopActiveCaptureLocked("local Party user removed");
         EnqueueVoiceDiagnosticSummaryLocked("local Party user removed");
         _remoteChatControls.Clear();
+        _talkingRemoteEntityIds.Clear();
         _permissionedRemoteChatControls.Clear();
         _lastPeerVoiceDiagnosticFingerprints.Clear();
         _peerVoiceDiagnosticEvidence.Clear();
@@ -1562,6 +1588,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _microphoneMayBeOpen = false;
                 _pushToTalkPressed = false;
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 ResetVoiceDiagnosticEvidenceLocked();
             }
@@ -2274,6 +2301,8 @@ internal sealed class PartyChatControlCanary : IDisposable
             {
                 if (IsWorkCurrentLocked(work))
                 {
+                    _talkingRemoteEntityIds.Clear();
+                    _remoteVoiceActivityTimestamp = Stopwatch.GetTimestamp();
                     EnqueueLogLocked(
                         $"Stage 3 voice diagnostics were inconclusive because the read-only sampler " +
                         $"threw {exception.GetType().Name}: {Sanitize(exception.Message)}. " +
@@ -2286,6 +2315,7 @@ internal sealed class PartyChatControlCanary : IDisposable
     private void ExecuteVoiceDiagnostics(CanaryWorkItem work)
     {
         nint[] remoteChatControls;
+        var talkingRemoteEntityIds = new HashSet<string>(StringComparer.Ordinal);
         bool pushToTalkPressed;
         bool inputUnmuted;
         PartyAudioInputState? inputState;
@@ -2403,6 +2433,13 @@ internal sealed class PartyChatControlCanary : IDisposable
 
         foreach (var remoteChatControl in remoteChatControls)
         {
+            var remoteEntityId = CaptureDiagnostic(
+                "PartyChatControlGetEntityId",
+                () =>
+                {
+                    var result = _api.GetEntityId(remoteChatControl, out var value);
+                    return (result, value ?? string.Empty);
+                });
             var permissions = CaptureDiagnostic(
                 "PartyChatControlGetPermissions",
                 () =>
@@ -2445,6 +2482,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 });
 
             var peerFingerprint =
+                $"entityId={FormatDiagnostic(remoteEntityId, Sanitize)}, " +
                 $"permissions={FormatDiagnostic(permissions, FormatPermissions)}, " +
                 $"remoteIndicator={FormatDiagnostic(remoteIndicator, FormatEnum)}, " +
                 $"incomingMuted={FormatDiagnostic(incomingMuted, static value => value.ToString())}, " +
@@ -2469,6 +2507,8 @@ internal sealed class PartyChatControlCanary : IDisposable
                     remoteIndicator.Value == PartyChatControlChatIndicator.Talking)
                 {
                     evidence.RemoteTalkingObserved = true;
+                    if (remoteEntityId.Succeeded && !string.IsNullOrWhiteSpace(remoteEntityId.Value))
+                        talkingRemoteEntityIds.Add(remoteEntityId.Value);
                 }
                 if (incomingMuted.Succeeded && !incomingMuted.Value)
                     evidence.IncomingUnmutedObserved = true;
@@ -2489,6 +2529,15 @@ internal sealed class PartyChatControlCanary : IDisposable
                         $"Stage 3 voice diagnostics PEER {Hex(remoteChatControl)}: {peerFingerprint}.");
                 }
             }
+        }
+
+        lock (_stateSync)
+        {
+            if (!IsWorkCurrentLocked(work))
+                return;
+            _talkingRemoteEntityIds.Clear();
+            _talkingRemoteEntityIds.UnionWith(talkingRemoteEntityIds);
+            _remoteVoiceActivityTimestamp = Stopwatch.GetTimestamp();
         }
     }
 
@@ -2513,6 +2562,7 @@ internal sealed class PartyChatControlCanary : IDisposable
                 _pushToTalkPressed = false;
                 EnqueueVoiceDiagnosticSummaryLocked("voice disconnect mute failure");
                 _remoteChatControls.Clear();
+                _talkingRemoteEntityIds.Clear();
                 _permissionedRemoteChatControls.Clear();
                 _lastPeerVoiceDiagnosticFingerprints.Clear();
                 _peerVoiceDiagnosticEvidence.Clear();
@@ -2713,6 +2763,8 @@ internal sealed class PartyChatControlCanary : IDisposable
         _lastLocalVoiceDiagnosticFingerprint = null;
         _lastPeerVoiceDiagnosticFingerprints.Clear();
         _peerVoiceDiagnosticEvidence.Clear();
+        _talkingRemoteEntityIds.Clear();
+        _remoteVoiceActivityTimestamp = 0;
         _voiceDiagnosticSnapshotObserved = false;
         _diagnosticLocalTalkingObserved = false;
         _diagnosticInputDevice = null;
@@ -2960,6 +3012,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _inputUnmuted = false;
         EnqueueVoiceDiagnosticSummaryLocked("Stage 3 fail-closed teardown");
         _remoteChatControls.Clear();
+        _talkingRemoteEntityIds.Clear();
         _permissionedRemoteChatControls.Clear();
         _lastPeerVoiceDiagnosticFingerprints.Clear();
         _peerVoiceDiagnosticEvidence.Clear();
@@ -3118,6 +3171,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _stateBatchActive = false;
         _stateBatchManager = nint.Zero;
         _remoteChatControls.Clear();
+        _talkingRemoteEntityIds.Clear();
         _permissionedRemoteChatControls.Clear();
         ResetVoiceDiagnosticStateLocked();
         ResetCaptureHoldEvidenceLocked();
@@ -3161,6 +3215,7 @@ internal sealed class PartyChatControlCanary : IDisposable
         _stateBatchActive = false;
         _stateBatchManager = nint.Zero;
         _remoteChatControls.Clear();
+        _talkingRemoteEntityIds.Clear();
         _permissionedRemoteChatControls.Clear();
         ResetVoiceDiagnosticStateLocked();
         ResetCaptureHoldEvidenceLocked();

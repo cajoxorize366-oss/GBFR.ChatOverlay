@@ -88,6 +88,19 @@ public sealed class RelinkPlayerNameResolverTests
         Assert.Equal(0, native.MemberLookupCount);
     }
 
+    [Fact]
+    public void TryResolveMemberSlot_DoesNotRequireReadablePlayerName()
+    {
+        var resolver = new RelinkPlayerNameResolver(
+            MemberManagerSlot,
+            new TestRelinkMemoryReader(),
+            new TestPlayerNameNativeApi(9, 2, Member),
+            _ => { });
+
+        Assert.True(resolver.TryResolveMemberSlot(9, out var memberSlot));
+        Assert.Equal(2, memberSlot);
+    }
+
     private static TestRelinkMemoryReader CreateActiveMemberMemory()
     {
         var memory = new TestRelinkMemoryReader();

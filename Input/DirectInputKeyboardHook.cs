@@ -24,6 +24,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private readonly Action<bool> _reportQuickActionsMenuKey;
     private readonly Action<string, bool> _reportQuickActionKey;
     private readonly Action<bool> _reportGlobalMuteKey;
+    private readonly Action<int, bool> _reportRemotePlayerChatMuteKey;
     private readonly Action<string> _log;
     private readonly VoicePushToTalkSafetyGate _voicePushToTalkGate;
     private readonly VoiceInputModeCoordinator _voiceInputModeCoordinator;
@@ -42,6 +43,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private bool _bindingReleasePending = true;
     private readonly Dictionary<string, bool> _quickActionWasDown = new(StringComparer.Ordinal);
     private bool _globalMuteWasDown;
+    private readonly Dictionary<int, bool> _remotePlayerChatMuteWasDown = [];
     private int _initialized;
     private int _suspended;
     private int _disposed;
@@ -93,7 +95,8 @@ public sealed class DirectInputKeyboardHook : IDisposable
         Action<DirectInputBrokerSnapshot>? observeInputSnapshot = null,
         Action<bool>? reportQuickActionsMenuKey = null,
         Action<string, bool>? reportQuickActionKey = null,
-        Action<bool>? reportGlobalMuteKey = null)
+        Action<bool>? reportGlobalMuteKey = null,
+        Action<int, bool>? reportRemotePlayerChatMuteKey = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _canActivate = canActivate ?? throw new ArgumentNullException(nameof(canActivate));
@@ -113,6 +116,7 @@ public sealed class DirectInputKeyboardHook : IDisposable
         _reportQuickActionsMenuKey = reportQuickActionsMenuKey ?? (_ => { });
         _reportQuickActionKey = reportQuickActionKey ?? ((_, _) => { });
         _reportGlobalMuteKey = reportGlobalMuteKey ?? (_ => { });
+        _reportRemotePlayerChatMuteKey = reportRemotePlayerChatMuteKey ?? ((_, _) => { });
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _voiceInputModeCoordinator = new VoiceInputModeCoordinator(
             setVoicePushToTalkPressed ?? throw new ArgumentNullException(nameof(setVoicePushToTalkPressed)),
@@ -216,16 +220,19 @@ public sealed class DirectInputKeyboardHook : IDisposable
                         (action.Kind == QuickActionKind.CustomText
                             ? customActionsAvailable
                             : officialActionsAvailable) &&
-                        (action.Keyboard.IsBound || action.Controller.IsBound));
+                        action.Keyboard.IsBound);
                 var globalMuteAvailable = canActivate &&
                     (hotkeys.GlobalMuteKeyboard.IsBound || hotkeys.GlobalMuteController.IsBound);
+                var remotePlayerChatMuteAvailable = canActivate &&
+                    hotkeys.RemotePlayerChatMutes.Any(binding =>
+                        binding.Keyboard.IsBound || binding.Controller.IsBound);
                 var policy = BuildPolicy(
                     captureKeyboard,
                     captureMouse,
                     canActivate,
                     settingsAvailable,
                     voicePushToTalkEnabled,
-                    quickActionsAvailable || globalMuteAvailable);
+                    quickActionsAvailable || globalMuteAvailable || remotePlayerChatMuteAvailable);
 
                 if (policy != _lastPolicy)
                 {
@@ -314,6 +321,10 @@ public sealed class DirectInputKeyboardHook : IDisposable
                     officialActionsAvailable && !captureKeyboard,
                     customActionsAvailable && !captureKeyboard);
                 ProcessGlobalMuteBinding(
+                    keyboardSnapshot,
+                    hotkeys,
+                    canActivate && !captureKeyboard);
+                ProcessRemotePlayerChatMuteBindings(
                     keyboardSnapshot,
                     hotkeys,
                     canActivate && !captureKeyboard);
@@ -438,16 +449,15 @@ public sealed class DirectInputKeyboardHook : IDisposable
             var actionAvailable = action.Kind == QuickActionKind.CustomText
                 ? customActionsAvailable
                 : officialActionsAvailable;
-            var down = actionAvailable &&
-                action.Enabled &&
+            var down = action.Enabled &&
                 action.IsConfigured &&
-                HotkeyConfigurationSnapshot.IsPressed(
-                    snapshot,
-                    action.Keyboard,
-                    action.Controller);
+                HotkeyConfigurationSnapshot.IsKeyboardPressed(snapshot, action.Keyboard);
             _quickActionWasDown.TryGetValue(action.Id, out var wasDown);
             if (down != wasDown)
-                _reportQuickActionKey(action.Id, down);
+            {
+                if (!down || actionAvailable)
+                    _reportQuickActionKey(action.Id, down);
+            }
             _quickActionWasDown[action.Id] = down;
         }
 
@@ -469,6 +479,24 @@ public sealed class DirectInputKeyboardHook : IDisposable
         _globalMuteWasDown = down;
     }
 
+    private void ProcessRemotePlayerChatMuteBindings(
+        in DirectInputBrokerSnapshot snapshot,
+        HotkeyConfigurationSnapshot hotkeys,
+        bool available)
+    {
+        foreach (var binding in hotkeys.RemotePlayerChatMutes)
+        {
+            var down = available && HotkeyConfigurationSnapshot.IsPressed(
+                snapshot,
+                binding.Keyboard,
+                binding.Controller);
+            _remotePlayerChatMuteWasDown.TryGetValue(binding.RemotePlayerNumber, out var wasDown);
+            if (down != wasDown)
+                _reportRemotePlayerChatMuteKey(binding.RemotePlayerNumber, down);
+            _remotePlayerChatMuteWasDown[binding.RemotePlayerNumber] = down;
+        }
+    }
+
     private void ResetActionEdges()
     {
         if (_settingsWasDown)
@@ -484,6 +512,9 @@ public sealed class DirectInputKeyboardHook : IDisposable
         if (_globalMuteWasDown)
             _reportGlobalMuteKey(false);
         _globalMuteWasDown = false;
+        foreach (var pressedPlayer in _remotePlayerChatMuteWasDown.Where(item => item.Value))
+            _reportRemotePlayerChatMuteKey(pressedPlayer.Key, false);
+        _remotePlayerChatMuteWasDown.Clear();
     }
 
     private void LogReadinessTransition(DirectInputBrokerReadiness readiness)

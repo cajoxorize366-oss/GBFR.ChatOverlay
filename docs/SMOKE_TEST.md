@@ -1,4 +1,4 @@
-# Relink 2.0.2 smoke test
+# Relink 2.0.3 smoke test
 
 A developer build is copied to the directory selected by `RELOADEDIIMODS`; a packaged build stays isolated and must be imported and enabled for the Granblue Fantasy: Relink profile before launch.
 
@@ -11,9 +11,9 @@ The Reloaded-II log should contain messages equivalent to:
 [gbfr.qol.chatoverlay] Startup phase=required-byte-rva-preflight-party-hud state=complete elapsed_ms=....
 [gbfr.qol.chatoverlay] Startup phase=input-user32-iat state=complete hooks=All active=false; cursor interception was installed before other game hooks.
 [gbfr.qol.chatoverlay] Reloaded-II load source=launcher (...) ...
-[gbfr.qol.chatoverlay] Relink 2.0.2 native chat bridge attached: send=..., receive=....
+[gbfr.qol.chatoverlay] Relink 2.0.3 native chat bridge attached: send=..., receive=....
 [gbfr.qol.chatoverlay] Relink incoming player-name resolver attached: senderSlot=..., memberLookup=...; empty RPC sender labels now use the verified four-slot lobby member table.
-[gbfr.qol.chatoverlay] Relink 2.0.2 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
+[gbfr.qol.chatoverlay] Relink 2.0.3 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
 [gbfr.qol.chatoverlay] Startup phase=directinput-broker-hooks state=complete elapsed_ms=....
 [gbfr.qol.chatoverlay] DirectInput keyboard/mouse interception initialized through the game-local IAT broker; the dinput8/ReShade export entry was not modified and controllers remain pass-through.
 [gbfr.qol.chatoverlay] CJK font loaded before DX11 hook initialization: ..., 9 glyph ranges.
@@ -56,18 +56,28 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 
 1. Stay on the title screen, save-selection screen, loading screen and a solo town with no online room. Confirm that the chat window is not drawn and pressing `Y`, `U` or `I` is left to the game. The separate default `Show All Slots` position test may draw microphone icons only when live party-HUD rows exist; disable that switch when checking the strict no-visual baseline.
 2. Create an online room as host. After `AuthenticateLocalUserCompleted` and the matching successful `CreateEndpointCompleted`, confirm that the readiness transition log above appears even before a guest joins.
-3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.2 bridge is connected.
+3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.3 bridge is connected.
 4. Press `Y` once. The input field should open without inserting the activation key itself.
 5. Enter `ABC123`, then use Microsoft Pinyin and Sogou to commit `我是`. The field must contain exactly `ABC123我是` once: `我` must never become `ÎÒ`, and Latin characters must not duplicate.
 6. While composing with Sogou, confirm that the Overlay displays `候选：1.…` directly above the chat field, including brackets around the selected word. The candidate row must reserve only its actual wrapped text height: a short row must not create a blank line below the status text, and a long row may wrap without covering or pushing the input/status rows outside the window. Select candidates with number keys, Space and normal IME paging; the fallback is display-only and intentionally does not simulate keys or mouse selection.
 7. Press Escape during an unfinished composition, reopen with `Y`, and type `我是` again. No pending lead byte, old composition or candidate window may leak into the new input session.
 8. In the online room, press Enter and confirm the other client receives the message.
-9. Have the second client send a free-text reply. Confirm it appears once in the Overlay history and uses that client's real online display name, not `Player 00000000`, `Player 00000001`, `Player 00000002` or `Player 00000003`.
-10. Confirm the local message appears once as `You`; a server echo with identical text should not add a duplicate line.
+9. Have the second client send a free-text reply. Confirm it appears once in the Overlay history and uses that client's real online display name, not `Player 00000000`, `Player 00000001`, `Player 00000002` or `Player 00000003`. A temporary Party endpoint/lifecycle reset must not clear existing history, and incoming RPC records observed while the room gate is temporarily inactive must remain queued until the gate becomes active again.
+10. Confirm the local message appears once immediately after Relink's native send call returns, including messages entered through the game's official chat UI and Custom Text actions sent by the Mod. It must not depend on the server returning an RPC to the sender, must use the local player's actual online display name and slot when available, and must not be forced to `You` or marked as host unless the lobby-owner EntityId really maps to that slot. A synchronous or delayed authoritative echo may refine identity but must not add a duplicate line.
 11. While the input field is open, press movement and combat keys. The game should not respond to them.
 12. Press Escape. The input field should close, and controls should resume after held keys have been released.
 13. Leave or disband the online room. Confirm the Overlay disappears immediately and `Y/U/I` return to the game before returning to title.
 14. Disable `Enable Overlay` and confirm that the Mod no longer captures `Y`.
+15. Open `F10`, select `快捷动作 / Quick Actions`, change one action to `自定义文 / Custom Text`, click its text editor, and enter `ABC我是`. Backspace must delete the final Chinese character and continue deleting Latin text normally. Microsoft Pinyin and Sogou commits must appear once as UTF-8, while configured Mod hotkeys remain blocked from firing behind the settings window. Close `F10`, press that action's keyboard hotkey, and confirm the text is sent once through the normal Relink chat path; a Broker guest must queue the hotkey to the next Render/Present callback instead of calling `sendMessage` directly from WndProc.
+16. Close `F10` while a keyboard key or mouse button is held. WndProc, DirectInput and cursor capture must remain suppressed until the native held-input drain reaches neutral, then all three paths must release together without a stuck cursor, leaked key-up or gameplay click.
+
+## Push-to-talk and controller hotkeys
+
+1. On an Overlay Broker guest client, hold `U` after voice reaches Ready. The status must immediately show `正在通话中 / Transmitting`; repeated key-down messages while held must not reopen the microphone. Releasing `U`, losing focus, suspending the Mod or losing voice eligibility must close it once.
+2. Hold a configured per-action keyboard key. It must dispatch once on the physical press edge. Release and press again: the Mod must call the native send path again immediately and leave cooldown rejection to the game instead of imposing its own two-second gate. Individual quick actions must expose no controller binding and must ignore legacy action-level `ControllerBinding` values.
+3. Attempt to bind `DPadDown` alone or in a chord. Capture must remain active, the binding must stay unchanged, and the row must explain that the game reserves `DPadDown` for its official quick phrase.
+4. For Flydigi Vader 5 Pro extra buttons, disable Steam Input for this game and enable the Flydigi Space Station option that allows third-party applications to take over controller mappings. The binding capture must recognize `C`, `Z`, `LM`, `RM`, `M1`, `M2`, `M3`, `M4` and `Circle` only after the status reply allows takeover and an Acquire reply confirms success. A raw input packet alone must never mark the controller ready.
+5. With Steam Input kept enabled, leave Flydigi third-party takeover disabled and map the nine extra buttons to unused keyboard keys such as `F13-F21` in Space Station. Bind them through the Mod's Keyboard buttons and confirm each physical extra button triggers only its assigned action. If the HID interface or acquisition is occupied, the controller binding prompt must describe this fallback.
 
 ## Player 2/3/4 mute
 
@@ -99,6 +109,7 @@ This preview replaces the stock Reloaded DX11 implementation with the Present-on
 3. Confirm no log mentions installing or recovering a `ResizeBuffers` hook. The backend uses frame-local render targets, so swap-chain resize does not require a second managed hook chain.
 4. If the native original-Present boundary catches `SEH 0xC0000005`, preserve the complete log. It must be followed by `overlay hook disabled after a native Present failure` and `Overlay graphics backend failed closed`. The game and RTSS should continue; `Y` must no longer be captured and no chat/voice UI may remain for that session.
 5. Repeat once with RTSS disabled. Both runs must reach `First Direct3D11 Present callback`; behavior outside the graphics compatibility layer must remain identical.
+6. Open F10, switch focus away from the game, then return and close the menu. `WM_ACTIVATE`, `WM_KILLFOCUS`, `WM_ACTIVATEAPP`, `WM_CANCELMODE` and `WM_CAPTURECHANGED` must continue to reach the game; the Overlay must not flicker, repeatedly recapture the cursor or leave movement/mouse input stuck.
 
 ## Failure handling
 

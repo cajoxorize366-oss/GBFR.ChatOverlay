@@ -51,6 +51,7 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly Action<string> _requestOverlayBrokerRecovery;
 
     private readonly ChatSession _chatSession;
+    private readonly ChatBlacklist _chatBlacklist = new();
     private readonly ChatOverlayPeer? _overlay;
     private DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
@@ -121,7 +122,8 @@ public class Mod : ModBase // <= Do not Remove.
                         _configuration.EnableVoiceInput,
                     enableVoiceTest: _configuration.EnableVoiceInput,
                     audioInputSelection: audioInputSelection,
-                    audioOutputSelection: audioOutputSelection);
+                    audioOutputSelection: audioOutputSelection,
+                    invalidateRoomIdentity: ResetLobbyOwner);
                 StartupPhaseDiagnostic.Run(
                     "party-lifecycle-hooks",
                     moduleLog,
@@ -191,7 +193,8 @@ public class Mod : ModBase // <= Do not Remove.
                 _nativeChatBridge = new RelinkChatBridge(
                     _hooks,
                     message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
-                    _gameContextProbe);
+                    _gameContextProbe,
+                    _chatBlacklist);
                 StartupPhaseDiagnostic.Run(
                     "native-chat-hooks",
                     moduleLog,
@@ -199,10 +202,10 @@ public class Mod : ModBase // <= Do not Remove.
                 _gameContextProbe ??= _nativeChatBridge.GameContext;
                 transport = _nativeChatBridge;
                 incoming = _nativeChatBridge;
-                transportStatus = "Native Relink chat connected (2.0.2).";
+                transportStatus = "Native Relink chat connected (2.0.3).";
                 history.Add(
                     "System",
-                    "Native Relink chat send/receive bridge connected for game version 2.0.2.",
+                    "Native Relink chat send/receive bridge connected for game version 2.0.3.",
                     ChatMessageKind.System);
             }
             catch (Exception exception)
@@ -227,11 +230,13 @@ public class Mod : ModBase // <= Do not Remove.
             new ChatComposer(),
             transport,
             incoming: incoming,
-            transportStatusText: transportStatus);
+            transportStatusText: transportStatus,
+            getLocalIdentity: () =>
+                _nativeChatBridge?.GetLocalIdentity() ?? new LocalChatIdentity("Local", 0));
 
         _overlay = new ChatOverlayPeer(
             _chatSession,
-                    () => Volatile.Read(ref _configuration),
+            () => Volatile.Read(ref _configuration),
             IsOnlineRoomActive,
             ReleaseRoomScopedInputs,
             GetVoiceUiStatus,
@@ -249,7 +254,11 @@ public class Mod : ModBase // <= Do not Remove.
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             ForceReleaseVoiceInputs,
             HandleOverlayBrokerUnavailable,
-            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"));
+            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+            chatBlacklist: _chatBlacklist,
+            getHostPlayerNumber: GetHostPlayerNumber,
+            getRemotePlayerName: GetRemotePlayerName,
+            getTalkingRemotePlayers: GetTalkingRemotePlayers);
 
         try
         {
@@ -285,6 +294,7 @@ public class Mod : ModBase // <= Do not Remove.
         try
         {
             Volatile.Write(ref _configuration, configuration);
+            _chatSession.History.Resize(Math.Clamp(configuration.HistoryCapacity, 10, 5_000));
             _audioSettings?.ApplyConfiguration(configuration);
             if (!configuration.EnableVoiceInput)
                 SetLocalMicrophoneSelfTestRequested(false);
@@ -345,7 +355,7 @@ public class Mod : ModBase // <= Do not Remove.
                 () => IsOnlineRoomActive() &&
                       _configuration.EnableVoiceInput &&
                       _partyLifecycleProbe?.IsVoicePushToTalkReady == true,
-                pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
+                _overlay.ObserveVoicePushToTalkKey,
                 () => _partyLifecycleProbe?.RequestVoiceDiagnosticSample(),
                 () => _overlay.IsInitialized && !_overlay.IsSuspended,
                 _overlay.ObserveSettingsMenuKey,
@@ -356,7 +366,8 @@ public class Mod : ModBase // <= Do not Remove.
                 _overlay.ObserveNativeInputSnapshot,
                 _overlay.ObserveQuickActionsMenuKey,
                 _overlay.ObserveQuickActionKey,
-                _overlay.ObserveGlobalMuteKey);
+                _overlay.ObserveGlobalMuteKey,
+                _overlay.ObserveRemotePlayerChatMuteKey);
             StartupPhaseDiagnostic.Run(
                 "directinput-broker-hooks",
                 message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
@@ -385,6 +396,7 @@ public class Mod : ModBase // <= Do not Remove.
         try
         {
             _persistConfigurationUpdate(update);
+            _chatSession.History.Resize(Math.Clamp(_configuration.HistoryCapacity, 10, 5_000));
         }
         finally
         {
@@ -459,6 +471,25 @@ public class Mod : ModBase // <= Do not Remove.
     private bool IsOnlineRoomActive() =>
         _partyLifecycleProbe?.IsOnlineRoomActive == true;
 
+    private int? GetHostPlayerNumber()
+    {
+        if (!IsOnlineRoomActive())
+            return null;
+        return _nativeChatBridge?.TryGetHostPlayerNumber(out var playerNumber) == true
+            ? playerNumber
+            : null;
+    }
+
+    private string? GetRemotePlayerName(int remotePlayerNumber) =>
+        _nativeChatBridge?.TryGetRemotePlayerName(remotePlayerNumber, out var playerName) == true
+            ? playerName
+            : null;
+
+    private IReadOnlyList<int> GetTalkingRemotePlayers() =>
+        _partyLifecycleProbe?.GetTalkingRemotePlayers() ?? Array.Empty<int>();
+
+    private void ResetLobbyOwner() => _nativeChatBridge?.ResetLobbyOwner();
+
     private IReadOnlyList<PartyHudAnchor> GetPartyHudAnchors(
         float viewportX,
         float viewportY,
@@ -483,6 +514,7 @@ public class Mod : ModBase // <= Do not Remove.
 
     private void ReleaseRoomScopedInputs()
     {
+        ResetLobbyOwner();
         _partyLifecycleProbe?.SetPushToTalkPressed(false);
         SetLocalMicrophoneSelfTestRequested(false);
     }

@@ -24,6 +24,9 @@ public sealed class DirectInputBrokerTests
         Assert.True(snapshot.HasExpectedLayout);
         Assert.Equal(DirectInputBrokerReadiness.None, snapshot.Readiness);
         Assert.Equal(DirectInputBrokerPolicy.None, snapshot.Policy);
+        Assert.Equal(
+            GBFR.OverlayHub.Contracts.OverlayInputDevices.None,
+            DirectInputBrokerBridge.Instance.GetEffectiveInputDevices());
     }
 
     [Fact]
@@ -220,6 +223,32 @@ public sealed class DirectInputBrokerTests
     }
 
     [Fact]
+    public void Poll_RemotePlayerChatMuteBindingReportsDisplayPlayerWithoutVoiceMutation()
+    {
+        var backend = new FakeDirectInputBrokerBackend();
+        var reports = new List<(int Player, bool Pressed)>();
+        var configuration = new Config
+        {
+            RemotePlayer2ChatMuteKeyboardBinding = "P",
+        };
+        using var hook = CreateHook(
+            backend,
+            canActivate: () => true,
+            settingsAvailable: () => true,
+            getConfiguration: () => configuration,
+            reportRemotePlayerChatMute: (player, pressed) => reports.Add((player, pressed)));
+
+        hook.Initialize();
+        hook.Poll();
+        backend.Snapshot = CreateSnapshot(sequence: 1, 0x19); // DIK_P
+        hook.Poll();
+        backend.Snapshot = CreateSnapshot(sequence: 2);
+        hook.Poll();
+
+        Assert.Equal([(2, true), (2, false)], reports);
+    }
+
+    [Fact]
     public void Poll_RebuildsHotkeySnapshotOnlyWhenConfigurationRevisionChanges()
     {
         var backend = new FakeDirectInputBrokerBackend();
@@ -329,7 +358,8 @@ public sealed class DirectInputBrokerTests
         Func<Config>? getConfiguration = null,
         Func<long>? getConfigurationRevision = null,
         Action<string, bool>? reportQuickAction = null,
-        Action<bool>? reportGlobalMute = null) =>
+        Action<bool>? reportGlobalMute = null,
+        Action<int, bool>? reportRemotePlayerChatMute = null) =>
         new(
             backend,
             canActivate ?? (() => false),
@@ -346,7 +376,8 @@ public sealed class DirectInputBrokerTests
             getConfiguration,
             getConfigurationRevision,
             reportQuickActionKey: reportQuickAction,
-            reportGlobalMuteKey: reportGlobalMute);
+            reportGlobalMuteKey: reportGlobalMute,
+            reportRemotePlayerChatMuteKey: reportRemotePlayerChatMute);
 
     private static DirectInputBrokerSnapshot CreateSnapshot(
         ulong sequence,

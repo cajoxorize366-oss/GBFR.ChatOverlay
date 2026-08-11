@@ -89,6 +89,16 @@ jobs:
       - name: Run tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            throw 'RUNNER_TEMP is not set'
+          }
+          $reloadedModsRoot = Join-Path $env:RUNNER_TEMP 'gbfr-chatoverlay-tests-reloaded-mods'
+          New-Item -ItemType Directory -Path $reloadedModsRoot -Force | Out-Null
+          if (-not (Test-Path -LiteralPath $reloadedModsRoot -PathType Container)) {
+            throw "Failed to create RELOADEDIIMODS directory: $reloadedModsRoot"
+          }
+          $env:RELOADEDIIMODS = $reloadedModsRoot
           dotnet test "$env:GITHUB_WORKSPACE/tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj" `
             --configuration Release `
             --nologo

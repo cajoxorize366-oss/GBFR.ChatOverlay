@@ -16,7 +16,7 @@ internal sealed class RelinkLobbyOwnerTracker
     private const long HostSlotRefreshIntervalMilliseconds = 500;
 
     private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
-    private static ReadOnlySpan<byte> ExpectedImportThunk => [0xFF, 0x25, 0x42, 0x49, 0x91, 0x01];
+    private static ReadOnlySpan<byte> ExpectedImportThunk => [0xFF, 0x25, 0x42, 0x4C, 0x91, 0x01];
 
     private readonly ReloadedHooksApi _hooks;
     private readonly IRelinkPartyMemberIdentitySnapshotResolver _identityResolver;
@@ -54,7 +54,7 @@ internal sealed class RelinkLobbyOwnerTracker
             !importThunk.SequenceEqual(ExpectedImportThunk))
         {
             throw new InvalidDataException(
-                "Relink PFLobbyGetOwner import thunk did not match the verified 2.0.3 build.");
+                "Relink PFLobbyGetOwner import thunk did not match the verified 2.0.4 build.");
         }
 
         lock (_lifecycleSync)

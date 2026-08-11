@@ -12,7 +12,8 @@ $sharedFiles = @(
     [pscustomobject]@{ Path = 'OverlayBroker/OverlayBrokerElection.cs'; Other = @('OverlayBroker/OverlayBrokerElection.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/OverlayBrokerElection.cs') },
     [pscustomobject]@{ Path = 'OverlayBroker/OverlayBrokerHost.cs'; Other = @('OverlayBroker/OverlayBrokerHost.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/OverlayBrokerHost.cs') },
     [pscustomobject]@{ Path = 'OverlayBroker/OverlayWindowInputClassifier.cs'; Other = @('OverlayBroker/OverlayWindowInputClassifier.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/OverlayWindowInputClassifier.cs') },
-    [pscustomobject]@{ Path = 'OverlayBroker/SharedImguiGraphicsBinding.cs'; Other = @('OverlayBroker/SharedImguiGraphicsBinding.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/SharedImguiGraphicsBinding.cs') }
+    [pscustomobject]@{ Path = 'OverlayBroker/SharedImguiGraphicsBinding.cs'; Other = @('OverlayBroker/SharedImguiGraphicsBinding.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/SharedImguiGraphicsBinding.cs') },
+    [pscustomobject]@{ Path = 'OverlayBroker/ImGuiInputResetGate.cs'; Other = @('OverlayBroker/ImGuiInputResetGate.cs', 'GBFR.ExtraSigilSlots.Reloaded/OverlayBroker/ImGuiInputResetGate.cs') }
 )
 
 $differences = @()

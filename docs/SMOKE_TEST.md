@@ -1,4 +1,4 @@
-# Relink 2.0.3 smoke test
+# Relink 2.0.4 smoke test
 
 A developer build is copied to the directory selected by `RELOADEDIIMODS`; a packaged build stays isolated and must be imported and enabled for the Granblue Fantasy: Relink profile before launch.
 
@@ -11,9 +11,9 @@ The Reloaded-II log should contain messages equivalent to:
 [gbfr.qol.chatoverlay] Startup phase=required-byte-rva-preflight-party-hud state=complete elapsed_ms=....
 [gbfr.qol.chatoverlay] Startup phase=input-user32-iat state=complete hooks=All active=false; cursor interception was installed before other game hooks.
 [gbfr.qol.chatoverlay] Reloaded-II load source=launcher (...) ...
-[gbfr.qol.chatoverlay] Relink 2.0.3 native chat bridge attached: send=..., receive=....
+[gbfr.qol.chatoverlay] Relink 2.0.4 native chat bridge attached: send=..., receive=....
 [gbfr.qol.chatoverlay] Relink incoming player-name resolver attached: senderSlot=..., memberLookup=...; empty RPC sender labels now use the verified four-slot lobby member table.
-[gbfr.qol.chatoverlay] Relink 2.0.3 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
+[gbfr.qol.chatoverlay] Relink 2.0.4 native party-HUD tracker attached; lobby/battle mode, resolution, aspect ratio and HUD scale now follow the game's live UI node transforms.
 [gbfr.qol.chatoverlay] Startup phase=directinput-broker-hooks state=complete elapsed_ms=....
 [gbfr.qol.chatoverlay] DirectInput keyboard/mouse interception initialized through the game-local IAT broker; the dinput8/ReShade export entry was not modified and controllers remain pass-through.
 [gbfr.qol.chatoverlay] CJK font loaded before DX11 hook initialization: ..., 9 glyph ranges.
@@ -56,7 +56,7 @@ If the composition ends with `without an IMM32 candidate list`, preserve that co
 
 1. Stay on the title screen, save-selection screen, loading screen and a solo town with no online room. Confirm that the chat window is not drawn and pressing `Y`, `U` or `I` is left to the game. The separate default `Show All Slots` position test may draw microphone icons only when live party-HUD rows exist; disable that switch when checking the strict no-visual baseline.
 2. Create an online room as host. After `AuthenticateLocalUserCompleted` and the matching successful `CreateEndpointCompleted`, confirm that the readiness transition log above appears even before a guest joins.
-3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.3 bridge is connected.
+3. On a second client, join that room and confirm the same transition occurs after its own authentication/endpoint sequence. The lower-left system message should say the native Relink 2.0.4 bridge is connected.
 4. Press `Y` once. The input field should open without inserting the activation key itself.
 5. Enter `ABC123`, then use Microsoft Pinyin and Sogou to commit `我是`. The field must contain exactly `ABC123我是` once: `我` must never become `ÎÒ`, and Latin characters must not duplicate.
 6. While composing with Sogou, confirm that the Overlay displays `候选：1.…` directly above the chat field, including brackets around the selected word. The candidate row must reserve only its actual wrapped text height: a short row must not create a blank line below the status text, and a long row may wrap without covering or pushing the input/status rows outside the window. Select candidates with number keys, Space and normal IME paging; the fallback is display-only and intentionally does not simulate keys or mouse selection.

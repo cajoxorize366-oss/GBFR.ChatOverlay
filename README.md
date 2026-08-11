@@ -4,7 +4,7 @@
 
 ## 当前阶段
 
-项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.3 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。按 `F10` 可打开语音与聊天框设置菜单，选择麦克风/扬声器并运行带实时输入电平的本地自检；双方安装相同测试包后，按住 `U` 会解除 Party 原生所选麦克风的静音，由 Party 自己完成采集、编码、传输与对端播放。
+项目目前提供原生文字聊天桥和实验性的 Stage 3 双端实时语音测试。仓库包含 Reloaded-II Mod 骨架、聊天记录与输入状态机、DirectX 11 ImGui 窗口、Relink 2.0.4 的原生文字聊天收发桥，以及连接现有 PartyNetwork 的 ChatControl。按 `Y` 打开输入框后，Enter 会调用游戏自己的 `ui::hud::Manager::sendMessage` 路径；收到的自由文字消息会由 `rpcMessage` Hook 复制到聊天记录。按 `F10` 可打开语音与聊天框设置菜单，选择麦克风/扬声器并运行带实时输入电平的本地自检；双方安装相同测试包后，按住 `U` 会解除 Party 原生所选麦克风的静音，由 Party 自己完成采集、编码、传输与对端播放。
 
 当前验证进度：
 
@@ -32,12 +32,14 @@
 22. `0.5.0-preview.12` 修复 Broker guest 模式下自定义文热键记录为成功但游戏没有实际发出的线程边界错误：WndProc/DirectInput 热键现在只把动作 ID 放入线程安全队列，下一次 Broker Render/Present 回调再统一调用游戏原生聊天或官方动作函数。快捷动作面板按钮仍直接在 Render 线程执行；物理按下边沿和由游戏处理发送冷却的规则保持不变。
 23. `0.5.0-preview.13` 修复游戏原生聊天气泡已有消息、模组聊天历史却为空：非联机帧不再提前抽干原生 RPC 接收队列，消息会等到联机房间 gate 恢复后再进入历史；短暂的 endpoint/生命周期重置也不再把已有聊天记录无条件清空。语音栏的“等待队友”仍只表示 Mod 语音握手状态，不参与聊天历史清理。
 24. `0.5.0-preview.14` 修复发送者本人只有游戏官方气泡、模组历史没有本地消息：游戏官方聊天输入和模组自定义文在原生发送函数成功返回后立即写入模组接收队列，不再要求 Relink 必须向发送者回送 RPC。同步或迟到的权威回声仍会更新真实姓名与槽位，但会被状态化 echo lifecycle 去重，不会产生第二行。
+25. `0.5.0-preview.15` 同步最新主线的 DirectInput 输入状态修复，并把原生聊天、玩家身份、官方快捷动作、队伍 HUD 与大厅房主识别的固定构建配置迁移到 Relink 2.0.4。启动时仍会对全部必要指令和派生目标做同步预检；完整 EXE 哈希只在后台记录为诊断信息。
+26. `0.5.0-preview.16` 将中性 OverlayHub/ImGuiHub 与 Extra Sigil Slots 0.8.3 主线重新对齐：关闭期间不再向 ImGui 排队 Win32 输入，重新唤醒首帧会清空陈旧键鼠状态并恢复真实光标位置，快速关闭/重开时的鼠标 reset 请求统一交给 Present 线程，前台 `WM_INPUT` 即使被拦截也会经过系统清理路径。两仓新增自动构建、测试、共享源校验与 ZIP/Release 产出的 GitHub Actions。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生代码 Hook 只在固定 RVA 的必要原始字节、RIP 相对目标以及 Party 路径/版本/导出全部通过同步预检时启用；完整 EXE/PartyWin SHA-256 在 Hook 安装后于后台计算，仅作为诊断信息。
 
 第三方组件及许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-Relink 2.0.3 的实机检查见 [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md)，单次双人语音排障步骤与判定矩阵见 [docs/VOICE_TROUBLESHOOTING_MATRIX.md](docs/VOICE_TROUBLESHOOTING_MATRIX.md)，聊天收发逆向边界见 [docs/CHAT_BRIDGE.md](docs/CHAT_BRIDGE.md)，联机与语音传输研究见 [docs/VOICE_TRANSPORT.md](docs/VOICE_TRANSPORT.md)。
+Relink 2.0.4 的实机检查见 [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md)，单次双人语音排障步骤与判定矩阵见 [docs/VOICE_TROUBLESHOOTING_MATRIX.md](docs/VOICE_TROUBLESHOOTING_MATRIX.md)，聊天收发逆向边界见 [docs/CHAT_BRIDGE.md](docs/CHAT_BRIDGE.md)，联机与语音传输研究见 [docs/VOICE_TRANSPORT.md](docs/VOICE_TRANSPORT.md)。
 
 ## 构建
 

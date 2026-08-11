@@ -7,26 +7,32 @@ internal readonly record struct RelinkHudRvas(
     int BattleDestructor,
     int ChainburstFactory,
     int ChainburstDestructor,
-    int UiManagerSlot);
+    int UiManagerSlot,
+    int TownVtable,
+    int BattleVtable,
+    int ChainburstVtable);
 
 internal static class RelinkHudBuildLocator
 {
-    private const int ExpectedTownFactoryRva = 0x0258F080;
-    private const int ExpectedTownDestructorRva = 0x02590720;
-    private const int ExpectedBattleFactoryRva = 0x02603410;
-    private const int ExpectedBattleDestructorRva = 0x02604870;
-    private const int ExpectedChainburstFactoryRva = 0x0262BC20;
-    private const int ExpectedChainburstDestructorRva = 0x0262AE30;
-    private const int ExpectedUiObjectQueryRva = 0x02618450;
-    private const int ExpectedUiManagerSlotRva = 0x07BFF318;
-    private const int ExpectedHudFactoryTargetRva = 0x039C8940;
-    private const int ExpectedTownDestructorPrimaryTargetRva = 0x0258FE20;
-    private const int ExpectedBattleDestructorPrimaryTargetRva = 0x02604450;
-    private const int ExpectedHudDestructorSharedTargetRva = 0x0471201C;
-    private const int ExpectedChainburstPrimaryVtableRva = 0x05A64E68;
-    private const int ExpectedChainburstSecondaryVtableRva = 0x05A64F88;
-    private const int ExpectedChainburstTertiaryVtableRva = 0x05A64F98;
-    private const int ExpectedChainburstDestructorTargetRva = 0x00BB4DA0;
+    private const int ExpectedTownFactoryRva = 0x02590020;
+    private const int ExpectedTownDestructorRva = 0x025916C0;
+    private const int ExpectedBattleFactoryRva = 0x026043B0;
+    private const int ExpectedBattleDestructorRva = 0x02605810;
+    private const int ExpectedChainburstFactoryRva = 0x0262ACA0;
+    private const int ExpectedChainburstDestructorRva = 0x0262BDD0;
+    private const int ExpectedUiObjectQueryRva = 0x026193F0;
+    private const int ExpectedUiManagerSlotRva = 0x07C00598;
+    private const int ExpectedHudFactoryTargetRva = 0x039C98E0;
+    private const int ExpectedTownDestructorPrimaryTargetRva = 0x02590DC0;
+    private const int ExpectedBattleDestructorPrimaryTargetRva = 0x026053F0;
+    private const int ExpectedHudDestructorSharedTargetRva = 0x04712FBC;
+    private const int ExpectedChainburstPrimaryVtableRva = 0x05A65B98;
+    private const int ExpectedChainburstSecondaryVtableRva = 0x05A65CB8;
+    private const int ExpectedChainburstTertiaryVtableRva = 0x05A65CC8;
+    private const int ExpectedChainburstDestructorTargetRva = 0x00BB5D40;
+    private const int ExpectedTownVtableRva = 0x05A50BD8;
+    private const int ExpectedBattleVtableRva = 0x05A60088;
+    private const int ExpectedChainburstVtableRva = 0x05A65B98;
     private const int ChainburstFactoryPatternOffset = 0x128;
     private const int UiManagerInstructionOffset = 63;
     private const int ExpectedChainburstFactoryPatternRva =
@@ -187,7 +193,10 @@ internal static class RelinkHudBuildLocator
             battleDestructor,
             chainburstFactory,
             chainburstDestructor,
-            uiManagerSlot);
+            uiManagerSlot,
+            ExpectedTownVtableRva,
+            ExpectedBattleVtableRva,
+            ExpectedChainburstVtableRva);
     }
 
     private static int ResolveRelativeTarget(

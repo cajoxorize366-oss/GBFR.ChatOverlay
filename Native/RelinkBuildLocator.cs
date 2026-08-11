@@ -26,24 +26,24 @@ public readonly record struct RelinkChatRvas(int SendMessage, int RpcMessage, in
 public static class RelinkBuildLocator
 {
     public const string SupportedSha256 =
-        "1bbbec61aab7f75fe328cf6bfe0247ebdbcec6c404cec12c032b8ffa41d22102";
+        "f827f3c13caa90b290fab2fe7e28165a80448fde0a3f7a96d79dac6b8343ff2a";
 
-    private const int ExpectedSendMessageRva = 0x00903A50;
-    private const int ExpectedRpcMessageRva = 0x00B969B0;
-    private const int ExpectedManagerSlotRva = 0x07C221E0;
-    private const int ExpectedSenderSlotResolverRva = 0x006CC580;
+    private const int ExpectedSendMessageRva = 0x009049F0;
+    private const int ExpectedRpcMessageRva = 0x00B97950;
+    private const int ExpectedManagerSlotRva = 0x07C23460;
+    private const int ExpectedSenderSlotResolverRva = 0x006CD520;
     private const int ExpectedLobbyMemberLookupRva = 0x003760A0;
-    private const int ExpectedLobbyMemberManagerSlotRva = 0x07C20838;
-    private const int ExpectedPartyMemberIdentityManagerSlotRva = 0x07C47128;
-    private const int ExpectedManagerInstructionRva = 0x025F539A;
+    private const int ExpectedLobbyMemberManagerSlotRva = 0x07C21AB8;
+    private const int ExpectedPartyMemberIdentityManagerSlotRva = 0x07C483A8;
+    private const int ExpectedManagerInstructionRva = 0x025F633A;
     private const int ExpectedLobbyMemberCallsiteRva = 0x003C81B0;
     private const int ExpectedPartyMemberIdentityCallsiteRva = 0x003C773C;
-    private const int ExpectedSendStampRva = 0x009026C0;
-    private const int ExpectedSendFixedPhraseRva = 0x00903550;
-    private const int ExpectedSendEmotionRva = 0x00902400;
-    private const int ExpectedPlayFixedPhraseRva = 0x006E2A60;
-    private const int ExpectedPlayEmotionRva = 0x006E1B90;
-    private const int ExpectedLobbyOwnerImportThunkRva = 0x049AC6E0;
+    private const int ExpectedSendStampRva = 0x00903660;
+    private const int ExpectedSendFixedPhraseRva = 0x009044F0;
+    private const int ExpectedSendEmotionRva = 0x009033A0;
+    private const int ExpectedPlayFixedPhraseRva = 0x006E3A00;
+    private const int ExpectedPlayEmotionRva = 0x006E2B30;
+    private const int ExpectedLobbyOwnerImportThunkRva = 0x049AD680;
 
     private static readonly SignaturePattern SendMessagePattern = SignaturePattern.Parse(
         "41 57 41 56 41 55 41 54 56 57 55 53 48 81 EC F8 02 00 00 " +
@@ -93,7 +93,7 @@ public static class RelinkBuildLocator
         "48 8D AC 24 80 00 00 00 C5 78 29 85 D0 00 00 00");
 
     private static readonly SignaturePattern LobbyOwnerImportThunkPattern = SignaturePattern.Parse(
-        "FF 25 42 49 91 01");
+        "FF 25 42 4C 91 01");
 
     public static RelinkChatRvas Resolve(string imagePath)
     {

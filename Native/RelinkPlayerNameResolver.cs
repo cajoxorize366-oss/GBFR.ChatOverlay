@@ -13,7 +13,7 @@ internal interface IRelinkPlayerNameNativeApi
 
 /// <summary>
 /// Resolves the opaque sender identifier carried by Relink's chat RPC through the
-/// same four-slot member table used by the verified 2.0.3 executable when it exports
+/// same four-slot member table used by the verified 2.0.4 executable when it exports
 /// <c>member_name</c> to the online UI.
 /// </summary>
 internal sealed class RelinkPlayerNameResolver

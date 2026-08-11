@@ -121,7 +121,7 @@ public sealed unsafe class RelinkChatBridge :
 
                 Volatile.Write(ref _initialized, true);
                 _log(
-                    $"Relink 2.0.3 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
+                    $"Relink 2.0.4 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
                     $"receive=0x{(nuint)(moduleBase + rvas.RpcMessage):X}.");
                 _log(
                     $"Relink incoming player-name resolver attached: senderSlot=0x" +

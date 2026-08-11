@@ -24,9 +24,6 @@ internal readonly record struct PartyHudAnchor(
 
 internal sealed class RelinkPartyHudTracker
 {
-    private const int TownVtableRva = 0x05A53978;
-    private const int BattleVtableRva = 0x05A62E28;
-    private const int ChainburstVtableRva = 0x05A68938;
     private const int FactoryResultControllerOffset = 0x18;
     private const int ObjectFinalTransformOffset = 0x120;
     private const int ObjectSizeOffset = 0x1BC;
@@ -41,7 +38,7 @@ internal sealed class RelinkPartyHudTracker
     internal const float NativeRightEdgeGap = 48.0f;
 
     private static readonly int[] TownTargetPointerOffsets = [0x1B8, 0x230];
-    // Live Relink 2.0.3 memory confirms these two resolved UIObject pointers are
+    // Live Relink 2.0.4 memory confirms these two resolved UIObject pointers are
     // the normal/red full-width HP-row geometry. At 2560x1440 the local node is
     // 1504 units wide and the remote nodes are 816 units wide; projecting their
     // right edges lands at the native long/short bar endpoints. The animated
@@ -105,9 +102,9 @@ internal sealed class RelinkPartyHudTracker
                 _log,
                 () => RelinkHudBuildLocator.Resolve(mainModule.FileName));
             _moduleBase = mainModule.BaseAddress;
-            _townVtable = _moduleBase + TownVtableRva;
-            _battleVtable = _moduleBase + BattleVtableRva;
-            _chainburstVtable = _moduleBase + ChainburstVtableRva;
+            _townVtable = _moduleBase + rvas.TownVtable;
+            _battleVtable = _moduleBase + rvas.BattleVtable;
+            _chainburstVtable = _moduleBase + rvas.ChainburstVtable;
 
             try
             {
@@ -137,7 +134,7 @@ internal sealed class RelinkPartyHudTracker
                 _chainburstDestructorHook.Activate();
                 Volatile.Write(ref _initialized, true);
                 SafeLog(
-                    "Relink 2.0.3 native party-HUD tracker attached; lobby/battle mode, " +
+                    "Relink 2.0.4 native party-HUD tracker attached; lobby/battle mode, " +
                     "resolution, aspect ratio and HUD scale now follow the game's live UI node transforms. " +
                     "Microphone anchors are emitted only while the native party-HUD controller is visible, " +
                     "with the Full Chain illustration explicitly blacklisted.");

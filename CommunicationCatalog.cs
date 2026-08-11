@@ -12,7 +12,7 @@ public readonly record struct CommunicationCatalogEntry(
 }
 
 /// <summary>
-/// Relink 2.0.3's official TAB communication catalog. IDs and order come from
+/// Relink 2.0.4's official TAB communication catalog. IDs and order come from
 /// communication_stamp.tbl, communication_fixedPhrase.tbl and
 /// communication_emotion.tbl; labels come from text_communication.yml.
 /// </summary>

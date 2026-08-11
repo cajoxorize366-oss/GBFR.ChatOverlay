@@ -1,9 +1,9 @@
 # Relink native chat bridge
 
-The Overlay remains independent from Relink's version-specific implementation through `IChatTransport` and `IIncomingChatSource`. The native bridge targets one verified Relink 2.0.3 executable only:
+The Overlay remains independent from Relink's version-specific implementation through `IChatTransport` and `IIncomingChatSource`. The native bridge targets one verified Relink 2.0.4 executable only:
 
 ```text
-SHA-256 1bbbec61aab7f75fe328cf6bfe0247ebdbcec6c404cec12c032b8ffa41d22102
+SHA-256 f827f3c13caa90b290fab2fe7e28165a80448fde0a3f7a96d79dac6b8343ff2a
 ```
 
 The hash above remains a deferred diagnostic identifier. Runtime initialization does not read or hash the complete 123 MB executable on Reloaded-II's synchronous loader path. Instead it reads only the required instruction ranges at the known RVAs, validates every exact/wildcard signature and recomputes each RIP-relative target before installing hooks. Any required byte, RVA or derived target mismatch disables the affected bridge.
@@ -14,7 +14,7 @@ The identified source method is:
 
 ```text
 ui::hud::Manager::sendMessage
-RVA 0x903A50 in the verified image
+RVA 0x9049F0 in the verified image
 machine ABI: (Manager*, string_view*, uint32, string_view*, int)
 ```
 
@@ -26,7 +26,7 @@ The identified receive method is:
 
 ```text
 ui::hud::Manager::rpcMessage
-RVA 0xB969B0 in the verified image
+RVA 0xB97950 in the verified image
 optimized machine ABI: (network::protocol::behavior::Chat const*)
 ```
 
@@ -38,10 +38,10 @@ For raw free-text records, the verified `Chat` layout exposes:
 - `+0x180`: bounded `0x18`-byte sender label/short field;
 - `+0x198` and `+0x19C`: category/metadata retained for later classification.
 
-The short sender-label field is empty for ordinary online free-text messages in the verified build; the `+0x18` value is an opaque sender identifier, not a display-name string. The bridge therefore uses the game's own sender-to-member-slot resolver at RVA `0x6CC580`, then follows the same lobby member lookup used by the online UI:
+The short sender-label field is empty for ordinary online free-text messages in the verified build; the `+0x18` value is an opaque sender identifier, not a display-name string. The bridge therefore uses the game's own sender-to-member-slot resolver at RVA `0x6CD520`, then follows the same lobby member lookup used by the online UI:
 
 ```text
-member manager global RVA 0x7C20838
+member manager global RVA 0x7C21AB8
 member lookup RVA 0x3760A0
 active flag member+0x5EBC
 profile pointer member+0x5E60
@@ -63,4 +63,4 @@ The callback copies `0x1A0` bytes immediately, calls the original function, stri
 
 ## Remaining runtime criteria
 
-Static location, native ABI inspection, C# integration and unit tests are complete. `0.5.0-preview.14` has a single-client online smoke proving that native sends entered through Relink's official chat UI appear once in the Overlay immediately after send completion; a later authoritative RPC echo is identity-only and deduplicated. The remaining two-client criterion is proving that each teammate free-text line uses the same real player name as Relink's online UI and that a failed name lookup safely retains `Player XXXXXXXX`.
+Static location, native ABI inspection, C# integration and unit tests are complete. The `0.5.0-preview.14` local echo behavior is retained, and `0.5.0-preview.15` moves every native bridge profile to the verified Relink 2.0.4 image. The remaining two-client criterion is proving that each teammate free-text line uses the same real player name as Relink's online UI and that a failed name lookup safely retains `Player XXXXXXXX`.

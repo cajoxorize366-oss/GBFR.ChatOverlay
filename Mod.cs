@@ -202,10 +202,10 @@ public class Mod : ModBase // <= Do not Remove.
                 _gameContextProbe ??= _nativeChatBridge.GameContext;
                 transport = _nativeChatBridge;
                 incoming = _nativeChatBridge;
-                transportStatus = "Native Relink chat connected (2.0.3).";
+                transportStatus = "Native Relink chat connected (2.0.4).";
                 history.Add(
                     "System",
-                    "Native Relink chat send/receive bridge connected for game version 2.0.3.",
+                    "Native Relink chat send/receive bridge connected for game version 2.0.4.",
                     ChatMessageKind.System);
             }
             catch (Exception exception)

@@ -1,4 +1,5 @@
 using GBFR.ChatOverlay.Input;
+using GBFR.ChatOverlay.Overlay;
 using GBFR.OverlayHub.Contracts;
 using GBFR.OverlayHub.Runtime;
 
@@ -32,26 +33,23 @@ public sealed class DirectInputMouseStateFilterTests
     }
 
     [Theory]
-    [InlineData(0x0100)]
-    [InlineData(0x0104)]
-    [InlineData(0x0102)]
-    [InlineData(0x010F)]
-    [InlineData(0x0201)]
-    [InlineData(0x00A1)]
-    public void WindowClassifier_CapturesOnlyTheRequestedDeviceClass(uint message)
+    [InlineData(0x0100, OverlayInputDevices.Keyboard, true)]
+    [InlineData(0x0100, OverlayInputDevices.Mouse, false)]
+    [InlineData(0x0102, OverlayInputDevices.Text, true)]
+    [InlineData(0x0102, OverlayInputDevices.Keyboard, false)]
+    [InlineData(0x0201, OverlayInputDevices.Mouse, true)]
+    [InlineData(0x0201, OverlayInputDevices.Keyboard, false)]
+    [InlineData(0x00A1, OverlayInputDevices.Mouse, true)]
+    [InlineData(0x000F, OverlayInputDevices.Keyboard | OverlayInputDevices.Mouse | OverlayInputDevices.Text, false)]
+    [InlineData(0x0240, OverlayInputDevices.Keyboard | OverlayInputDevices.Mouse | OverlayInputDevices.Text, false)]
+    public void WindowClassifier_ExceptionFallbackUsesTheRequestedDeviceClass(
+        uint message,
+        OverlayInputDevices devices,
+        bool expected)
     {
-        Assert.True(OverlayWindowInputClassifier.IsAlwaysCaptured(message));
-    }
-
-    [Theory]
-    [InlineData(0x000F)]
-    [InlineData(0x0119)]
-    [InlineData(0x0240)]
-    [InlineData(0x0312)]
-    [InlineData(0x0319)]
-    public void WindowClassifier_DoesNotCaptureUnrelatedWindowMessages(uint message)
-    {
-        Assert.False(OverlayWindowInputClassifier.IsAlwaysCaptured(message));
+        Assert.Equal(
+            expected,
+            OverlayWindowInputClassifier.ShouldCaptureWithoutRawInput(message, devices));
     }
 
     [Fact]
@@ -167,5 +165,63 @@ public sealed class DirectInputMouseStateFilterTests
         bool expected)
     {
         Assert.Equal(expected, OverlayWindowInputClassifier.ShouldCaptureRawInputType(rawInputType, devices));
+    }
+
+    [Theory]
+    [InlineData(false, OverlayInputDevices.None, false)]
+    [InlineData(true, OverlayInputDevices.None, true)]
+    [InlineData(false, OverlayInputDevices.Mouse, true)]
+    public void BrokerHost_RoutesWndProcToImGuiOnlyForRenderingOrRequestedInput(
+        bool hasRenderableClients,
+        OverlayInputDevices requestedDevices,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            OverlayBrokerHost.ShouldRouteWindowMessageToImGui(
+                hasRenderableClients,
+                requestedDevices));
+    }
+
+    [Theory]
+    [InlineData(0x00FF, 0, true)]
+    [InlineData(0x00FF, 1, false)]
+    [InlineData(0x0200, 0, false)]
+    public void BrokerHost_ForegroundRawInputUsesDefaultCleanup(
+        uint message,
+        long wParam,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            OverlayBrokerHost.RequiresDefaultRawInputCleanup(message, new nint(wParam)));
+    }
+
+    [Fact]
+    public void ImGuiInputResetGate_CoalescesRequestsUntilPresentConsumesThem()
+    {
+        _ = ImGuiInputResetGate.Consume();
+
+        ImGuiInputResetGate.Request();
+        ImGuiInputResetGate.Request();
+
+        Assert.True(ImGuiInputResetGate.Consume());
+        Assert.False(ImGuiInputResetGate.Consume());
+    }
+
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    public void PresentBackend_DetectsOnlyTheFirstFrontendFrameAfterSleep(
+        bool renderedLastPresent,
+        bool shouldRenderFrontend,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            RtssSafeImguiHookDx11.IsFrontendWakeFrame(
+                renderedLastPresent,
+                shouldRenderFrontend));
     }
 }

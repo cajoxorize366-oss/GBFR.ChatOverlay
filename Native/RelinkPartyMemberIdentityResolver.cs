@@ -14,7 +14,7 @@ internal interface IRelinkPartyMemberIdentitySnapshotResolver
 }
 
 /// <summary>
-/// Reads the verified 2.0.3 four-member identity table used by Relink's own online-member
+/// Reads the verified 2.0.4 four-member identity table used by Relink's own online-member
 /// serializer. The selected bank and <c>member_entity_id</c> field are taken directly from
 /// the validated native lookup callsite at RVA 0x003C773C.
 /// </summary>

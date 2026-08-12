@@ -300,21 +300,48 @@ public sealed class DirectInputBrokerTests
     [Fact]
     public async Task Suspend_WaitsForInFlightPollBeforeReleasingNativePolicy()
     {
+        using var policyEntered = new ManualResetEventSlim(false);
+        using var releasePolicy = new ManualResetEventSlim(false);
+        using var suspendStarted = new ManualResetEventSlim(false);
         var backend = new FakeDirectInputBrokerBackend
         {
-            PolicyEntered = new ManualResetEventSlim(false),
-            ReleasePolicy = new ManualResetEventSlim(false),
+            PolicyEntered = policyEntered,
+            ReleasePolicy = releasePolicy,
         };
         using var hook = CreateHook(backend, shouldCapture: () => true);
         hook.Initialize();
 
-        var poll = Task.Run(hook.Poll);
-        Assert.True(backend.PolicyEntered.Wait(TimeSpan.FromSeconds(2)));
-        var suspend = Task.Run(hook.Suspend);
+        // Dedicated workers keep this lock-order test independent of the shared test thread pool.
+        var poll = Task.Factory.StartNew(
+            hook.Poll,
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Task? suspend = null;
+        try
+        {
+            Assert.True(policyEntered.Wait(TimeSpan.FromSeconds(10)));
+            suspend = Task.Factory.StartNew(
+                () =>
+                {
+                    suspendStarted.Set();
+                    hook.Suspend();
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
 
-        Assert.False(backend.InactiveRequested.Wait(TimeSpan.FromMilliseconds(100)));
-        backend.ReleasePolicy.Set();
-        await Task.WhenAll(poll, suspend);
+            Assert.True(suspendStarted.Wait(TimeSpan.FromSeconds(10)));
+            Assert.False(backend.InactiveRequested.Wait(TimeSpan.FromMilliseconds(100)));
+        }
+        finally
+        {
+            releasePolicy.Set();
+            if (suspend is null)
+                await poll.WaitAsync(TimeSpan.FromSeconds(10));
+            else
+                await Task.WhenAll(poll, suspend).WaitAsync(TimeSpan.FromSeconds(10));
+        }
 
         Assert.True(backend.InactiveRequested.IsSet);
         Assert.False(backend.ActiveRequests[^1]);
@@ -440,7 +467,7 @@ public sealed class DirectInputBrokerTests
         {
             PolicyRequests.Add(policy);
             PolicyEntered?.Set();
-            ReleasePolicy?.Wait(TimeSpan.FromSeconds(2));
+            ReleasePolicy?.Wait();
             return true;
         }
 

@@ -403,17 +403,25 @@ public sealed class PartyRoomSessionTrackerTests
         Assert.False(tracker.TryReadTransition(out _));
     }
 
-    [Fact]
-    public void SuccessfulLeave_UnknownHostState_ReportsNetworkInterrupted()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SuccessfulGracefulLeave_WithUnknownOrMissingIdentity_ReportsSelfLeft(
+        bool useExplicitUnknownIdentity)
     {
         var tracker = CreateActiveTracker();
         ConsumeEntered(tracker);
 
-        tracker.MarkNetworkLeaveQueued(Network, default);
+        var identity = useExplicitUnknownIdentity
+            ? new PartyRoomIdentitySnapshot("Quest Room", PartyRoomHostState.Unknown)
+            : default(PartyRoomIdentitySnapshot?);
+        tracker.MarkNetworkLeaveQueued(Network, identity);
         tracker.Observe(LeaveCompleted());
 
         Assert.True(tracker.TryReadTransition(out var exited));
-        Assert.Equal(PartyRoomExitReason.NetworkInterrupted, exited.ExitReason);
+        Assert.Equal(PartyRoomExitReason.SelfLeft, exited.ExitReason);
+        Assert.Equal(useExplicitUnknownIdentity ? "Quest Room" : null, exited.RoomName);
+        Assert.False(tracker.TryReadTransition(out _));
     }
 
     [Fact]

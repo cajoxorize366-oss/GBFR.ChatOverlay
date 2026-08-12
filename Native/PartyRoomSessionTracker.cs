@@ -271,12 +271,14 @@ internal sealed class PartyRoomSessionTracker
             if (Volatile.Read(ref _active) == 0)
                 return;
 
+            // LeaveNetwork is the authoritative graceful-leave signal; the identity snapshot
+            // may already be unknown once teardown starts.
             var reason = identity?.HostState switch
             {
                 PartyRoomHostState.RemoteHostMissing => PartyRoomExitReason.HostDisconnected,
                 PartyRoomHostState.LocalHost or PartyRoomHostState.RemoteHostPresent =>
                     PartyRoomExitReason.SelfLeft,
-                _ => PartyRoomExitReason.NetworkInterrupted,
+                _ => PartyRoomExitReason.SelfLeft,
             };
             _memberTracker?.Reset();
             _activateMemberTrackingAfterBatch = false;

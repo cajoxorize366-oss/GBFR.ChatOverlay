@@ -15,7 +15,15 @@ internal sealed class PartyRoomMemberTracker
     private readonly Dictionary<string, HashSet<nint>> _endpointsByEntityId = new(StringComparer.Ordinal);
     private readonly HashSet<string> _openEntityIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _publishedJoinedEntityIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _pendingJoinedEntityIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _remoteOrdinalByEntityId = new(StringComparer.Ordinal);
+    private readonly Queue<LeaveCandidate> _leaveCandidates = new();
+
+    private readonly record struct LeaveCandidate(
+        string EntityId,
+        PartyMemberLeaveReason LeaveReason,
+        uint NativeReason,
+        uint ErrorDetail);
 
     private nint _network;
     private nint _stateBatchManager;
@@ -34,7 +42,12 @@ internal sealed class PartyRoomMemberTracker
     {
         lock (_sync)
         {
-            ResolveOrdinalsLocked();
+            if (!_stateBatchActive && _roomActive)
+            {
+                TryPublishReadyTransitionsLocked();
+                TryConfirmLeaveCandidatesLocked();
+            }
+
             if (_transitions.Count == 0)
             {
                 transition = default;
@@ -54,7 +67,11 @@ internal sealed class PartyRoomMemberTracker
                 return;
 
             if (_stateBatchActive && _stateBatchManager != manager)
+            {
                 _pendingTransitions.Clear();
+                _pendingJoinedEntityIds.Clear();
+                _leaveCandidates.Clear();
+            }
 
             _stateBatchActive = true;
             _stateBatchManager = manager;
@@ -71,6 +88,8 @@ internal sealed class PartyRoomMemberTracker
             _stateBatchActive = false;
             _stateBatchManager = nint.Zero;
             _pendingTransitions.Clear();
+            _pendingJoinedEntityIds.Clear();
+            _leaveCandidates.Clear();
         }
     }
 
@@ -86,21 +105,13 @@ internal sealed class PartyRoomMemberTracker
             if (!_roomActive)
             {
                 _pendingTransitions.Clear();
+                _pendingJoinedEntityIds.Clear();
+                _leaveCandidates.Clear();
                 return;
             }
 
-            while (_pendingTransitions.Count != 0)
-            {
-                var transition = _pendingTransitions.Dequeue();
-                _transitions.Enqueue(transition);
-                if (transition.Kind == PartyMemberTransitionKind.Joined &&
-                    !string.IsNullOrWhiteSpace(transition.EntityId))
-                {
-                    _publishedJoinedEntityIds.Add(transition.EntityId);
-                }
-            }
-
-            ResolveOrdinalsLocked();
+            TryPublishReadyTransitionsLocked();
+            TryConfirmLeaveCandidatesLocked();
         }
     }
 
@@ -113,7 +124,12 @@ internal sealed class PartyRoomMemberTracker
     internal void DeactivateRoom()
     {
         lock (_sync)
+        {
             _roomActive = false;
+            _pendingTransitions.Clear();
+            _pendingJoinedEntityIds.Clear();
+            _leaveCandidates.Clear();
+        }
     }
 
     internal void Reset()
@@ -154,13 +170,16 @@ internal sealed class PartyRoomMemberTracker
             }
 
             endpoints.Add(state.Endpoint);
-            CacheRemoteOrdinalLocked(entityId);
+            CancelLeaveCandidateLocked(entityId);
             if (alreadyOpen)
                 return;
 
             _openEntityIds.Add(entityId);
-            if (_roomActive)
+            if (_roomActive &&
+                !_publishedJoinedEntityIds.Contains(entityId) &&
+                !_pendingJoinedEntityIds.Contains(entityId))
             {
+                _pendingJoinedEntityIds.Add(entityId);
                 _pendingTransitions.Enqueue(new PartyMemberTransition(
                     PartyMemberTransitionKind.Joined,
                     RemotePlayerOrdinal: 0,
@@ -205,27 +224,15 @@ internal sealed class PartyRoomMemberTracker
             RemoveEndpointLocked(state.Endpoint);
             if (!_roomActive ||
                 _openEntityIds.Contains(cachedEntity) ||
-                !_publishedJoinedEntityIds.Contains(cachedEntity))
+                (!_publishedJoinedEntityIds.Contains(cachedEntity) &&
+                 !_pendingJoinedEntityIds.Contains(cachedEntity)))
             {
                 return;
             }
 
-            var leaveReason = MapLeaveReason(state.Reason);
-            if ((leaveReason == PartyMemberLeaveReason.DeviceLostAuthentication ||
-                 leaveReason == PartyMemberLeaveReason.CreationFailed) &&
-                TryConfirmRemoteMemberPresent(cachedEntity))
-            {
-                return;
-            }
-
-            var remoteOrdinal = TryGetCachedOrdinalLocked(cachedEntity, out var cachedOrdinal)
-                ? cachedOrdinal
-                : 0;
-            _pendingTransitions.Enqueue(new PartyMemberTransition(
-                PartyMemberTransitionKind.Left,
-                remoteOrdinal,
+            _leaveCandidates.Enqueue(new LeaveCandidate(
                 cachedEntity,
-                leaveReason,
+                MapLeaveReason(state.Reason),
                 state.Reason,
                 state.ErrorDetail));
         }
@@ -274,29 +281,96 @@ internal sealed class PartyRoomMemberTracker
         _openEntityIds.Remove(entityId);
     }
 
-    private void ResolveOrdinalsLocked()
+    private void TryPublishReadyTransitionsLocked()
     {
-        if (_transitions.Count == 0)
+        if (_pendingTransitions.Count == 0)
             return;
 
-        var resolved = new Queue<PartyMemberTransition>(_transitions.Count);
-        while (_transitions.Count != 0)
+        var remaining = new Queue<PartyMemberTransition>(_pendingTransitions.Count);
+        while (_pendingTransitions.Count != 0)
         {
-            var transition = _transitions.Dequeue();
-            if (transition.RemotePlayerOrdinal == 0)
+            var transition = _pendingTransitions.Dequeue();
+            var remoteOrdinal = 0;
+            if (transition.Kind == PartyMemberTransitionKind.Joined &&
+                transition.RemotePlayerOrdinal == 0)
             {
-                if (TryGetCachedOrdinalLocked(transition.EntityId, out var remoteOrdinal) ||
-                    TryMapAndCacheRemoteOrdinalLocked(transition.EntityId, out remoteOrdinal))
+                if (!TryGetCachedOrdinalLocked(transition.EntityId, out remoteOrdinal) &&
+                    !TryMapAndCacheRemoteOrdinalLocked(transition.EntityId, out remoteOrdinal))
                 {
-                    transition = transition with { RemotePlayerOrdinal = remoteOrdinal };
+                    remaining.Enqueue(transition);
+                    continue;
                 }
+
+                transition = transition with { RemotePlayerOrdinal = remoteOrdinal };
             }
 
-            resolved.Enqueue(transition);
+            if (transition.Kind == PartyMemberTransitionKind.Joined &&
+                !string.IsNullOrWhiteSpace(transition.EntityId))
+            {
+                _publishedJoinedEntityIds.Add(transition.EntityId);
+                _pendingJoinedEntityIds.Remove(transition.EntityId);
+            }
+
+            _transitions.Enqueue(transition);
         }
 
-        while (resolved.Count != 0)
-            _transitions.Enqueue(resolved.Dequeue());
+        while (remaining.Count != 0)
+            _pendingTransitions.Enqueue(remaining.Dequeue());
+    }
+
+    private void TryConfirmLeaveCandidatesLocked()
+    {
+        if (_leaveCandidates.Count == 0)
+            return;
+
+        if (!TryReadCoherentSnapshot(out _, out var entityIdSlots))
+            return;
+
+        var remaining = new Queue<LeaveCandidate>(_leaveCandidates.Count);
+        while (_leaveCandidates.Count != 0)
+        {
+            var candidate = _leaveCandidates.Dequeue();
+            if (!_publishedJoinedEntityIds.Contains(candidate.EntityId) ||
+                _openEntityIds.Contains(candidate.EntityId) ||
+                entityIdSlots.ContainsKey(candidate.EntityId))
+            {
+                remaining.Enqueue(candidate);
+                continue;
+            }
+
+            var remoteOrdinal = TryGetCachedOrdinalLocked(candidate.EntityId, out var cachedOrdinal)
+                ? cachedOrdinal
+                : 0;
+            _transitions.Enqueue(new PartyMemberTransition(
+                PartyMemberTransitionKind.Left,
+                remoteOrdinal,
+                candidate.EntityId,
+                candidate.LeaveReason,
+                candidate.NativeReason,
+                candidate.ErrorDetail));
+            _publishedJoinedEntityIds.Remove(candidate.EntityId);
+            _remoteOrdinalByEntityId.Remove(candidate.EntityId);
+        }
+
+        while (remaining.Count != 0)
+            _leaveCandidates.Enqueue(remaining.Dequeue());
+    }
+
+    private void CancelLeaveCandidateLocked(string entityId)
+    {
+        if (_leaveCandidates.Count == 0)
+            return;
+
+        var remaining = new Queue<LeaveCandidate>(_leaveCandidates.Count);
+        while (_leaveCandidates.Count != 0)
+        {
+            var candidate = _leaveCandidates.Dequeue();
+            if (!string.Equals(candidate.EntityId, entityId, StringComparison.Ordinal))
+                remaining.Enqueue(candidate);
+        }
+
+        while (remaining.Count != 0)
+            _leaveCandidates.Enqueue(remaining.Dequeue());
     }
 
     private bool TryGetCachedOrdinalLocked(string? entityId, out int remoteOrdinal)
@@ -320,64 +394,38 @@ internal sealed class PartyRoomMemberTracker
         return true;
     }
 
-    private void CacheRemoteOrdinalLocked(string entityId)
-    {
-        if (_remoteOrdinalByEntityId.ContainsKey(entityId))
-            return;
-
-        if (TryMapRemoteOrdinal(entityId, out var remoteOrdinal))
-            _remoteOrdinalByEntityId[entityId] = remoteOrdinal;
-    }
-
     private bool TryMapRemoteOrdinal(string entityId, out int remoteOrdinal)
     {
         remoteOrdinal = 0;
-        if (_identitySnapshotReader is null)
-            return false;
-
-        try
-        {
-            var snapshot = _identitySnapshotReader();
-            if (!PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
-                    snapshot.EntityIds,
-                    snapshot.LocalMemberSlot,
-                    out var entityIdSlots) ||
-                !entityIdSlots.TryGetValue(entityId, out var actualSlot) ||
-                !PartyMemberSlotMap.TryGetRemoteOrdinal(
-                    snapshot.LocalMemberSlot,
-                    actualSlot,
-                    out remoteOrdinal))
-            {
-                return false;
-            }
-
-            return true;
-        }
-        catch
+        if (!TryReadCoherentSnapshot(out var snapshot, out var entityIdSlots) ||
+            !entityIdSlots.TryGetValue(entityId, out var actualSlot) ||
+            !PartyMemberSlotMap.TryGetRemoteOrdinal(
+                snapshot.LocalMemberSlot,
+                actualSlot,
+                out remoteOrdinal))
         {
             return false;
         }
+
+        return true;
     }
 
-    private bool TryConfirmRemoteMemberPresent(string entityId)
+    private bool TryReadCoherentSnapshot(
+        out RelinkPartyMemberIdentitySnapshot snapshot,
+        out IReadOnlyDictionary<string, int> entityIdSlots)
     {
+        snapshot = default;
+        entityIdSlots = new Dictionary<string, int>(StringComparer.Ordinal);
         if (_identitySnapshotReader is null)
             return false;
 
         try
         {
-            var snapshot = _identitySnapshotReader();
-            if (!PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
-                    snapshot.EntityIds,
-                    snapshot.LocalMemberSlot,
-                    out var entityIdSlots) ||
-                !entityIdSlots.TryGetValue(entityId, out var actualSlot) ||
-                actualSlot == snapshot.LocalMemberSlot)
-            {
-                return false;
-            }
-
-            return true;
+            snapshot = _identitySnapshotReader();
+            return PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
+                snapshot.EntityIds,
+                snapshot.LocalMemberSlot,
+                out entityIdSlots);
         }
         catch
         {
@@ -389,6 +437,8 @@ internal sealed class PartyRoomMemberTracker
     {
         _transitions.Clear();
         _pendingTransitions.Clear();
+        _pendingJoinedEntityIds.Clear();
+        _leaveCandidates.Clear();
         _entityIdByEndpoint.Clear();
         _endpointsByEntityId.Clear();
         _openEntityIds.Clear();

@@ -48,13 +48,13 @@ public sealed class PartyRoomMemberTrackerTests
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "joined-player";
         api.EntityIds[SecondRemoteEndpoint] = "joined-player";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("joined-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
 
-        Assert.True(tracker.TryReadTransition(out var joined));
+        var joined = ReadSingle(tracker);
         Assert.Equal(PartyMemberTransitionKind.Joined, joined.Kind);
         Assert.Equal("joined-player", joined.EntityId);
-        Assert.Equal(0, joined.RemotePlayerOrdinal);
-        Assert.False(tracker.TryReadTransition(out _));
+        Assert.Equal(1, joined.RemotePlayerOrdinal);
 
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointCreated(Created(RemoteEndpoint));
@@ -70,7 +70,8 @@ public sealed class PartyRoomMemberTrackerTests
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "multi-endpoint";
         api.EntityIds[SecondRemoteEndpoint] = "multi-endpoint";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("multi-endpoint");
+        var tracker = CreateActiveTracker(api, () => snapshot);
 
         var joined = ReadSingle(tracker);
         Assert.Equal(PartyMemberTransitionKind.Joined, joined.Kind);
@@ -80,6 +81,7 @@ public sealed class PartyRoomMemberTrackerTests
         tracker.OnBatchFinished(Manager);
         Assert.False(tracker.TryReadTransition(out _));
 
+        snapshot = Empty();
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint));
         tracker.OnBatchFinished(Manager);
@@ -104,23 +106,54 @@ public sealed class PartyRoomMemberTrackerTests
     [InlineData(3u, 4u)]
     [InlineData(4u, 5u)]
     [InlineData(99u, 0u)]
-    public void EndpointDestroyedReason_MapsOfficialValuesAndKeepsUnknown(
+    public void EndpointDestroyedReason_MapsOfficialValuesAndWaitsForSnapshotConfirmation(
         uint nativeReason,
         uint expectedReason)
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "reason-player";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("reason-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
         ReadSingle(tracker);
 
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint, nativeReason, 0x1234));
         tracker.OnBatchFinished(Manager);
 
+        Assert.False(tracker.TryReadTransition(out _));
+
+        snapshot = Empty();
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.OnBatchFinished(Manager);
+
         var left = ReadSingle(tracker);
         Assert.Equal((PartyMemberLeaveReason)expectedReason, left.LeaveReason);
         Assert.Equal(nativeReason, left.NativeReason);
         Assert.Equal(0x1234u, left.ErrorDetail);
+    }
+
+    [Fact]
+    public void EndpointDestroyed_SameBatchSnapshotStillHasMember_WaitsForCoherentAbsence()
+    {
+        var api = new FakeEndpointApi();
+        api.EntityIds[RemoteEndpoint] = "still-present";
+        var snapshot = Present("still-present");
+        var tracker = CreateActiveTracker(api, () => snapshot);
+        ReadSingle(tracker);
+
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint, reason: 1));
+        tracker.OnBatchFinished(Manager);
+
+        Assert.False(tracker.TryReadTransition(out _));
+
+        snapshot = Empty();
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.OnBatchFinished(Manager);
+
+        var left = ReadSingle(tracker);
+        Assert.Equal(PartyMemberTransitionKind.Left, left.Kind);
+        Assert.Equal(PartyMemberLeaveReason.Disconnected, left.LeaveReason);
     }
 
     [Fact]
@@ -165,10 +198,12 @@ public sealed class PartyRoomMemberTrackerTests
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "cached-player";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("cached-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
         ReadSingle(tracker);
 
         api.FailEntityId.Add(RemoteEndpoint);
+        snapshot = Empty();
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint, reason: 2));
         tracker.OnBatchFinished(Manager);
@@ -184,10 +219,12 @@ public sealed class PartyRoomMemberTrackerTests
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "cached-player";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("cached-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
         ReadSingle(tracker);
 
         api.EntityIds[RemoteEndpoint] = "different-player";
+        snapshot = Empty();
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint));
         tracker.OnBatchFinished(Manager);
@@ -200,7 +237,8 @@ public sealed class PartyRoomMemberTrackerTests
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "leaving-player";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("leaving-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
         ReadSingle(tracker);
 
         tracker.BeginStateChangeBatch(Manager);
@@ -212,7 +250,29 @@ public sealed class PartyRoomMemberTrackerTests
     }
 
     [Fact]
-    public void DelayedCoherentSnapshot_ResolvesJoinedAndLeftOrdinals()
+    public void JoinedWithoutResolvedOrdinal_IsNotReadable()
+    {
+        var api = new FakeEndpointApi();
+        api.EntityIds[RemoteEndpoint] = "remote-slot-zero";
+        var snapshot = default(RelinkPartyMemberIdentitySnapshot);
+        var tracker = new PartyRoomMemberTracker(api, () => snapshot);
+
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.ActivateRoom();
+        tracker.ObserveEndpointCreated(Created(RemoteEndpoint));
+        tracker.OnBatchFinished(Manager);
+
+        Assert.False(tracker.TryReadTransition(out _));
+
+        snapshot = Present("remote-slot-zero");
+
+        var joined = ReadSingle(tracker);
+        Assert.Equal(PartyMemberTransitionKind.Joined, joined.Kind);
+        Assert.Equal(1, joined.RemotePlayerOrdinal);
+    }
+
+    [Fact]
+    public void DelayedCoherentSnapshot_ResolvesJoinedThenLeftUsingCachedOrdinal()
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "remote-slot-zero";
@@ -223,14 +283,13 @@ public sealed class PartyRoomMemberTrackerTests
         tracker.ObserveEndpointCreated(Created(RemoteEndpoint));
         tracker.OnBatchFinished(Manager);
 
-        snapshot = new RelinkPartyMemberIdentitySnapshot(
-            ["remote-slot-zero", "", "local-player", ""],
-            LocalMemberSlot: 2);
+        snapshot = Present("remote-slot-zero");
 
         var joined = ReadSingle(tracker);
         Assert.Equal(PartyMemberTransitionKind.Joined, joined.Kind);
         Assert.Equal(1, joined.RemotePlayerOrdinal);
 
+        snapshot = Empty();
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint, reason: 1));
         tracker.OnBatchFinished(Manager);
@@ -241,25 +300,55 @@ public sealed class PartyRoomMemberTrackerTests
     }
 
     [Fact]
-    public void Left_UsesCachedOrdinalAfterSnapshotCleared()
+    public void SnapshotUnavailable_SuppressesLeftUntilAbsentSnapshotAvailable()
     {
         var api = new FakeEndpointApi();
-        api.EntityIds[RemoteEndpoint] = "remote-slot-zero";
-        var snapshot = new RelinkPartyMemberIdentitySnapshot(
-            ["remote-slot-zero", "", "local-player", ""],
-            LocalMemberSlot: 2);
+        api.EntityIds[RemoteEndpoint] = "snapshot-gap-player";
+        var snapshot = Present("snapshot-gap-player");
         var tracker = CreateActiveTracker(api, () => snapshot);
-
-        var joined = ReadSingle(tracker);
-        Assert.Equal(1, joined.RemotePlayerOrdinal);
+        ReadSingle(tracker);
 
         snapshot = default;
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint));
         tracker.OnBatchFinished(Manager);
 
+        Assert.False(tracker.TryReadTransition(out _));
+
+        snapshot = Empty();
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.OnBatchFinished(Manager);
+
         var left = ReadSingle(tracker);
-        Assert.Equal(1, left.RemotePlayerOrdinal);
+        Assert.Equal(PartyMemberTransitionKind.Left, left.Kind);
+    }
+
+    [Fact]
+    public void EndpointRecreatedAfterDestroy_CancelsLeaveCandidate()
+    {
+        var api = new FakeEndpointApi();
+        api.EntityIds[RemoteEndpoint] = "recreated-player";
+        api.EntityIds[SecondRemoteEndpoint] = "recreated-player";
+        var snapshot = Present("recreated-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
+        ReadSingle(tracker);
+
+        snapshot = Empty();
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint));
+        tracker.ObserveEndpointCreated(Created(SecondRemoteEndpoint));
+        tracker.OnBatchFinished(Manager);
+
+        Assert.False(tracker.TryReadTransition(out _));
+
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.ObserveEndpointDestroyed(Destroyed(SecondRemoteEndpoint, reason: 2));
+        tracker.OnBatchFinished(Manager);
+
+        var left = ReadSingle(tracker);
+        Assert.Equal(PartyMemberTransitionKind.Left, left.Kind);
+        Assert.Equal("recreated-player", left.EntityId);
+        Assert.Equal(PartyMemberLeaveReason.Kicked, left.LeaveReason);
     }
 
     [Fact]
@@ -267,9 +356,11 @@ public sealed class PartyRoomMemberTrackerTests
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "repeat-left";
-        var tracker = CreateActiveTracker(api);
+        var snapshot = Present("repeat-left");
+        var tracker = CreateActiveTracker(api, () => snapshot);
         ReadSingle(tracker);
 
+        snapshot = Empty();
         tracker.BeginStateChangeBatch(Manager);
         tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint));
         tracker.OnBatchFinished(Manager);
@@ -283,57 +374,19 @@ public sealed class PartyRoomMemberTrackerTests
     }
 
     [Fact]
-    public void DeviceLostAuthentication_IsSuppressedWhileSnapshotStillHasMember()
-    {
-        var api = new FakeEndpointApi();
-        api.EntityIds[RemoteEndpoint] = "device-lost-player";
-        var snapshot = new RelinkPartyMemberIdentitySnapshot(
-            ["device-lost-player", "", "local-player", ""],
-            LocalMemberSlot: 2);
-        var tracker = CreateActiveTracker(api, () => snapshot);
-        ReadSingle(tracker);
-
-        tracker.BeginStateChangeBatch(Manager);
-        tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint, reason: 3));
-        tracker.OnBatchFinished(Manager);
-
-        Assert.False(tracker.TryReadTransition(out _));
-    }
-
-    [Fact]
-    public void DeviceLostAuthentication_EmitsLeftWhenSnapshotNoLongerHasMember()
-    {
-        var api = new FakeEndpointApi();
-        api.EntityIds[RemoteEndpoint] = "device-lost-player";
-        var snapshot = new RelinkPartyMemberIdentitySnapshot(
-            ["device-lost-player", "", "local-player", ""],
-            LocalMemberSlot: 2);
-        var tracker = CreateActiveTracker(api, () => snapshot);
-        ReadSingle(tracker);
-
-        snapshot = new RelinkPartyMemberIdentitySnapshot(
-            ["", "", "local-player", ""],
-            LocalMemberSlot: 2);
-        tracker.BeginStateChangeBatch(Manager);
-        tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint, reason: 3));
-        tracker.OnBatchFinished(Manager);
-
-        var left = ReadSingle(tracker);
-        Assert.Equal(PartyMemberTransitionKind.Left, left.Kind);
-        Assert.Equal(PartyMemberLeaveReason.DeviceLostAuthentication, left.LeaveReason);
-    }
-
-    [Fact]
     public void Reset_AndNewNetwork_ClearPublishedAndPendingEvents()
     {
         var api = new FakeEndpointApi();
         api.EntityIds[RemoteEndpoint] = "old-network-player";
-        var tracker = CreateActiveTracker(api);
-        Assert.True(tracker.TryReadTransition(out _));
+        var snapshot = Present("old-network-player");
+        var tracker = CreateActiveTracker(api, () => snapshot);
+        var oldJoined = ReadSingle(tracker);
+        Assert.Equal("old-network-player", oldJoined.EntityId);
 
         tracker.Reset();
 
         api.EntityIds[SecondRemoteEndpoint] = "new-network-player";
+        snapshot = Present("new-network-player");
         tracker.BeginStateChangeBatch(Manager);
         tracker.ActivateRoom();
         tracker.ObserveEndpointCreated(Created(SecondRemoteEndpoint));
@@ -341,6 +394,26 @@ public sealed class PartyRoomMemberTrackerTests
 
         var joined = ReadSingle(tracker);
         Assert.Equal("new-network-player", joined.EntityId);
+        Assert.False(tracker.TryReadTransition(out _));
+    }
+
+    [Fact]
+    public void CancelStateChangeBatch_ClearsUnpublishedLeaveCandidate()
+    {
+        var api = new FakeEndpointApi();
+        api.EntityIds[RemoteEndpoint] = "cancel-left";
+        var snapshot = Present("cancel-left");
+        var tracker = CreateActiveTracker(api, () => snapshot);
+        ReadSingle(tracker);
+
+        snapshot = Empty();
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.ObserveEndpointDestroyed(Destroyed(RemoteEndpoint));
+        tracker.CancelStateChangeBatch(Manager);
+
+        tracker.BeginStateChangeBatch(Manager);
+        tracker.OnBatchFinished(Manager);
+
         Assert.False(tracker.TryReadTransition(out _));
     }
 
@@ -362,6 +435,12 @@ public sealed class PartyRoomMemberTrackerTests
         Assert.False(tracker.TryReadTransition(out _));
         return transition;
     }
+
+    private static RelinkPartyMemberIdentitySnapshot Present(string entityId) =>
+        new([entityId, "", "local-player", ""], LocalMemberSlot: 2);
+
+    private static RelinkPartyMemberIdentitySnapshot Empty() =>
+        new(["", "", "local-player", ""], LocalMemberSlot: 2);
 
     private static PartyStateChangeSnapshot Created(nint endpoint) =>
         new((uint)PartyStateChangeType.EndpointCreated)

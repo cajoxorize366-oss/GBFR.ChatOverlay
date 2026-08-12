@@ -10,8 +10,8 @@ internal interface IRelinkPlayerNameNativeApi
 }
 
 /// <summary>
-/// Resolves Relink's verified four-party sender slot through the same member table
-/// used by the 2.0.4 executable when it exports <c>member_name</c> to the online UI.
+/// Maps Relink's opaque chat member key to a four-party member index, then reads the
+/// same lobby member table used by the 2.0.4 executable to export <c>member_name</c>.
 /// </summary>
 internal sealed class RelinkPlayerNameResolver
 {
@@ -30,6 +30,7 @@ internal sealed class RelinkPlayerNameResolver
     private readonly nint _memberManagerSlot;
     private readonly IRelinkMemoryReader _memory;
     private readonly IRelinkPlayerNameNativeApi _native;
+    private readonly IRelinkPartyMemberSlotResolver _memberSlotResolver;
     private readonly Action<string> _log;
     private int _failureLogged;
 
@@ -37,17 +38,20 @@ internal sealed class RelinkPlayerNameResolver
         nint memberManagerSlot,
         IRelinkMemoryReader memory,
         IRelinkPlayerNameNativeApi native,
+        IRelinkPartyMemberSlotResolver memberSlotResolver,
         Action<string> log)
     {
         _memberManagerSlot = memberManagerSlot;
         _memory = memory ?? throw new ArgumentNullException(nameof(memory));
         _native = native ?? throw new ArgumentNullException(nameof(native));
+        _memberSlotResolver = memberSlotResolver ?? throw new ArgumentNullException(nameof(memberSlotResolver));
         _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
     internal static RelinkPlayerNameResolver CreateForCurrentProcess(
         nint moduleBase,
         RelinkChatRvas rvas,
+        IRelinkPartyMemberSlotResolver memberSlotResolver,
         Action<string> log)
     {
         if (moduleBase == nint.Zero ||
@@ -61,6 +65,7 @@ internal sealed class RelinkPlayerNameResolver
             moduleBase + rvas.LobbyMemberManagerSlot,
             new CurrentProcessRelinkMemoryReader(),
             new CurrentProcessRelinkPlayerNameNativeApi(moduleBase, rvas),
+            memberSlotResolver,
             log);
     }
 
@@ -69,13 +74,13 @@ internal sealed class RelinkPlayerNameResolver
         playerName = string.Empty;
         try
         {
-            if (senderId > 3)
+            if (!_memberSlotResolver.TryResolveSlot(senderId, out var memberSlot))
             {
-                LogFailureOnce(senderId, "the sender id was outside the four party slots");
+                LogFailureOnce(senderId, "the native member-key resolver could not map the opaque sender key");
                 return false;
             }
 
-            return TryResolveName((int)senderId, senderId, out playerName);
+            return TryResolveName(memberSlot, senderId, out playerName);
         }
         catch (Exception exception)
         {

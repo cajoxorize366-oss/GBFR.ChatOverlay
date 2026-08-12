@@ -101,6 +101,8 @@ internal interface IPartyChatControlApi
 
     uint GetLocalChatControlCount(nint localDevice, out uint chatControlCount);
 
+    uint GetNetworkChatControls(nint network, out nint[] chatControls);
+
     uint CreateChatControl(
         nint localDevice,
         nint localUser,
@@ -226,10 +228,13 @@ internal interface IPartyChatControlApi
 /// </summary>
 internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
 {
+    private const uint MaximumNetworkChatControls = 64;
+
     private readonly PartyGetWorkModeDelegate _getWorkMode;
     private readonly PartyDoWorkDelegate _doWork;
     private readonly PartyGetLocalDeviceDelegate _getLocalDevice;
     private readonly PartyDeviceGetChatControlsDelegate _deviceGetChatControls;
+    private readonly PartyNetworkGetChatControlsDelegate _networkGetChatControls;
     private readonly PartyDeviceCreateChatControlDelegate _deviceCreateChatControl;
     private readonly PartyDeviceDestroyChatControlDelegate _deviceDestroyChatControl;
     private readonly PartyChatControlSetAudioInputMutedDelegate _chatControlSetAudioInputMuted;
@@ -275,6 +280,9 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
         _deviceGetChatControls = Bind<PartyDeviceGetChatControlsDelegate>(
             verifiedPartyModule,
             "PartyDeviceGetChatControls");
+        _networkGetChatControls = Bind<PartyNetworkGetChatControlsDelegate>(
+            verifiedPartyModule,
+            "PartyNetworkGetChatControls");
         _deviceCreateChatControl = Bind<PartyDeviceCreateChatControlDelegate>(
             verifiedPartyModule,
             "PartyDeviceCreateChatControl");
@@ -392,6 +400,42 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
     public uint GetLocalChatControlCount(nint localDevice, out uint chatControlCount)
     {
         return _deviceGetChatControls(localDevice, out chatControlCount, out _);
+    }
+
+    public uint GetNetworkChatControls(nint network, out nint[] chatControls)
+    {
+        var result = _networkGetChatControls(network, out var chatControlCount, out var nativeChatControls);
+        if (result != 0 || chatControlCount == 0)
+        {
+            chatControls = [];
+            return result;
+        }
+
+        if (nativeChatControls == nint.Zero)
+        {
+            throw new InvalidOperationException(
+                "PartyNetworkGetChatControls returned a nonzero count with a null array.");
+        }
+        if (chatControlCount > MaximumNetworkChatControls)
+        {
+            throw new InvalidOperationException(
+                $"PartyNetworkGetChatControls returned an implausible count of {chatControlCount}.");
+        }
+
+        chatControls = new nint[checked((int)chatControlCount)];
+        for (var index = 0; index < chatControls.Length; index++)
+        {
+            var chatControl = Marshal.ReadIntPtr(nativeChatControls, checked(index * nint.Size));
+            if (chatControl == nint.Zero)
+            {
+                throw new InvalidOperationException(
+                    $"PartyNetworkGetChatControls returned a null handle at index {index}.");
+            }
+
+            chatControls[index] = chatControl;
+        }
+
+        return result;
     }
 
     public uint CreateChatControl(
@@ -695,6 +739,12 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyDeviceGetChatControlsDelegate(
         nint device,
+        out uint chatControlCount,
+        out nint chatControls);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyNetworkGetChatControlsDelegate(
+        nint network,
         out uint chatControlCount,
         out nint chatControls);
 

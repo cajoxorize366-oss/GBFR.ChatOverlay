@@ -37,8 +37,8 @@ internal sealed class RelinkPartyMemberIdentityResolver :
     // The lookup's R9 predicate resolves to 0x1403AA460, which returns
     // byte [manager+0x6CCE8] and selects the 0x1C288 bank when nonzero.
     private const int OnlineStateOffset = 0x6CCE8;
-    private const int LocalMemberSlotTableOffset = 0x6C828;
-    private const int LocalMemberSlotStride = sizeof(int);
+    private const int LocalMemberKeyTableOffset = 0x6C828;
+    private const int LocalMemberKeyStride = sizeof(uint);
     // 0x14026C960 copies the second MSVC std::string from source+0x28;
     // Relink serializes that copied field under the member_entity_id key.
     private const int EntityIdStringOffset = 0x28;
@@ -50,26 +50,40 @@ internal sealed class RelinkPartyMemberIdentityResolver :
 
     private readonly nint _managerSlot;
     private readonly IRelinkMemoryReader _memory;
+    private readonly IRelinkPartyMemberSlotResolver _memberSlotResolver;
 
-    internal RelinkPartyMemberIdentityResolver(nint managerSlot, IRelinkMemoryReader memory)
+    internal RelinkPartyMemberIdentityResolver(
+        nint managerSlot,
+        IRelinkMemoryReader memory,
+        IRelinkPartyMemberSlotResolver memberSlotResolver)
     {
         if (managerSlot == nint.Zero)
             throw new ArgumentException("The Relink party-member identity manager slot is null.", nameof(managerSlot));
 
         _managerSlot = managerSlot;
         _memory = memory ?? throw new ArgumentNullException(nameof(memory));
+        _memberSlotResolver = memberSlotResolver ?? throw new ArgumentNullException(nameof(memberSlotResolver));
     }
 
     internal static RelinkPartyMemberIdentityResolver CreateForCurrentProcess(
         nint moduleBase,
-        RelinkChatRvas rvas)
+        RelinkChatRvas rvas) =>
+        CreateForCurrentProcess(moduleBase, rvas, null);
+
+    internal static RelinkPartyMemberIdentityResolver CreateForCurrentProcess(
+        nint moduleBase,
+        RelinkChatRvas rvas,
+        IRelinkPartyMemberSlotResolver? memberSlotResolver)
     {
-        if (moduleBase == nint.Zero || rvas.PartyMemberIdentityManagerSlot <= 0)
+        if (moduleBase == nint.Zero ||
+            rvas.PartyMemberIdentityManagerSlot <= 0 ||
+            rvas.SenderSlotResolver <= 0)
             throw new InvalidOperationException("Relink party-member identity RVAs are unavailable.");
 
         return new RelinkPartyMemberIdentityResolver(
             moduleBase + rvas.PartyMemberIdentityManagerSlot,
-            new CurrentProcessRelinkMemoryReader());
+            new CurrentProcessRelinkMemoryReader(),
+            memberSlotResolver ?? RelinkPartyMemberSlotResolver.CreateForCurrentProcess(moduleBase, rvas));
     }
 
     public bool TryResolveSlot(int memberSlot, out string entityId)
@@ -146,8 +160,8 @@ internal sealed class RelinkPartyMemberIdentityResolver :
     internal bool TryResolveLocalMemberSlot(out int localMemberSlot)
     {
         localMemberSlot = -1;
-        if (!TryBeginPartyRead(out var manager, out var onlineState, out var candidate) ||
-            !TryVerifyPartyRead(manager, onlineState, candidate))
+        if (!TryBeginPartyRead(out var manager, out var onlineState, out var localMemberKey, out var candidate) ||
+            !TryVerifyPartyRead(manager, onlineState, localMemberKey, candidate))
         {
             localMemberSlot = -1;
             return false;
@@ -160,7 +174,11 @@ internal sealed class RelinkPartyMemberIdentityResolver :
     public bool TryResolveCoherentSnapshot(out RelinkPartyMemberIdentitySnapshot snapshot)
     {
         snapshot = default;
-        if (!TryBeginPartyRead(out var manager, out var onlineState, out var localMemberSlot))
+        if (!TryBeginPartyRead(
+                out var manager,
+                out var onlineState,
+                out var localMemberKey,
+                out var localMemberSlot))
             return false;
 
         var bankOffset = onlineState == 0 ? OfflineMemberBankOffset : OnlineMemberBankOffset;
@@ -177,7 +195,7 @@ internal sealed class RelinkPartyMemberIdentityResolver :
             }
         }
 
-        if (!TryVerifyPartyRead(manager, onlineState, localMemberSlot))
+        if (!TryVerifyPartyRead(manager, onlineState, localMemberKey, localMemberSlot))
             return false;
 
         snapshot = new RelinkPartyMemberIdentitySnapshot(entityIds, localMemberSlot);
@@ -187,48 +205,54 @@ internal sealed class RelinkPartyMemberIdentityResolver :
     private bool TryBeginPartyRead(
         out nint manager,
         out byte onlineState,
+        out uint localMemberKey,
         out int localMemberSlot)
     {
         manager = nint.Zero;
         onlineState = 0;
+        localMemberKey = 0;
         localMemberSlot = -1;
         return _memory.TryReadPointer(_managerSlot, out manager) &&
                manager != nint.Zero &&
                TryReadByte(manager, OnlineStateOffset, out onlineState) &&
                onlineState <= 1 &&
-               TryReadLocalSlot(manager, onlineState, out localMemberSlot) &&
+               TryReadLocalMemberKey(manager, onlineState, out localMemberKey) &&
+               _memberSlotResolver.TryResolveSlot(localMemberKey, out localMemberSlot) &&
                localMemberSlot is >= 0 and < MemberCount;
     }
 
     private bool TryVerifyPartyRead(
         nint manager,
         byte onlineState,
+        uint localMemberKey,
         int localMemberSlot)
     {
         return _memory.TryReadPointer(_managerSlot, out var managerAfter) &&
                managerAfter == manager &&
                TryReadByte(manager, OnlineStateOffset, out var onlineStateAfter) &&
                onlineStateAfter == onlineState &&
-               TryReadLocalSlot(manager, onlineState, out var localMemberSlotAfter) &&
+               TryReadLocalMemberKey(manager, onlineState, out var localMemberKeyAfter) &&
+               localMemberKeyAfter == localMemberKey &&
+               _memberSlotResolver.TryResolveSlot(localMemberKeyAfter, out var localMemberSlotAfter) &&
                localMemberSlotAfter == localMemberSlot;
     }
 
-    private bool TryReadLocalSlot(nint manager, byte onlineState, out int localMemberSlot)
+    private bool TryReadLocalMemberKey(nint manager, byte onlineState, out uint localMemberKey)
     {
-        localMemberSlot = -1;
+        localMemberKey = 0;
         if (!TryAdd(
                 manager,
-                checked(LocalMemberSlotTableOffset + (int)onlineState * LocalMemberSlotStride),
+                checked(LocalMemberKeyTableOffset + (int)onlineState * LocalMemberKeyStride),
                 out var tableAddress))
         {
             return false;
         }
 
-        Span<byte> encoded = stackalloc byte[sizeof(int)];
+        Span<byte> encoded = stackalloc byte[sizeof(uint)];
         if (!_memory.TryReadBytes(tableAddress, encoded))
             return false;
 
-        localMemberSlot = BinaryPrimitives.ReadInt32LittleEndian(encoded);
+        localMemberKey = BinaryPrimitives.ReadUInt32LittleEndian(encoded);
         return true;
     }
 

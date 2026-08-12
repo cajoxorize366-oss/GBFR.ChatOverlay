@@ -3,8 +3,8 @@ using System.Diagnostics;
 namespace GBFR.ChatOverlay.Input;
 
 /// <summary>
-/// Converts DirectInput key-state heartbeats into edge notifications and forces a release when
-/// polling stops. This prevents a lost key-up, focus loss or suspended input hook from leaving
+/// Converts physical-input heartbeats into edge notifications and forces a release when polling
+/// stops. This prevents a lost key-up, focus loss or suspended input path from leaving
 /// Party's microphone input unmuted.
 /// </summary>
 public sealed class VoicePushToTalkSafetyGate : IDisposable

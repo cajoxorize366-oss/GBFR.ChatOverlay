@@ -46,7 +46,6 @@ internal sealed class LocalChatIdentityCache
     private readonly object _sync = new();
     private readonly string _fallbackSender;
     private string? _sender;
-    private int _playerNumber;
 
     internal LocalChatIdentityCache(string fallbackSender = "Local")
     {
@@ -57,7 +56,7 @@ internal sealed class LocalChatIdentityCache
     {
         lock (_sync)
         {
-            return new LocalChatIdentity(_sender ?? _fallbackSender, _playerNumber);
+            return new LocalChatIdentity(_sender ?? _fallbackSender, 1);
         }
     }
 
@@ -72,30 +71,11 @@ internal sealed class LocalChatIdentityCache
         }
     }
 
-    internal void UpdatePlayerNumber(int playerNumber)
-    {
-        lock (_sync)
-        {
-            _playerNumber = playerNumber;
-        }
-    }
-
-    internal void Update(string? senderName, int playerNumber)
-    {
-        lock (_sync)
-        {
-            if (!string.IsNullOrWhiteSpace(senderName))
-                _sender = senderName.Trim();
-            _playerNumber = playerNumber;
-        }
-    }
-
     internal void Clear()
     {
         lock (_sync)
         {
             _sender = null;
-            _playerNumber = 0;
         }
     }
 }

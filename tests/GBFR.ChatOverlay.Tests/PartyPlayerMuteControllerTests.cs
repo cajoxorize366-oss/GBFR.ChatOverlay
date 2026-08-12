@@ -418,6 +418,9 @@ public sealed class PartyPlayerMuteControllerTests
         public uint GetLocalChatControlCount(nint localDevice, out uint chatControlCount) =>
             throw new NotSupportedException();
 
+        public uint GetNetworkChatControls(nint network, out nint[] chatControls) =>
+            throw new NotSupportedException();
+
         public uint CreateChatControl(
             nint localDevice,
             nint localUser,

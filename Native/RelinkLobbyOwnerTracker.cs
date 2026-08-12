@@ -21,6 +21,7 @@ internal sealed class RelinkLobbyOwnerTracker
     private readonly IRelinkPartyMemberIdentitySnapshotResolver _identityResolver;
     private readonly IRelinkMemoryReader _memory;
     private readonly Action<string> _log;
+    private readonly Func<PartyNetworkLocalRole> _networkRoleReader;
     private readonly object _lifecycleSync = new();
     private readonly object _stateSync = new();
 
@@ -28,17 +29,30 @@ internal sealed class RelinkLobbyOwnerTracker
     private readonly PartyLobbyOwnerBinding _binding = new();
     private int _initialized;
     private int _suspended;
+    private PartyNetworkLocalRole _lastLoggedRole = (PartyNetworkLocalRole)(-1);
+    private int _lastLoggedHostPlayerNumber = -1;
+
+    internal RelinkLobbyOwnerTracker(
+        ReloadedHooksApi hooks,
+        IRelinkPartyMemberIdentitySnapshotResolver identityResolver,
+        IRelinkMemoryReader memory,
+        Func<PartyNetworkLocalRole>? networkRoleReader,
+        Action<string> log)
+    {
+        _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
+        _identityResolver = identityResolver ?? throw new ArgumentNullException(nameof(identityResolver));
+        _memory = memory ?? throw new ArgumentNullException(nameof(memory));
+        _networkRoleReader = networkRoleReader ?? (() => PartyNetworkLocalRole.Unknown);
+        _log = log ?? throw new ArgumentNullException(nameof(log));
+    }
 
     internal RelinkLobbyOwnerTracker(
         ReloadedHooksApi hooks,
         IRelinkPartyMemberIdentitySnapshotResolver identityResolver,
         IRelinkMemoryReader memory,
         Action<string> log)
+        : this(hooks, identityResolver, memory, null, log)
     {
-        _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
-        _identityResolver = identityResolver ?? throw new ArgumentNullException(nameof(identityResolver));
-        _memory = memory ?? throw new ArgumentNullException(nameof(memory));
-        _log = log ?? throw new ArgumentNullException(nameof(log));
     }
 
     internal void Initialize(nint moduleBase, RelinkChatRvas rvas)
@@ -82,6 +96,16 @@ internal sealed class RelinkLobbyOwnerTracker
 
     internal bool TryGetHostPlayerNumber(out int playerNumber)
     {
+        if (Volatile.Read(ref _initialized) == 0 ||
+            Volatile.Read(ref _suspended) != 0)
+        {
+            playerNumber = 0;
+            return false;
+        }
+
+        // Party room transitions can read room identity while holding their own state lock.
+        // Snapshot the role before taking _stateSync so every path keeps Party -> owner lock order.
+        var role = ReadNetworkRoleSafely();
         lock (_stateSync)
         {
             if (Volatile.Read(ref _initialized) == 0 ||
@@ -94,10 +118,13 @@ internal sealed class RelinkLobbyOwnerTracker
             try
             {
                 playerNumber = 0;
-                return RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+                var resolved = RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
                     _identityResolver,
                     _binding,
+                    role,
                     out playerNumber);
+                LogHostResolutionIfChangedLocked(role, resolved ? playerNumber : 0);
+                return resolved;
             }
             catch (Exception exception)
             {
@@ -113,6 +140,14 @@ internal sealed class RelinkLobbyOwnerTracker
     internal bool TryGetRoomIdentitySnapshot(out PartyRoomIdentitySnapshot snapshot)
     {
         snapshot = default;
+        if (Volatile.Read(ref _initialized) == 0 ||
+            Volatile.Read(ref _suspended) != 0)
+        {
+            return false;
+        }
+
+        // Keep the same lock order as TryGetHostPlayerNumber and PartyRoomSessionTracker.
+        var role = ReadNetworkRoleSafely();
         lock (_stateSync)
         {
             if (Volatile.Read(ref _initialized) == 0 ||
@@ -129,7 +164,7 @@ internal sealed class RelinkLobbyOwnerTracker
                     return true;
                 }
 
-                snapshot = _binding.ResolveSnapshot(identitySnapshot);
+                snapshot = _binding.ResolveSnapshot(identitySnapshot, role);
                 return true;
             }
             catch (Exception exception)
@@ -156,6 +191,8 @@ internal sealed class RelinkLobbyOwnerTracker
         lock (_stateSync)
         {
             _binding.Reset();
+            _lastLoggedRole = (PartyNetworkLocalRole)(-1);
+            _lastLoggedHostPlayerNumber = -1;
         }
     }
 
@@ -317,6 +354,32 @@ internal sealed class RelinkLobbyOwnerTracker
         }
     }
 
+    private PartyNetworkLocalRole ReadNetworkRoleSafely()
+    {
+        try
+        {
+            return _networkRoleReader.Invoke();
+        }
+        catch
+        {
+            return PartyNetworkLocalRole.Unknown;
+        }
+    }
+
+    private void LogHostResolutionIfChangedLocked(
+        PartyNetworkLocalRole role,
+        int hostPlayerNumber)
+    {
+        if (_lastLoggedRole == role && _lastLoggedHostPlayerNumber == hostPlayerNumber)
+            return;
+
+        _lastLoggedRole = role;
+        _lastLoggedHostPlayerNumber = hostPlayerNumber;
+        SafeLog(
+            $"Relink host identity changed: local_role={role}, " +
+            $"host_ui_player={(hostPlayerNumber is >= 1 and <= 4 ? hostPlayerNumber : 0)}.");
+    }
+
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int PFLobbyGetOwnerDelegate(nint lobby, nint ownerOutput);
 }
@@ -326,6 +389,7 @@ internal static class RelinkLobbyOwnerHostRefresh
     internal static bool TryRefreshHostPlayerNumber(
         IRelinkPartyMemberIdentitySnapshotResolver identityResolver,
         PartyLobbyOwnerBinding binding,
+        PartyNetworkLocalRole role,
         out int playerNumber)
     {
         playerNumber = 0;
@@ -336,8 +400,18 @@ internal static class RelinkLobbyOwnerHostRefresh
             return false;
         }
 
-        return binding.TryResolveHostPlayerNumber(snapshot, out playerNumber);
+        return binding.TryResolveHostPlayerNumber(snapshot, role, out playerNumber);
     }
+
+    internal static bool TryRefreshHostPlayerNumber(
+        IRelinkPartyMemberIdentitySnapshotResolver identityResolver,
+        PartyLobbyOwnerBinding binding,
+        out int playerNumber) =>
+        TryRefreshHostPlayerNumber(
+            identityResolver,
+            binding,
+            PartyNetworkLocalRole.Unknown,
+            out playerNumber);
 }
 
 internal static class PartyHostSlotResolver

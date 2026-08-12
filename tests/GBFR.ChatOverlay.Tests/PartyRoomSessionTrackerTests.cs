@@ -497,26 +497,292 @@ public sealed class PartyRoomSessionTrackerTests
         Assert.False(tracker.TryReadTransition(out _));
     }
 
+    [Fact]
+    public void CreateCompletionThenAuthenticationThenEndpoint_ExposesCreated()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        tracker.Observe(CreateNewCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void ConnectCompletionThenAuthenticationThenEndpoint_ExposesConnected()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        tracker.Observe(ConnectCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Connected, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void AuthenticationWithoutRoleCompletion_ExposesUnknown()
+    {
+        var tracker = CreateActiveTracker();
+
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void DuplicateAuthentication_KeepsBoundCreatedRole()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.Observe(Authentication());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void DuplicateAuthentication_KeepsBoundConnectedRole()
+    {
+        var tracker = CreateConnectedGuestTracker();
+
+        tracker.Observe(Authentication());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Connected, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void DuplicateCreateCompletion_DoesNotLeakCreatedRoleIntoNextNetwork()
+    {
+        var tracker = CreateCreatedHostTracker();
+        tracker.Observe(CreateNewCompleted());
+
+        var replacementNetwork = (nint)0x4000;
+        tracker.Observe(Authentication() with { Network = replacementNetwork });
+        tracker.Observe(EndpointCreation() with { Network = replacementNetwork });
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void UnmatchedPendingConnect_IsDiscardedWhenAnotherSessionAuthenticates()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        var unrelatedNetwork = (nint)0x4000;
+        tracker.Observe(ConnectCompleted() with { Network = unrelatedNetwork });
+        tracker.Observe(CreateNewCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+
+        var replacementUser = (nint)0x5000;
+        tracker.Observe(Authentication() with
+        {
+            Network = unrelatedNetwork,
+            LocalUser = replacementUser,
+        });
+        tracker.Observe(EndpointCreation() with
+        {
+            Network = unrelatedNetwork,
+            LocalUser = replacementUser,
+        });
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void MismatchedAuthentication_ClearsCreatedRoleAndClosesRoom()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.Observe(new PartyStateChangeSnapshot((uint)PartyStateChangeType.AuthenticateLocalUserCompleted)
+        {
+            Result = 0,
+            Network = (nint)0x4000,
+            LocalUser = (nint)0x5000,
+        });
+
+        Assert.False(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void FailedCreateCompletion_AfterRoleBound_ClearsOnlyTheHostRole()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.Observe(new PartyStateChangeSnapshot((uint)PartyStateChangeType.CreateNewNetworkCompleted)
+        {
+            Result = 1,
+            LocalUser = LocalUser,
+        });
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+        Assert.True(tracker.TryReadTransition(out var entered));
+        Assert.Equal(PartyRoomTransitionKind.Entered, entered.Kind);
+        Assert.False(tracker.TryReadTransition(out _));
+    }
+
+    [Fact]
+    public void FailedConnectCompletion_AfterRoleBound_ClearsOnlyTheHostRole()
+    {
+        var tracker = CreateConnectedGuestTracker();
+
+        tracker.Observe(new PartyStateChangeSnapshot((uint)PartyStateChangeType.ConnectToNetworkCompleted)
+        {
+            Result = 1,
+            Network = Network,
+        });
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+        Assert.True(tracker.TryReadTransition(out var entered));
+        Assert.Equal(PartyRoomTransitionKind.Entered, entered.Kind);
+        Assert.False(tracker.TryReadTransition(out _));
+    }
+
+    [Fact]
+    public void ConnectCompletion_AfterCreatedRole_KeepsCreatedRole()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.Observe(ConnectCompleted());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void CreateCompletion_AfterConnectedRole_UpgradesToCreatedWithoutClosingRoom()
+    {
+        var tracker = CreateConnectedGuestTracker();
+
+        tracker.Observe(CreateNewCompleted());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+        Assert.True(tracker.TryReadTransition(out var entered));
+        Assert.Equal(PartyRoomTransitionKind.Entered, entered.Kind);
+        Assert.False(tracker.TryReadTransition(out _));
+    }
+
+    [Fact]
+    public void CreateThenConnectBeforeAuthentication_ExposesCreated()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        tracker.Observe(CreateNewCompleted());
+        tracker.Observe(ConnectCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void ConnectThenCreateBeforeAuthentication_ExposesCreated()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        tracker.Observe(ConnectCompleted());
+        tracker.Observe(CreateNewCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+
+        Assert.True(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Created, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void Reset_ClearsLocalNetworkRole()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.Reset();
+
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void MarkNetworkLeaveQueued_ClearsLocalNetworkRole()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.MarkNetworkLeaveQueued(Network);
+
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
+    [Fact]
+    public void CleanupReset_ClearsLocalNetworkRole()
+    {
+        var tracker = CreateCreatedHostTracker();
+
+        tracker.ResetPreservingTransitions();
+
+        Assert.False(tracker.IsActive);
+        Assert.Equal(PartyNetworkLocalRole.Unknown, tracker.LocalNetworkRole);
+    }
+
     private static void ConsumeEntered(PartyRoomSessionTracker tracker)
     {
         Assert.True(tracker.TryReadTransition(out var entered));
         Assert.Equal(PartyRoomTransitionKind.Entered, entered.Kind);
     }
 
+    private static PartyRoomSessionTracker CreateCreatedHostTracker()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        tracker.Observe(CreateNewCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+        Assert.True(tracker.IsActive);
+        return tracker;
+    }
+
+    private static PartyRoomSessionTracker CreateConnectedGuestTracker()
+    {
+        var tracker = new PartyRoomSessionTracker();
+        tracker.Observe(ConnectCompleted());
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+        Assert.True(tracker.IsActive);
+        return tracker;
+    }
+
     private static PartyRoomSessionTracker CreateActiveTracker()
     {
         var tracker = new PartyRoomSessionTracker();
         tracker.Observe(Authentication());
-        tracker.Observe(new PartyStateChangeSnapshot((uint)PartyStateChangeType.CreateEndpointCompleted)
+        tracker.Observe(EndpointCreation());
+        Assert.True(tracker.IsActive);
+        return tracker;
+    }
+
+    private static PartyStateChangeSnapshot CreateNewCompleted() =>
+        new((uint)PartyStateChangeType.CreateNewNetworkCompleted)
+        {
+            Result = 0,
+            LocalUser = LocalUser,
+        };
+
+    private static PartyStateChangeSnapshot ConnectCompleted() =>
+        new((uint)PartyStateChangeType.ConnectToNetworkCompleted)
+        {
+            Result = 0,
+            Network = Network,
+        };
+
+    private static PartyStateChangeSnapshot EndpointCreation() =>
+        new((uint)PartyStateChangeType.CreateEndpointCompleted)
         {
             Result = 0,
             Network = Network,
             LocalUser = LocalUser,
             Endpoint = Endpoint,
-        });
-        Assert.True(tracker.IsActive);
-        return tracker;
-    }
+        };
 
     private static PartyStateChangeSnapshot Authentication() =>
         new((uint)PartyStateChangeType.AuthenticateLocalUserCompleted)

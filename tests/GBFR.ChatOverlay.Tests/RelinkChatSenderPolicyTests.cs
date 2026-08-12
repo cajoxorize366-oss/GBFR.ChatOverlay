@@ -84,19 +84,38 @@ public sealed class RelinkChatSenderPolicyTests
     }
 
     [Fact]
-    public void LocalIdentityCache_UpdatesPlayerNumberEvenWhenNameIsUnavailable()
+    public void LocalIdentityCache_AlwaysUsesUiPlayerOneAcrossNameUpdates()
     {
         var cache = new LocalChatIdentityCache("Local");
-        cache.Update("Djeeta", 1);
+        cache.UpdateName("Djeeta");
 
-        cache.Update(null, 2);
+        cache.UpdateName(null);
         var identity = cache.Read();
 
         Assert.Equal("Djeeta", identity.Sender);
-        Assert.Equal(2, identity.PlayerNumber);
+        Assert.Equal(1, identity.PlayerNumber);
 
         cache.Clear();
         Assert.Equal("Local", cache.Read().Sender);
-        Assert.Equal(0, cache.Read().PlayerNumber);
+        Assert.Equal(1, cache.Read().PlayerNumber);
+    }
+
+    [Fact]
+    public void LocalEcho_PreservesVerifiedIdentityAndPresentationCue()
+    {
+        var completedAt = new DateTimeOffset(2026, 8, 12, 20, 0, 0, TimeSpan.FromHours(8));
+
+        var message = RelinkChatBridge.CreateLocalEchoMessage(
+            "Victory!",
+            new LocalChatIdentity("Kuro", 1),
+            completedAt,
+            ChatCommunicationCue.Victory);
+
+        Assert.Equal("Kuro", message.Sender);
+        Assert.Equal("Victory!", message.Text);
+        Assert.Equal(1, message.PlayerNumber);
+        Assert.True(message.IsLocal);
+        Assert.Equal(ChatCommunicationCue.Victory, message.CommunicationCue);
+        Assert.Equal(completedAt, message.ReceivedAt);
     }
 }

@@ -19,8 +19,24 @@ internal sealed class PartyRoomSessionTracker
     private PartyRoomExitReason? _pendingExitReason;
     private string? _pendingExitRoomName;
     private int _active;
+    private readonly HashSet<nint> _createdLocalUsers = new();
+    private readonly HashSet<nint> _connectedNetworks = new();
+    private PartyNetworkLocalRole _networkRole;
 
     internal bool IsActive => Volatile.Read(ref _active) != 0;
+
+    internal PartyNetworkLocalRole LocalNetworkRole
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return Volatile.Read(ref _active) != 0
+                    ? _networkRole
+                    : PartyNetworkLocalRole.Unknown;
+            }
+        }
+    }
 
     internal void ConfigureSnapshotReaders(
         Func<PartyRoomIdentitySnapshot>? roomIdentityReader,
@@ -54,6 +70,12 @@ internal sealed class PartyRoomSessionTracker
         {
             switch ((PartyStateChangeType)snapshot.Type)
             {
+                case PartyStateChangeType.CreateNewNetworkCompleted:
+                    ObserveCreateNewNetworkLocked(snapshot);
+                    break;
+                case PartyStateChangeType.ConnectToNetworkCompleted:
+                    ObserveConnectToNetworkLocked(snapshot);
+                    break;
                 case PartyStateChangeType.AuthenticateLocalUserCompleted:
                     ObserveAuthenticationLocked(snapshot);
                     break;
@@ -186,6 +208,9 @@ internal sealed class PartyRoomSessionTracker
             _pendingExitReason = reason;
             _pendingExitRoomName = identity?.RoomName;
             Volatile.Write(ref _active, 0);
+            _networkRole = PartyNetworkLocalRole.Unknown;
+            _createdLocalUsers.Clear();
+            _connectedNetworks.Clear();
         }
     }
 
@@ -242,17 +267,139 @@ internal sealed class PartyRoomSessionTracker
 
         if (_network != snapshot.Network || _localUser != snapshot.LocalUser)
         {
+            var pendingCreated = snapshot.LocalUser != nint.Zero &&
+                                 _createdLocalUsers.Contains(snapshot.LocalUser);
+            var pendingConnected = snapshot.Network != nint.Zero &&
+                                   _connectedNetworks.Contains(snapshot.Network);
+
             if (_leaveQueued)
                 FinalizePendingLeaveLocked();
-            else
+            else if (_network != nint.Zero || _localUser != nint.Zero)
                 ResetLocked(
                     emitExited: true,
                     exitReason: PartyRoomExitReason.NetworkInterrupted);
+
+            if (pendingCreated)
+                _createdLocalUsers.Add(snapshot.LocalUser);
+            if (pendingConnected)
+                _connectedNetworks.Add(snapshot.Network);
+        }
+
+        if (_network != snapshot.Network ||
+            _localUser != snapshot.LocalUser ||
+            _networkRole == PartyNetworkLocalRole.Unknown)
+        {
+            BindNetworkRoleLocked(snapshot.Network, snapshot.LocalUser);
         }
 
         _network = snapshot.Network;
         _localUser = snapshot.LocalUser;
         _authenticated = true;
+    }
+
+    private void ObserveCreateNewNetworkLocked(in PartyStateChangeSnapshot snapshot)
+    {
+        if (snapshot.Result != 0 || snapshot.LocalUser == nint.Zero)
+        {
+            if (snapshot.LocalUser != nint.Zero &&
+                (_createdLocalUsers.Remove(snapshot.LocalUser) ||
+                 (_localUser != nint.Zero &&
+                  snapshot.LocalUser == _localUser &&
+                  _networkRole == PartyNetworkLocalRole.Created)))
+            {
+                ClearNetworkRoleLocked();
+            }
+
+            return;
+        }
+
+        if (_authenticated && _localUser == snapshot.LocalUser)
+        {
+            if (_networkRole == PartyNetworkLocalRole.Created)
+                return;
+            if (_networkRole == PartyNetworkLocalRole.Connected)
+            {
+                // The creator may queue ConnectToNetwork immediately, before the asynchronous
+                // CreateNewNetwork completion is delivered. A later matching create completion
+                // is stronger evidence and upgrades the current local role without closing it.
+                _networkRole = PartyNetworkLocalRole.Created;
+                return;
+            }
+        }
+
+        if (_createdLocalUsers.Add(snapshot.LocalUser))
+        {
+            if (_authenticated &&
+                _networkRole == PartyNetworkLocalRole.Unknown &&
+                _localUser == snapshot.LocalUser)
+            {
+                BindNetworkRoleLocked(_network, _localUser);
+            }
+        }
+    }
+
+    private void ObserveConnectToNetworkLocked(in PartyStateChangeSnapshot snapshot)
+    {
+        if (snapshot.Result != 0 || snapshot.Network == nint.Zero)
+        {
+            if (snapshot.Network != nint.Zero &&
+                (_connectedNetworks.Remove(snapshot.Network) ||
+                 (_network != nint.Zero &&
+                  snapshot.Network == _network &&
+                  _networkRole == PartyNetworkLocalRole.Connected)))
+            {
+                ClearNetworkRoleLocked();
+            }
+
+            return;
+        }
+
+        if (_authenticated && _network == snapshot.Network)
+        {
+            if (_networkRole is PartyNetworkLocalRole.Connected or PartyNetworkLocalRole.Created)
+                return;
+        }
+
+        if (_connectedNetworks.Add(snapshot.Network))
+        {
+            if (_authenticated &&
+                _networkRole == PartyNetworkLocalRole.Unknown &&
+                _network == snapshot.Network)
+            {
+                BindNetworkRoleLocked(_network, _localUser);
+            }
+        }
+    }
+
+    private void BindNetworkRoleLocked(nint network, nint localUser)
+    {
+        var created = localUser != nint.Zero && _createdLocalUsers.Contains(localUser);
+        var connected = network != nint.Zero && _connectedNetworks.Contains(network);
+        _createdLocalUsers.Clear();
+        _connectedNetworks.Clear();
+        // PartyCreateNewNetwork allocates the relay but does not connect the local device.
+        // The creator therefore also completes ConnectToNetwork before authentication.
+        // Creation is the stronger role signal and must win when both completions match.
+        if (created)
+        {
+            _networkRole = PartyNetworkLocalRole.Created;
+            return;
+        }
+
+        if (connected)
+        {
+            _networkRole = PartyNetworkLocalRole.Connected;
+            return;
+        }
+
+        _networkRole = PartyNetworkLocalRole.Unknown;
+    }
+
+    private void ClearNetworkRoleLocked()
+    {
+        _networkRole = PartyNetworkLocalRole.Unknown;
+        _createdLocalUsers.Clear();
+        _connectedNetworks.Clear();
     }
 
     private void ObserveEndpointCreationLocked(in PartyStateChangeSnapshot snapshot)
@@ -303,6 +450,9 @@ internal sealed class PartyRoomSessionTracker
         _localUser = nint.Zero;
         _localEndpoint = nint.Zero;
         _authenticated = false;
+        _networkRole = PartyNetworkLocalRole.Unknown;
+        _createdLocalUsers.Clear();
+        _connectedNetworks.Clear();
         _leaveQueued = false;
         _pendingExitReason = null;
         _pendingExitRoomName = null;

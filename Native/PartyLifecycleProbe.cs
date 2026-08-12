@@ -50,7 +50,7 @@ public sealed class PartyLifecycleProbe
     private int _startFailureLogged;
     private int _finishFailureLogged;
     private int _diagnosticRequestFailureLogged;
-    private int _voiceActivityFailureLogged;
+    private int _identitySnapshotFailureLogged;
     private nint _audioWorkStartPendingManager;
 
     public PartyLifecycleProbe(
@@ -108,6 +108,11 @@ public sealed class PartyLifecycleProbe
 
     public bool IsOnlineRoomActive =>
         IsInitialized && !Volatile.Read(ref _suspended) && _onlineRoom.IsActive;
+
+    internal PartyNetworkLocalRole LocalNetworkRole =>
+        IsOnlineRoomActive
+            ? _onlineRoom.LocalNetworkRole
+            : PartyNetworkLocalRole.Unknown;
 
     public bool IsVoiceTestAvailable => IsInitialized && _enableVoiceTest && _chatControlCanary is not null;
 
@@ -177,39 +182,32 @@ public sealed class PartyLifecycleProbe
         }
     }
 
-    internal IReadOnlyList<int> GetTalkingRemotePlayers()
+    internal PartyVoiceIndicatorSnapshot GetVoiceIndicatorSnapshot()
     {
         if (!IsInitialized || Volatile.Read(ref _suspended) || !_onlineRoom.IsActive)
-            return Array.Empty<int>();
+            return PartyVoiceIndicatorSnapshot.Unavailable;
 
         try
         {
-            var talkingEntityIds = _chatControlCanary?.GetTalkingRemoteEntityIds();
-            if (talkingEntityIds is null || talkingEntityIds.Count == 0 ||
-                _partyIdentityResolver?.TryResolveCoherentSnapshot(out var snapshot) != true)
-            {
-                return Array.Empty<int>();
-            }
+            if (_partyIdentityResolver?.TryResolveCoherentSnapshot(out var identitySnapshot) != true)
+                return PartyVoiceIndicatorSnapshot.Unavailable;
 
-            return MapTalkingRemotePlayers(snapshot, talkingEntityIds);
+            var entitySnapshot = _chatControlCanary?.GetVoiceEntitySnapshot() ??
+                                 PartyVoiceEntitySnapshot.Empty;
+            return MapVoiceIndicatorSnapshot(identitySnapshot, entitySnapshot);
         }
         catch (Exception exception)
         {
-            if (Interlocked.Exchange(ref _voiceActivityFailureLogged, 1) == 0)
-            {
-                EnqueueLog(
-                    $"Read-only remote voice activity lookup failed; further failures are suppressed: " +
-                    $"{exception.GetType().Name}: {exception.Message}");
-            }
-            return Array.Empty<int>();
+            LogIdentitySnapshotFailureOnce("voice indicator", exception);
+            return PartyVoiceIndicatorSnapshot.Unavailable;
         }
     }
 
-    internal static IReadOnlyList<int> MapTalkingRemotePlayers(
+    internal static IReadOnlyList<int> MapRemotePlayers(
         RelinkPartyMemberIdentitySnapshot snapshot,
-        IReadOnlyCollection<string>? talkingEntityIds)
+        IReadOnlyCollection<string>? entityIds)
     {
-        if (talkingEntityIds is null || talkingEntityIds.Count == 0 ||
+        if (entityIds is null || entityIds.Count == 0 ||
             !PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
                 snapshot.EntityIds,
                 snapshot.LocalMemberSlot,
@@ -218,14 +216,16 @@ public sealed class PartyLifecycleProbe
             return Array.Empty<int>();
         }
 
-        var entityIds = snapshot.EntityIds;
-        var talking = talkingEntityIds.ToHashSet(StringComparer.Ordinal);
+        var entityIdSlots = snapshot.EntityIds;
+        var selected = entityIds.ToHashSet(StringComparer.Ordinal);
+        if (selected.Count != entityIds.Count)
+            return Array.Empty<int>();
         var result = new List<int>(3);
         for (var actualSlot = 0; actualSlot < PartyMemberSlotMap.MemberCount; actualSlot++)
         {
             if (actualSlot == snapshot.LocalMemberSlot ||
-                string.IsNullOrEmpty(entityIds[actualSlot]) ||
-                !talking.Contains(entityIds[actualSlot]) ||
+                string.IsNullOrEmpty(entityIdSlots[actualSlot]) ||
+                !selected.Contains(entityIdSlots[actualSlot]) ||
                 !PartyMemberSlotMap.TryGetRemoteOrdinal(
                     snapshot.LocalMemberSlot,
                     actualSlot,
@@ -238,6 +238,65 @@ public sealed class PartyLifecycleProbe
         }
 
         return result;
+    }
+
+    internal static IReadOnlyList<int> MapOccupiedRemotePlayers(
+        RelinkPartyMemberIdentitySnapshot snapshot)
+    {
+        if (!PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
+                snapshot.EntityIds,
+                snapshot.LocalMemberSlot,
+                out _))
+        {
+            return Array.Empty<int>();
+        }
+
+        var entityIdSlots = snapshot.EntityIds;
+        var result = new List<int>(3);
+        for (var actualSlot = 0; actualSlot < PartyMemberSlotMap.MemberCount; actualSlot++)
+        {
+            if (actualSlot == snapshot.LocalMemberSlot ||
+                string.IsNullOrEmpty(entityIdSlots[actualSlot]) ||
+                !PartyMemberSlotMap.TryGetRemoteOrdinal(
+                    snapshot.LocalMemberSlot,
+                    actualSlot,
+                    out var remoteOrdinal))
+            {
+                continue;
+            }
+
+            result.Add(remoteOrdinal);
+        }
+
+        return result;
+    }
+
+    internal static IReadOnlyList<int> MapTalkingRemotePlayers(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        IReadOnlyCollection<string>? talkingEntityIds) =>
+        MapRemotePlayers(snapshot, talkingEntityIds);
+
+    internal static PartyVoiceIndicatorSnapshot MapVoiceIndicatorSnapshot(
+        RelinkPartyMemberIdentitySnapshot identitySnapshot,
+        PartyVoiceEntitySnapshot entitySnapshot)
+    {
+        if (!PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
+                identitySnapshot.EntityIds,
+                identitySnapshot.LocalMemberSlot,
+                out _))
+        {
+            return PartyVoiceIndicatorSnapshot.Unavailable;
+        }
+
+        return new PartyVoiceIndicatorSnapshot(
+            true,
+            MapRemotePlayers(
+                identitySnapshot,
+                entitySnapshot.EstablishedRemoteEntityIds ?? Array.Empty<string>()),
+            MapOccupiedRemotePlayers(identitySnapshot),
+            MapRemotePlayers(
+                identitySnapshot,
+                entitySnapshot.TalkingRemoteEntityIds ?? Array.Empty<string>()));
     }
 
     internal PartyPlayerMuteOperationResult SetPlayerMuted(int playerNumber, bool muted)
@@ -790,7 +849,15 @@ public sealed class PartyLifecycleProbe
 
             var snapshot = PartyStateChangeReader.Read(stateChange);
             var roomWasActive = _onlineRoom.IsActive;
+            var previousLocalNetworkRole = _onlineRoom.LocalNetworkRole;
             _onlineRoom.Observe(snapshot);
+            var currentLocalNetworkRole = _onlineRoom.LocalNetworkRole;
+            if (currentLocalNetworkRole != previousLocalNetworkRole)
+            {
+                EnqueueLog(
+                    $"Party local network role changed: " +
+                    $"{previousLocalNetworkRole} -> {currentLocalNetworkRole}.");
+            }
             if (roomWasActive && !_onlineRoom.IsActive)
                 InvalidateRoomIdentitySafely();
             if (_enableLifecycleLogging && PartyStateChangeCatalog.IsLifecycle(snapshot.Type))
@@ -865,6 +932,16 @@ public sealed class PartyLifecycleProbe
         {
             EnqueueLog(
                 $"Party lifecycle inspection failed; further inspection errors are suppressed: {exception.Message}");
+        }
+    }
+
+    private void LogIdentitySnapshotFailureOnce(string operation, Exception exception)
+    {
+        if (Interlocked.Exchange(ref _identitySnapshotFailureLogged, 1) == 0)
+        {
+            EnqueueLog(
+                $"Read-only {operation} identity lookup failed; further failures are suppressed: " +
+                $"{exception.GetType().Name}: {exception.Message}");
         }
     }
 

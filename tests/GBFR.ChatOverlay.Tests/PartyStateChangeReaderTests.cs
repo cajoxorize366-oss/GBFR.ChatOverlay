@@ -234,6 +234,62 @@ public sealed class PartyStateChangeReaderTests
         }
     }
 
+    [Fact]
+    public void Read_CreateNewNetworkCompleted_UsesOfficialPack8Offsets()
+    {
+        var pointer = Marshal.AllocHGlobal(72);
+        try
+        {
+            Zero(pointer, 72);
+            Marshal.WriteInt32(pointer, 0, (int)PartyStateChangeType.CreateNewNetworkCompleted);
+            Marshal.WriteInt32(pointer, 4, 0);
+            Marshal.WriteInt32(pointer, 8, unchecked((int)0xAABBCCDD));
+            Marshal.WriteIntPtr(pointer, 16, (nint)0x1111);
+            Marshal.WriteIntPtr(pointer, 64, (nint)0x2222);
+
+            var snapshot = PartyStateChangeReader.Read(pointer);
+
+            Assert.Equal((uint)PartyStateChangeType.CreateNewNetworkCompleted, snapshot.Type);
+            Assert.Equal(0u, snapshot.Result);
+            Assert.Equal(0xAABBCCDDu, snapshot.ErrorDetail);
+            Assert.Equal((nint)0x1111, snapshot.LocalUser);
+            Assert.Equal((nint)0x2222, snapshot.AsyncIdentifier);
+            Assert.Equal(nint.Zero, snapshot.Network);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    [Fact]
+    public void Read_ConnectToNetworkCompleted_UsesOfficialPack8Offsets()
+    {
+        var pointer = Marshal.AllocHGlobal(392);
+        try
+        {
+            Zero(pointer, 392);
+            Marshal.WriteInt32(pointer, 0, (int)PartyStateChangeType.ConnectToNetworkCompleted);
+            Marshal.WriteInt32(pointer, 4, 0);
+            Marshal.WriteInt32(pointer, 8, unchecked((int)0xAABBCCDD));
+            Marshal.WriteIntPtr(pointer, 376, (nint)0x3333);
+            Marshal.WriteIntPtr(pointer, 384, (nint)0x4444);
+
+            var snapshot = PartyStateChangeReader.Read(pointer);
+
+            Assert.Equal((uint)PartyStateChangeType.ConnectToNetworkCompleted, snapshot.Type);
+            Assert.Equal(0u, snapshot.Result);
+            Assert.Equal(0xAABBCCDDu, snapshot.ErrorDetail);
+            Assert.Equal((nint)0x3333, snapshot.AsyncIdentifier);
+            Assert.Equal((nint)0x4444, snapshot.Network);
+            Assert.Equal(nint.Zero, snapshot.LocalUser);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
     private static void Zero(nint pointer, int length)
     {
         for (var offset = 0; offset < length; offset++)

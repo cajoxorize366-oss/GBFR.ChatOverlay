@@ -57,17 +57,9 @@ public static class RelinkChatPacketDecoder
     public static bool TryDecode(
         ReadOnlySpan<byte> packet,
         DateTimeOffset receivedAt,
-        out IncomingChatMessage message) =>
-        TryDecode(packet, receivedAt, out message, out _);
-
-    internal static bool TryDecode(
-        ReadOnlySpan<byte> packet,
-        DateTimeOffset receivedAt,
-        out IncomingChatMessage message,
-        out bool hasExplicitSenderLabel)
+        out IncomingChatMessage message)
     {
         message = default;
-        hasExplicitSenderLabel = false;
         if (packet.Length < PacketBytesToCopy)
             return false;
 
@@ -90,14 +82,18 @@ public static class RelinkChatPacketDecoder
             SenderLabelBufferSize - 1,
             out var senderLabel);
 
-        var cue = ClassifyCommunicationCue(senderLabel, out var isMachineCue);
-        hasExplicitSenderLabel = decodedSenderLabel && !string.IsNullOrWhiteSpace(senderLabel) && !isMachineCue;
-        var sender = !hasExplicitSenderLabel
-            ? $"Player {senderId:X8}"
-            : senderLabel.Trim();
+        _ = decodedSenderLabel;
+        var cue = ClassifyCommunicationCue(senderLabel, out _);
         var category = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(CategoryOffset, sizeof(uint)));
         var metadata = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(MetadataOffset, sizeof(uint)));
-        message = new IncomingChatMessage(sender, text, senderId, category, metadata, receivedAt, CommunicationCue: cue);
+        message = new IncomingChatMessage(
+            $"Player {senderId:X8}",
+            text,
+            senderId,
+            category,
+            metadata,
+            receivedAt,
+            CommunicationCue: cue);
         return true;
     }
 

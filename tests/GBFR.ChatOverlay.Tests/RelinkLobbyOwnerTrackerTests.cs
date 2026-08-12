@@ -65,14 +65,70 @@ public sealed class RelinkLobbyOwnerTrackerTests
         Assert.True(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
             resolver,
             binding,
+            PartyNetworkLocalRole.Connected,
             out var first));
-        Assert.Equal(1, first);
+        Assert.Equal(2, first);
 
         Assert.False(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
             resolver,
             binding,
+            PartyNetworkLocalRole.Connected,
             out var second));
         Assert.Equal(0, second);
+    }
+
+    [Fact]
+    public void TryRefreshHostPlayerNumber_ConnectedRoleExcludesLocalCandidate()
+    {
+        var binding = new PartyLobbyOwnerBinding();
+        binding.ObserveOwner((nint)0x5000, "local-owner");
+        binding.ObserveOwner((nint)0x5001, "remote-owner");
+        var resolver = new SequenceSnapshotResolver(
+            new RelinkPartyMemberIdentitySnapshot(
+                ["remote-owner", "", "local-owner", ""],
+                LocalMemberSlot: 2));
+
+        Assert.True(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+            resolver,
+            binding,
+            PartyNetworkLocalRole.Connected,
+            out var playerNumber));
+        Assert.Equal(2, playerNumber);
+    }
+
+    [Fact]
+    public void TryRefreshHostPlayerNumber_ConnectedOnlyLocalCandidate_ReturnsFalse()
+    {
+        var binding = new PartyLobbyOwnerBinding();
+        binding.ObserveOwner((nint)0x5000, "local-owner");
+        var resolver = new SequenceSnapshotResolver(
+            new RelinkPartyMemberIdentitySnapshot(
+                ["", "", "local-owner", ""],
+                LocalMemberSlot: 2));
+
+        Assert.False(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+            resolver,
+            binding,
+            PartyNetworkLocalRole.Connected,
+            out var playerNumber));
+        Assert.Equal(0, playerNumber);
+    }
+
+    [Fact]
+    public void TryRefreshHostPlayerNumber_CreatedRoleReturnsLocalHostWithoutCandidate()
+    {
+        var binding = new PartyLobbyOwnerBinding();
+        var resolver = new SequenceSnapshotResolver(
+            new RelinkPartyMemberIdentitySnapshot(
+                ["first", "", "third", ""],
+                LocalMemberSlot: 1));
+
+        Assert.True(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+            resolver,
+            binding,
+            PartyNetworkLocalRole.Created,
+            out var playerNumber));
+        Assert.Equal(1, playerNumber);
     }
 
     private sealed class SequenceSnapshotResolver : IRelinkPartyMemberIdentitySnapshotResolver

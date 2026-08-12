@@ -23,6 +23,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private const int VirtualKeyShift = 0x10;
     private const int VirtualKeyControl = 0x11;
     private const int VirtualKeyAlt = 0x12;
+    private const int VirtualKeyLeftShift = 0xA0;
+    private const int VirtualKeyRightShift = 0xA1;
+    private const int VirtualKeyLeftControl = 0xA2;
+    private const int VirtualKeyRightControl = 0xA3;
+    private const int VirtualKeyLeftAlt = 0xA4;
+    private const int VirtualKeyRightAlt = 0xA5;
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
     private const uint WmChar = 0x0102;
@@ -58,12 +64,14 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly ChatBlacklist _chatBlacklist;
     private readonly Func<int?> _getHostPlayerNumber;
     private readonly Func<int, string?> _getRemotePlayerName;
-    private readonly Func<IReadOnlyList<int>> _getTalkingRemotePlayers;
+    private readonly Func<PartyVoiceIndicatorSnapshot> _getVoiceIndicatorSnapshot;
     private readonly Func<PartyRoomTransition?> _readRoomTransition;
     private readonly Func<int> _getEstablishedVoiceParticipantCount;
     private readonly Func<DateTimeOffset> _getCurrentTime;
     private readonly XInputControllerPoller _controllerInputPoller = new();
     private readonly FlydigiExtendedControllerPoller _flydigiControllerInputPoller = new();
+    private readonly VoicePushToTalkSafetyGate _windowVoicePushToTalkGate;
+    private readonly Func<int, bool> _isWindowKeyDown;
     private readonly MouseInteractionGate _mouseInteractionGate = new();
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private readonly byte[] _quickActionNameBuffer = new byte[256];
@@ -77,6 +85,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly int[] _remotePlayerChatMuteKeyDown = new int[3];
     private readonly bool[] _controllerRemotePlayerChatMuteWasDown = new bool[3];
     private readonly HashSet<int> _talkingRemotePlayers = [];
+    private PartyVoiceIndicatorSnapshot _voiceIndicatorSnapshot = PartyVoiceIndicatorSnapshot.Unavailable;
     private readonly object _bindingCaptureSync = new();
     private ImeCandidateSnapshot? _imeCandidateSnapshot;
     private int _openRequested;
@@ -145,6 +154,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private string? _captureStatusText;
     private string? _playerMuteStatusText;
     private string? _voiceMuteStatusText;
+    private string? _lastVoiceIndicatorSnapshotFingerprint;
+    private int _voiceIndicatorSnapshotFailureLogged;
 
     internal ChatOverlayPeer(
         ChatSession session,
@@ -167,10 +178,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ChatBlacklist? chatBlacklist = null,
         Func<int?>? getHostPlayerNumber = null,
         Func<int, string?>? getRemotePlayerName = null,
-        Func<IReadOnlyList<int>>? getTalkingRemotePlayers = null,
+        Func<PartyVoiceIndicatorSnapshot>? getVoiceIndicatorSnapshot = null,
         Func<PartyRoomTransition?>? readRoomTransition = null,
         Func<int>? getEstablishedVoiceParticipantCount = null,
-        Func<DateTimeOffset>? getCurrentTime = null)
+        Func<DateTimeOffset>? getCurrentTime = null,
+        Func<Action<bool>, VoicePushToTalkSafetyGate>? createWindowVoicePushToTalkGate = null,
+        Func<int, bool>? isWindowKeyDown = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -199,10 +212,20 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
         _getHostPlayerNumber = getHostPlayerNumber ?? (() => null);
         _getRemotePlayerName = getRemotePlayerName ?? (_ => null);
-        _getTalkingRemotePlayers = getTalkingRemotePlayers ?? (() => Array.Empty<int>());
+        _getVoiceIndicatorSnapshot = getVoiceIndicatorSnapshot ??
+            (() => PartyVoiceIndicatorSnapshot.Unavailable);
         _readRoomTransition = readRoomTransition ?? (() => null);
         _getEstablishedVoiceParticipantCount = getEstablishedVoiceParticipantCount ?? (() => 0);
         _getCurrentTime = getCurrentTime ?? (() => DateTimeOffset.UtcNow);
+        _isWindowKeyDown = isWindowKeyDown ?? (virtualKey =>
+            OperatingSystem.IsWindows() && (GetAsyncKeyState(virtualKey) & 0x8000) != 0);
+        Action<bool> reportWindowVoicePushToTalk = pressed =>
+            ObserveVoicePushToTalkKey(pressed, WindowHotkeySource);
+        _windowVoicePushToTalkGate = createWindowVoicePushToTalkGate?.Invoke(reportWindowVoicePushToTalk) ??
+            new VoicePushToTalkSafetyGate(
+                reportWindowVoicePushToTalk,
+                _log,
+                operationName: "window push-to-talk");
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -420,22 +443,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         return T($"玩家 {displayedPlayerNumber}", $"Player {displayedPlayerNumber}");
     }
 
-    private void ObserveRemoteVoiceActivity()
+    private void ObserveRemoteVoiceActivity(IReadOnlyList<int> talkingPlayers)
     {
-        IReadOnlyList<int> talkingPlayers;
-        try
-        {
-            talkingPlayers = _getTalkingRemotePlayers() ?? Array.Empty<int>();
-        }
-        catch (Exception exception)
-        {
-            _talkingRemotePlayers.Clear();
-            LogSafely(
-                $"Remote voice activity lookup failed closed: " +
-                $"{exception.GetType().Name}: {exception.Message}.");
-            return;
-        }
-
         var current = talkingPlayers
             .Where(static playerNumber => playerNumber is >= 1 and <= 3)
             .Distinct()
@@ -794,9 +803,53 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
     }
 
+    private void RefreshWindowVoicePushToTalkHeartbeat()
+    {
+        if (Volatile.Read(ref _windowVoicePushToTalkPhysicalDown) == 0)
+            return;
+
+        var configuration = _getConfiguration();
+        if (!KeyboardBinding.TryParse(configuration.PushToTalkKeyboardBinding, out var binding) ||
+            !binding.IsBound ||
+            !_isWindowKeyDown(binding.VirtualKey) ||
+            !AreWindowVoicePushToTalkModifiersDown(binding.Modifiers))
+        {
+            Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
+            _windowVoicePushToTalkGate.Report(false);
+            return;
+        }
+
+        if (!_canUseVoicePushToTalk())
+        {
+            if ((Volatile.Read(ref _voicePushToTalkKeyDown) & WindowHotkeySource) != 0)
+            {
+                LogSafely(
+                    "Stage 3 window push-to-talk hold was revoked because Party voice is no longer ready; " +
+                    "release the physical key before retrying.");
+            }
+            _windowVoicePushToTalkGate.Report(false);
+            return;
+        }
+
+        if ((Volatile.Read(ref _voicePushToTalkKeyDown) & WindowHotkeySource) != 0)
+            _windowVoicePushToTalkGate.Report(true);
+    }
+
+    private bool AreWindowVoicePushToTalkModifiersDown(KeyboardModifiers modifiers) =>
+        (!modifiers.HasFlag(KeyboardModifiers.Control) ||
+         _isWindowKeyDown(VirtualKeyControl) || _isWindowKeyDown(VirtualKeyLeftControl) ||
+         _isWindowKeyDown(VirtualKeyRightControl)) &&
+        (!modifiers.HasFlag(KeyboardModifiers.Shift) ||
+         _isWindowKeyDown(VirtualKeyShift) || _isWindowKeyDown(VirtualKeyLeftShift) ||
+         _isWindowKeyDown(VirtualKeyRightShift)) &&
+        (!modifiers.HasFlag(KeyboardModifiers.Alt) ||
+         _isWindowKeyDown(VirtualKeyAlt) || _isWindowKeyDown(VirtualKeyLeftAlt) ||
+         _isWindowKeyDown(VirtualKeyRightAlt));
+
     private void ForceReleaseVoicePushToTalkSources()
     {
         Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
+        _windowVoicePushToTalkGate.ForceMute();
         if (Interlocked.Exchange(ref _voicePushToTalkKeyDown, 0) != 0)
             _setVoicePushToTalkPressed(false);
     }
@@ -875,6 +928,99 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _ => T("请按 1–2 个手柄键。", "Press 1–2 controller buttons."),
     };
 
+    private void RefreshVoiceIndicatorSnapshot()
+    {
+        PartyVoiceIndicatorSnapshot snapshot;
+        try
+        {
+            snapshot = _getVoiceIndicatorSnapshot() ?? PartyVoiceIndicatorSnapshot.Unavailable;
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _voiceIndicatorSnapshotFailureLogged, 1) == 0)
+            {
+                LogSafely(
+                    $"Voice indicator membership snapshot lookup failed; formal icons are hidden " +
+                    $"until the lookup recovers: {exception.GetType().Name}: {exception.Message}.");
+            }
+            PublishVoiceIndicatorSnapshotUnavailable();
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _voiceIndicatorSnapshotFailureLogged, 0) != 0)
+            LogSafely("Voice indicator membership snapshot lookup recovered.");
+
+        var normalizedSnapshot = NormalizeVoiceIndicatorSnapshot(snapshot);
+        LogVoiceIndicatorSnapshotTransition(normalizedSnapshot);
+        Volatile.Write(ref _voiceIndicatorSnapshot, normalizedSnapshot);
+        if (normalizedSnapshot.IsValid)
+            ObserveRemoteVoiceActivity(normalizedSnapshot.TalkingRemotePlayers);
+        else
+            _talkingRemotePlayers.Clear();
+    }
+
+    private static PartyVoiceIndicatorSnapshot NormalizeVoiceIndicatorSnapshot(
+        PartyVoiceIndicatorSnapshot snapshot)
+    {
+        if (!snapshot.IsValid)
+            return PartyVoiceIndicatorSnapshot.Unavailable;
+
+        return new PartyVoiceIndicatorSnapshot(
+            true,
+            NormalizeVoiceIndicatorPlayers(snapshot.EstablishedRemotePlayers),
+            NormalizeVoiceIndicatorPlayers(snapshot.OccupiedRemotePlayers),
+            NormalizeVoiceIndicatorPlayers(snapshot.TalkingRemotePlayers));
+    }
+
+    private static IReadOnlyList<int> NormalizeVoiceIndicatorPlayers(
+        IReadOnlyList<int>? players)
+    {
+        if (players is null || players.Count == 0)
+            return Array.Empty<int>();
+
+        var normalized = players
+            .Where(static playerNumber => playerNumber is >= 1 and <= 3)
+            .Distinct()
+            .OrderBy(static playerNumber => playerNumber)
+            .ToArray();
+        return normalized.Length == 0 ? Array.Empty<int>() : Array.AsReadOnly(normalized);
+    }
+
+    private void LogVoiceIndicatorSnapshotTransition(PartyVoiceIndicatorSnapshot snapshot)
+    {
+        var fingerprint = snapshot.IsValid
+            ? $"valid|{FormatVoiceIndicatorPlayers(snapshot.EstablishedRemotePlayers)}|" +
+              $"{FormatVoiceIndicatorPlayers(snapshot.OccupiedRemotePlayers)}|" +
+              $"{FormatVoiceIndicatorPlayers(snapshot.TalkingRemotePlayers)}"
+            : "unavailable";
+        if (string.Equals(
+                _lastVoiceIndicatorSnapshotFingerprint,
+                fingerprint,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastVoiceIndicatorSnapshotFingerprint = fingerprint;
+        LogSafely(
+            $"Voice indicator membership snapshot changed: valid={snapshot.IsValid}, " +
+            $"established=[{FormatVoiceIndicatorPlayers(snapshot.EstablishedRemotePlayers)}], " +
+            $"occupied=[{FormatVoiceIndicatorPlayers(snapshot.OccupiedRemotePlayers)}], " +
+            $"talking=[{FormatVoiceIndicatorPlayers(snapshot.TalkingRemotePlayers)}].");
+    }
+
+    private static string FormatVoiceIndicatorPlayers(IReadOnlyList<int> players) =>
+        players.Count == 0 ? string.Empty : string.Join(',', players);
+
+    private void PublishVoiceIndicatorSnapshotUnavailable()
+    {
+        Volatile.Write(
+            ref _voiceIndicatorSnapshot,
+            PartyVoiceIndicatorSnapshot.Unavailable);
+        _talkingRemotePlayers.Clear();
+        _lastVoiceIndicatorSnapshotFingerprint = null;
+    }
+
     public bool WantsRender
     {
         get
@@ -888,7 +1034,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                    Volatile.Read(ref _quickActionsToggleRequested) != 0 ||
                    Volatile.Read(ref _openRequested) != 0 ||
                    _session.Composer.IsOpen ||
-                   configuration.EffectiveShowAllVoiceIndicatorSlots ||
+                   (configuration.EnableVoiceIndicators &&
+                    (configuration.EffectiveShowAllVoiceIndicatorSlots || IsOnlineRoomActive())) ||
                    (configuration.EnableOverlay &&
                     (IsOnlineRoomActive() || HasActiveTransientNotice()));
         }
@@ -898,6 +1045,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     {
         if (!Volatile.Read(ref _initialized) || Volatile.Read(ref _suspended) != 0)
             return;
+        RefreshWindowVoicePushToTalkHeartbeat();
         PollManagedControllerInput();
         var configuration = _getConfiguration();
         DrainRoomTransitions();
@@ -915,7 +1063,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             Array.Clear(_inputBuffer);
             _playerMuteStatusText = null;
             _voiceMuteStatusText = null;
-            _talkingRemotePlayers.Clear();
+            PublishVoiceIndicatorSnapshotUnavailable();
             NotifyOnlineRoomUnavailable();
             ResetChatInteractionState();
         }
@@ -934,8 +1082,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
         if (onlineRoomActive)
         {
-            ObserveRemoteVoiceActivity();
+            RefreshVoiceIndicatorSnapshot();
             _session.DrainIncoming();
+        }
+        else
+        {
+            PublishVoiceIndicatorSnapshotUnavailable();
         }
     }
 
@@ -1094,6 +1246,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     public void Suspend()
     {
         Interlocked.Exchange(ref _suspended, 1);
+        _windowVoicePushToTalkGate.Suspend();
         SetSettingsMenuOpen(false);
         _session.Composer.Cancel();
         Interlocked.Exchange(ref _openRequested, 0);
@@ -1109,7 +1262,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ResetManagedControllerHotkeys();
         Interlocked.Exchange(ref _globalMuteKeyDown, 0);
         Array.Clear(_remotePlayerChatMuteKeyDown);
-        _talkingRemotePlayers.Clear();
+        PublishVoiceIndicatorSnapshotUnavailable();
         CancelBindingCapture();
         lock (_bindingCaptureSync)
         {
@@ -1133,6 +1286,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     public void Resume()
     {
         Interlocked.Exchange(ref _suspended, 0);
+        _windowVoicePushToTalkGate.Resume();
         _registration?.SetEnabled(true);
         UpdateInputCapture();
     }
@@ -1146,10 +1300,19 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             var configuration = _getConfiguration();
             var onlineRoomActive = IsOnlineRoomActive();
             var voiceUiStatus = _getVoiceUiStatus();
+            var voiceIndicatorSnapshot = Volatile.Read(ref _voiceIndicatorSnapshot);
             if (configuration.EnableOverlay)
                 DrawTransientRoomNotice(configuration);
-            if (onlineRoomActive || configuration.EffectiveShowAllVoiceIndicatorSlots)
-                VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
+            if (configuration.EnableVoiceIndicators &&
+                (onlineRoomActive || configuration.EffectiveShowAllVoiceIndicatorSlots))
+                VoiceIndicatorOverlay.Draw(
+                    configuration,
+                    voiceUiStatus,
+                    _getPartyHudAnchors,
+                    voiceIndicatorSnapshot.EstablishedRemotePlayers,
+                    voiceIndicatorSnapshot.OccupiedRemotePlayers,
+                    voiceIndicatorSnapshot.TalkingRemotePlayers,
+                    voiceIndicatorSnapshot.IsValid);
 
             if ((Interlocked.Exchange(ref _settingsToggleRequested, 0) & 1) != 0)
                 SetSettingsMenuOpen(Volatile.Read(ref _settingsMenuOpen) == 0);
@@ -2921,12 +3084,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ImGui.SameLine(0.0f, OverlayUiScale.Scale(4.0f));
         }
 
-        var playerNumber = message.PlayerNumber > 0 ? message.PlayerNumber : 0;
+        var playerNumber = ResolveHistoryPlayerNumber(message);
         var color = GetPlayerNameColor(configuration, playerNumber);
         var communicationCue = GetEffectiveCommunicationCue(message);
         var name = FormatHistorySenderLabel(
             ResolveHistorySender(message),
-            playerNumber > 0 && playerNumber == hostPlayerNumber,
+            IsHistoryMessageHostedByPlayer(message, hostPlayerNumber),
             configuration.InterfaceLanguage,
             communicationCue);
         var nameScale = playerNumber > 0
@@ -2963,38 +3126,33 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         DrawMessageContextMenu(message, playerNumber);
     }
 
-    internal string ResolveHistorySender(ChatMessage message)
+    internal string ResolveHistorySender(ChatMessage message) => message.Sender;
+
+    internal static int ResolveHistoryPlayerNumber(ChatMessage message)
     {
-        if (!IsMachineGeneratedSender(message.Sender))
-            return message.Sender;
+        if (message.Kind == ChatMessageKind.Self)
+            return 1;
 
-        var fallbackLabel = FormatHistorySenderFallback(message.SenderId);
-        if (message.PlayerNumber is < 2 or > 4)
-            return fallbackLabel;
-
-        return ResolveRemotePlayerName(
-            message.PlayerNumber - 1,
-            fallbackLabel: fallbackLabel);
+        return message.Kind == ChatMessageKind.Party && message.PlayerNumber is >= 2 and <= 4
+            ? message.PlayerNumber
+            : 0;
     }
 
-    internal static ChatCommunicationCue GetEffectiveCommunicationCue(ChatMessage message)
+    internal static bool IsHistoryMessageHostedByPlayer(
+        ChatMessage message,
+        int? authoritativeHostPlayerNumber)
     {
-        if (message.CommunicationCue != ChatCommunicationCue.None)
-            return message.CommunicationCue;
+        if (authoritativeHostPlayerNumber is not { } hostPlayerNumber ||
+            hostPlayerNumber is < 1 or > 4)
+        {
+            return false;
+        }
 
-        return ChatCommunicationCueClassifier.TryClassifySenderLabel(
-            message.Sender,
-            out var communicationCue)
-            ? communicationCue
-            : ChatCommunicationCue.None;
+        return ResolveHistoryPlayerNumber(message) == hostPlayerNumber;
     }
 
-    private static string FormatHistorySenderFallback(uint senderId) =>
-        $"Player {senderId:X8}";
-
-    private static bool IsMachineGeneratedSender(string? sender) =>
-        ChatCommunicationCueClassifier.TryClassifySenderLabel(sender, out _) ||
-        sender?.StartsWith("Player ", StringComparison.OrdinalIgnoreCase) == true;
+    internal static ChatCommunicationCue GetEffectiveCommunicationCue(ChatMessage message) =>
+        message.CommunicationCue;
 
     internal static string FormatHistorySenderLabel(
         string sender,
@@ -3282,7 +3440,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (isUp && MatchesWindowBindingPrimary(pushToTalkBinding, virtualKey))
         {
             Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
-            ObserveVoicePushToTalkKey(false, WindowHotkeySource);
+            _windowVoicePushToTalkGate.Report(false);
             return true;
         }
         var emergencySettings = HotkeyConfigurationSnapshot.EmergencySettingsKeyboard.Format();
@@ -3327,10 +3485,15 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 1) == 0;
             if (firstPhysicalDown && _canUseVoicePushToTalk())
             {
-                ObserveVoicePushToTalkKey(true, WindowHotkeySource);
+                LogSafely(
+                    "Stage 3 window push-to-talk physical press reached the Chat input route and entered the safety gate.");
+                _windowVoicePushToTalkGate.Report(true);
             }
             else if (firstPhysicalDown)
             {
+                LogSafely(
+                    "Stage 3 window push-to-talk physical press reached the Chat input route, but Party voice " +
+                    "is not ready; no unmute request was sent.");
                 _statusText = T(
                     "[语音] 尚未就绪，正在等待另一位安装相同版本模组的队友。",
                     "[Voice] Not ready; waiting for another player with the same mod version.");
@@ -3417,7 +3580,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             return;
 
         Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
-        ObserveVoicePushToTalkKey(false, WindowHotkeySource);
+        _windowVoicePushToTalkGate.ForceMute();
 
         lock (_bindingCaptureSync)
         {
@@ -3959,6 +4122,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     public void OnHostUnavailable(string reason)
     {
         Volatile.Write(ref _initialized, false);
+        ForceReleaseVoicePushToTalkSources();
         ResetInteractionState();
         NotifyOnlineRoomUnavailable();
         LogSafely(
@@ -3974,6 +4138,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Volatile.Write(ref _initialized, false);
         Interlocked.Exchange(ref _registration, null)?.Dispose();
         _flydigiControllerInputPoller.Dispose();
+        _windowVoicePushToTalkGate.Dispose();
     }
 
     private void LogImeCompatibility(nint windowHandle, uint codePage)
@@ -4025,6 +4190,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     [DllImport("user32.dll")]
     private static extern short GetKeyState(int virtualKey);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
 
     private void LogSafely(string message)
     {

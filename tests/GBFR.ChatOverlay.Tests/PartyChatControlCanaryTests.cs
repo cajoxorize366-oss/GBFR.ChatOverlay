@@ -365,6 +365,64 @@ public sealed class PartyChatControlCanaryTests
     }
 
     [Fact]
+    public void VoiceTest_ReconcilesRemoteChatControlThatJoinedBeforeLocalCanary()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl)
+        {
+            NetworkChatControls = [RemoteChatControl, LocalChatControl],
+        };
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(
+            api,
+            logs.Add,
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary, expectedPhase: PartyChatControlCanaryPhase.VoiceReady);
+
+        var discoveryIndex = api.Calls.IndexOf("GetNetworkChatControls");
+        var permissionIndex = api.Calls.IndexOf("SetPermissions:7000:0x0005");
+        Assert.True(discoveryIndex >= 0);
+        Assert.True(permissionIndex > discoveryIndex);
+        Assert.Equal(PartyChatControlCanaryPhase.VoiceReady, canary.Phase);
+        Assert.True(canary.IsRemotePushToTalkReady);
+        Assert.Contains(logs, line =>
+            line.Contains("remoteAdded=1", StringComparison.Ordinal) &&
+            line.Contains("joined before the local Mod ChatControl", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void VoiceTest_NetworkChatControlReconciliationFailureKeepsJoinEventFallback()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl)
+        {
+            GetNetworkChatControlsResult = 0x55,
+        };
+        var logs = new List<string>();
+        using var canary = new PartyChatControlCanary(
+            api,
+            logs.Add,
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary);
+
+        Assert.Equal(PartyChatControlCanaryPhase.JoinedMuted, canary.Phase);
+        Assert.Equal(1, api.Calls.Count(call => call == "GetNetworkChatControls"));
+        Assert.Contains(logs, line =>
+            line.Contains("returned 0x00000055", StringComparison.Ordinal) &&
+            line.Contains("join events remain active", StringComparison.Ordinal));
+
+        api.Calls.Clear();
+        ObserveRemoteJoined(canary);
+        canary.OnBatchFinished(Manager);
+
+        Assert.Contains("SetPermissions:7000:0x0005", api.Calls);
+        Assert.DoesNotContain("GetNetworkChatControls", api.Calls);
+        Assert.Equal(PartyChatControlCanaryPhase.VoiceReady, canary.Phase);
+    }
+
+    [Fact]
     public void VoiceTest_HeldUBeforePeerReadinessDoesNotLatchAnUnmute()
     {
         var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
@@ -725,6 +783,169 @@ public sealed class PartyChatControlCanaryTests
             },
             api.Calls);
         Assert.Equal(PartyVoiceUiState.Speaking, canary.VoiceUiStatus.State);
+    }
+
+    [Fact]
+    public void VoiceTest_UnknownAudioStatesBlockRemotePushToTalkUntilInitialized()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary, observeAudioStates: false);
+        Assert.Equal(PartyVoiceUiState.WaitingForPeer, canary.VoiceUiStatus.State);
+
+        ObserveRemoteJoined(canary);
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(PartyChatControlCanaryPhase.VoiceReady, canary.Phase);
+        Assert.False(canary.IsRemotePushToTalkReady);
+        Assert.Equal(PartyVoiceUiState.Connecting, canary.VoiceUiStatus.State);
+        Assert.DoesNotContain("DestroyChatControl", api.Calls);
+
+        api.Calls.Clear();
+        canary.SetPushToTalkPressed(true);
+        Assert.DoesNotContain("SetAudioInputMuted:False", api.Calls);
+    }
+
+    [Fact]
+    public void VoiceTest_AudioStateLossWhileSpeakingMutesAndRequiresReleaseAndPressAfterRecovery()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        canary.SetPushToTalkPressed(true);
+        Assert.Equal(PartyVoiceUiState.Speaking, canary.VoiceUiStatus.State);
+        api.Calls.Clear();
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioInputChanged)
+        {
+            ChatControl = LocalChatControl,
+            AudioInputState = PartyAudioInputState.NotFound,
+        });
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(
+            new[]
+            {
+                "SetAudioInputMuted:True",
+                "GetAudioInputMuted",
+                "GetAudioInputMuted",
+            },
+            api.Calls);
+        Assert.False(canary.IsRemotePushToTalkReady);
+        Assert.Equal(PartyVoiceUiState.Connecting, canary.VoiceUiStatus.State);
+        Assert.DoesNotContain("DestroyChatControl", api.Calls);
+
+        api.Calls.Clear();
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioInputChanged)
+        {
+            ChatControl = LocalChatControl,
+            AudioInputState = PartyAudioInputState.Initialized,
+        });
+        canary.OnBatchFinished(Manager);
+
+        Assert.True(canary.IsRemotePushToTalkReady);
+        Assert.Equal(PartyVoiceUiState.Ready, canary.VoiceUiStatus.State);
+        Assert.DoesNotContain("SetAudioInputMuted:False", api.Calls);
+
+        canary.SetPushToTalkPressed(false);
+        canary.SetPushToTalkPressed(true);
+        Assert.Contains("SetAudioInputMuted:False", api.Calls);
+    }
+
+    [Fact]
+    public void DisableFailClosed_WhileSpeaking_ExecutesMuteAndDestroy()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        canary.SetPushToTalkPressed(true);
+        api.Calls.Clear();
+
+        canary.DisableFailClosed("synthetic external fail-closed");
+
+        Assert.Equal(
+            new[]
+            {
+                "SetAudioInputMuted:True",
+                "DestroyChatControl",
+            },
+            api.Calls);
+        Assert.Equal(PartyChatControlCanaryPhase.Destroying, canary.Phase);
+        Assert.Equal(PartyVoiceUiState.Faulted, canary.VoiceUiStatus.State);
+    }
+
+    [Fact]
+    public void DisableFailClosed_WhileSpeakingDuringStateBatch_DefersUntilBatchFinished()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        canary.SetPushToTalkPressed(true);
+        canary.BeginStateChangeBatch(Manager);
+        api.Calls.Clear();
+
+        canary.DisableFailClosed("synthetic external fail-closed during batch");
+
+        Assert.Empty(api.Calls);
+        canary.OnBatchFinished(Manager);
+        Assert.Equal(
+            new[]
+            {
+                "SetAudioInputMuted:True",
+                "DestroyChatControl",
+            },
+            api.Calls);
+        Assert.Equal(PartyChatControlCanaryPhase.Destroying, canary.Phase);
+    }
+
+    [Fact]
+    public void VoiceTest_NonInitializedAudioStateBlocksPushToTalkAfterVoiceReady()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        Assert.True(canary.IsRemotePushToTalkReady);
+        api.Calls.Clear();
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioOutputChanged)
+        {
+            ChatControl = LocalChatControl,
+            AudioOutputState = PartyAudioOutputState.NotFound,
+        });
+        canary.OnBatchFinished(Manager);
+
+        Assert.False(canary.IsRemotePushToTalkReady);
+        Assert.Equal(PartyVoiceUiState.Connecting, canary.VoiceUiStatus.State);
+        Assert.DoesNotContain("DestroyChatControl", api.Calls);
+
+        api.Calls.Clear();
+        canary.SetPushToTalkPressed(true);
+        Assert.DoesNotContain("SetAudioInputMuted:False", api.Calls);
     }
 
     [Fact]
@@ -1323,6 +1544,137 @@ public sealed class PartyChatControlCanaryTests
     }
 
     [Fact]
+    public void EstablishedRemoteEntityIds_AreAvailableWithoutTalkingAndReturnCopies()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "slot-0";
+        api.EntityIds[SecondRemoteChatControl] = "slot-3";
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary);
+        ObserveRemoteJoined(canary, RemoteChatControl);
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(["slot-0"], canary.GetEstablishedRemoteEntityIds());
+
+        ObserveRemoteJoined(canary, SecondRemoteChatControl);
+        canary.OnBatchFinished(Manager);
+
+        var first = canary.GetEstablishedRemoteEntityIds();
+        var second = canary.GetEstablishedRemoteEntityIds();
+        Assert.Equal(["slot-0", "slot-3"], second);
+        Assert.NotSame(first, second);
+    }
+
+    [Fact]
+    public void VoiceEntitySnapshot_CapturesEstablishedAndTalkingMembersTogether()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "slot-0";
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        api.RemoteIndicator = PartyChatControlChatIndicator.Talking;
+        canary.RequestVoiceDiagnosticSample();
+
+        var snapshot = canary.GetVoiceEntitySnapshot();
+
+        Assert.Equal(["slot-0"], snapshot.EstablishedRemoteEntityIds);
+        Assert.Equal(["slot-0"], snapshot.TalkingRemoteEntityIds);
+    }
+
+    [Fact]
+    public void EstablishedRemoteEntityIds_IgnoreFailedOrBlankIdsAndFailClosedOnDuplicates()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "slot-0";
+        api.EntityIds[SecondRemoteChatControl] = " ";
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary);
+        ObserveRemoteJoined(canary, RemoteChatControl);
+        ObserveRemoteJoined(canary, SecondRemoteChatControl);
+        canary.OnBatchFinished(Manager);
+
+        Assert.Equal(["slot-0"], canary.GetEstablishedRemoteEntityIds());
+
+        api.EntityIds[SecondRemoteChatControl] = "slot-0";
+        canary.RequestVoiceDiagnosticSample();
+
+        Assert.Empty(canary.GetEstablishedRemoteEntityIds());
+
+        api.EntityIdResults[RemoteChatControl] = 0x55;
+        canary.RequestVoiceDiagnosticSample();
+
+        Assert.Equal(["slot-0"], canary.GetEstablishedRemoteEntityIds());
+    }
+
+    [Fact]
+    public void EstablishedRemoteEntityIds_ClearOnLeaveAndFailClosed()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "slot-0";
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        Assert.Equal(["slot-0"], canary.GetEstablishedRemoteEntityIds());
+
+        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.ChatControlLeftNetwork)
+        {
+            Network = Network,
+            ChatControl = RemoteChatControl,
+        });
+        canary.OnBatchFinished(Manager);
+
+        Assert.Empty(canary.GetEstablishedRemoteEntityIds());
+
+        ObserveRemoteJoined(canary);
+        canary.OnBatchFinished(Manager);
+        Assert.Equal(["slot-0"], canary.GetEstablishedRemoteEntityIds());
+
+        canary.DisableFailClosed("synthetic fail-closed");
+        Assert.Empty(canary.GetEstablishedRemoteEntityIds());
+    }
+
+    [Fact]
+    public void EstablishedRemoteEntityIds_GetterExceptionHidesIdentityWithoutTearingDownVoice()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "slot-0";
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToVoiceReady(canary);
+        Assert.Equal(["slot-0"], canary.GetEstablishedRemoteEntityIds());
+
+        api.EntityIdThrows[RemoteChatControl] = true;
+        canary.RequestVoiceDiagnosticSample();
+
+        Assert.Empty(canary.GetEstablishedRemoteEntityIds());
+        Assert.Equal(PartyChatControlCanaryPhase.VoiceReady, canary.Phase);
+        Assert.DoesNotContain("DestroyChatControl", api.Calls);
+    }
+
+    [Fact]
     public void EstablishedVoiceParticipantCount_StartsZeroAndTracksJoinedAndPermissionedRemotes()
     {
         var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
@@ -1382,7 +1734,10 @@ public sealed class PartyChatControlCanaryTests
         });
     }
 
-    private static void AdvanceToJoined(PartyChatControlCanary canary)
+    private static void AdvanceToJoined(
+        PartyChatControlCanary canary,
+        bool observeAudioStates = true,
+        PartyChatControlCanaryPhase expectedPhase = PartyChatControlCanaryPhase.JoinedMuted)
     {
         canary.CaptureManager(Manager, "test");
         ObserveReadySession(canary);
@@ -1400,16 +1755,19 @@ public sealed class PartyChatControlCanaryTests
         {
             ChatControl = LocalChatControl,
         });
-        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioInputChanged)
+        if (observeAudioStates)
         {
-            ChatControl = LocalChatControl,
-            AudioInputState = PartyAudioInputState.Initialized,
-        });
-        canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioOutputChanged)
-        {
-            ChatControl = LocalChatControl,
-            AudioOutputState = PartyAudioOutputState.Initialized,
-        });
+            canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioInputChanged)
+            {
+                ChatControl = LocalChatControl,
+                AudioInputState = PartyAudioInputState.Initialized,
+            });
+            canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.LocalChatAudioOutputChanged)
+            {
+                ChatControl = LocalChatControl,
+                AudioOutputState = PartyAudioOutputState.Initialized,
+            });
+        }
         canary.Observe(Manager, AudioCompleted(
             PartyStateChangeType.SetChatAudioInputCompleted,
             canary.AudioInputAsyncIdentifier));
@@ -1432,7 +1790,7 @@ public sealed class PartyChatControlCanaryTests
         });
         canary.OnBatchFinished(Manager);
 
-        Assert.Equal(PartyChatControlCanaryPhase.JoinedMuted, canary.Phase);
+        Assert.Equal(expectedPhase, canary.Phase);
     }
 
     private static void AdvanceToVoiceReady(PartyChatControlCanary canary)
@@ -1498,6 +1856,10 @@ public sealed class PartyChatControlCanaryTests
 
         public uint ExistingLocalChatControlCount { get; init; }
 
+        public nint[] NetworkChatControls { get; init; } = [];
+
+        public uint GetNetworkChatControlsResult { get; init; }
+
         public bool? ReportMutedOverride { get; init; }
 
         public uint DestroyChatControlResult { get; set; }
@@ -1520,6 +1882,10 @@ public sealed class PartyChatControlCanaryTests
         public Dictionary<nint, PartyChatControlChatIndicator> RemoteIndicatorOverrides { get; } = [];
 
         public Dictionary<nint, string> EntityIds { get; } = [];
+
+        public Dictionary<nint, uint> EntityIdResults { get; } = [];
+
+        public Dictionary<nint, bool> EntityIdThrows { get; } = [];
 
         public int IncomingAudioMuteWrites { get; private set; }
 
@@ -1551,6 +1917,13 @@ public sealed class PartyChatControlCanaryTests
             Calls.Add("GetLocalChatControlCount");
             chatControlCount = ExistingLocalChatControlCount;
             return 0;
+        }
+
+        public uint GetNetworkChatControls(nint network, out nint[] chatControls)
+        {
+            Calls.Add("GetNetworkChatControls");
+            chatControls = NetworkChatControls.ToArray();
+            return GetNetworkChatControlsResult;
         }
 
         public uint CreateChatControl(
@@ -1662,6 +2035,14 @@ public sealed class PartyChatControlCanaryTests
         {
             DiagnosticCalls.Add($"GetEntityId:{(nuint)chatControl:X}");
             ThrowIfDiagnosticGetterRequested();
+            if (EntityIdThrows.TryGetValue(chatControl, out var shouldThrow) && shouldThrow)
+                throw new InvalidOperationException("Synthetic EntityId lookup failure.");
+            if (EntityIdResults.TryGetValue(chatControl, out var result) && result != 0)
+            {
+                entityId = null;
+                return result;
+            }
+
             entityId = EntityIds.TryGetValue(chatControl, out var configured)
                 ? configured
                 : $"entity-{(nuint)chatControl:X}";

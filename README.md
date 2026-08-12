@@ -10,7 +10,7 @@
 
 1. 已用主机/客机日志确认现有 Party manager、认证、网络和 endpoint 生命周期。
 2. 已确认双方 muted ChatControl 的创建、连接、远端发现和退出房间前清理事件。
-3. 当前测试包只向同一 PartyNetwork 中检测到的 Mod ChatControl 授予麦克风收发权限。ChatControl 使用 Party 原生音频输入，不配置 audio-manipulation capture stream；输入默认静音，仅在按住 `U` 且 Party 回读确认解除静音后，状态栏才显示“正在语音”。
+3. 当前测试包只向同一 PartyNetwork 中检测到并完成权限链的远端 ChatControl 授予麦克风收发权限。ChatControl 使用 Party 原生音频输入，不配置 audio-manipulation capture stream；输入默认静音，仅在按住 `U` 且 Party 回读确认解除静音后，状态栏才显示“正在语音”。远端 ChatControl 与 Relink 成员 EntityId 的精确匹配不等同于已认证的 Mod 版本协商。
 4. Reloaded-II 配置会动态列出当前 Windows 活跃的录音和播放端点，可分别选择麦克风与耳机/扬声器；配置保存稳定 endpoint ID，失效选择会在启动时记录日志并回退到 Windows 默认通信设备。`I` 本地监听复用这两个选择，默认 35% 音量并硬性限制在 50% 以内。
 5. `I` 和 `U` 互斥，`U` 优先；如果 `U` 打断了正在按住的 `I`，必须松开后再按 `I` 才会重新监听。聊天框顶部会显示本地监听、检测到输入信号、等待房间、等待队友、已就绪、正在语音、断开和 fail-closed 状态。
 6. 语音调试包会记录原生输入/输出状态、所选设备、静音回读、双方 ChatIndicator、权限回读、接收静音与渲染音量，并在退出时给出按远端成员隔离的判定摘要。真正的联机通过要求讲话端出现 `localIndicator=Talking`、对端出现 `remoteIndicator=Talking`，并实际听到声音。手柄按键与成员音量/静音仍待后续实现。
@@ -36,8 +36,12 @@
 26. `0.5.0-preview.16` 将中性 OverlayHub/ImGuiHub 与 Extra Sigil Slots 0.8.3 主线重新对齐：关闭期间不再向 ImGui 排队 Win32 输入，重新唤醒首帧会清空陈旧键鼠状态并恢复真实光标位置，快速关闭/重开时的鼠标 reset 请求统一交给 Present 线程，前台 `WM_INPUT` 即使被拦截也会经过系统清理路径。两仓新增自动构建、测试、共享源校验与 ZIP/Release 产出的 GitHub Actions。
 27. `0.5.0-preview.17` 新增可选精简模式：联机时平常完全隐藏聊天窗口，按 `Y`（或自定义聊天键）后只显示输入框、IME 候选和必要的发送状态；发送成功或按 `Esc` 后立即收起。`F10` 设置中的完整聊天框预览仍可用于调整位置和尺寸，队伍语音图标也不受精简模式影响。
 28. `0.5.0-preview.18` 修复精简模式的设置预览与实际形态不同、输入框上方语音状态缺失的问题；`vo_CMM_chance`、`vo_CMM_win_*`、`vo_CMM_thanks` 不再冒充用户名，而会保留真实玩家身份并标注连携攻击、胜利或感谢。新增房间进入与退出系统提示，退出原因区分主动离开、房主掉线、被踢和网络中断，并报告成功建立的 Party 语音通道人数。
-29. `0.5.0-preview.19` 修复发送钩子的短 sender 字段把 `vo_CMM_*` 错写为本地玩家名：机器通信键不再污染即时本地回显、权威回声身份缓存或本地主机房间名。接收解码、最终入队和历史显示均增加 fail-closed 规范化；可解析槽位继续显示真实玩家名，无法解析时只显示稳定的 `Player XXXXXXXX`，不再泄漏原始机器键。
-30. `0.5.0-preview.20` 修复 Party 槽位与网络对象遍历槽位混用造成的再次错认：聊天包 `+0x18` 现在直接作为游戏实际使用的四人 Party 槽位，`0x6CD520` 的独立网络槽不再参与姓名、颜色、禁言或本地身份判断。本地玩家槽位改从 Relink 2.0.4 的权威 Party 表读取；大厅房主按具体 lobby 候选与同批四人快照唯一绑定，只有被证明存在过的远端房主随后消失才报告“房主掉线”，未知或歧义状态不再把 0 号位或上一房间名称误当成房主。
+29. `0.5.0-preview.19` 首次阻止 `vo_CMM_*` 机器通信键直接写成本地玩家名，并在接收、入队和历史显示增加 fail-closed 规范化；但它仍把其他普通短字段视作潜在身份，因此没有彻底切断展示字段污染姓名缓存的路径。
+30. `0.5.0-preview.20` 尝试修复 Party 身份错认并加入权威本地表与大厅房主绑定，但错误地把聊天包 `+0x18` 直接解释成 `0..3` 槽位、绕开了游戏的 `0x6CD520` 成员键解析器。这条错误假设会让姓名、颜色、禁言、本地回声和房主关系在非零本地索引时交叉错认，已由 Preview.23 的完整反编译推翻。
+31. `0.5.0-preview.21` 修复更新后 Party 语音可能一直停在“等待队友”以及 Overlay Broker guest 的 `U` 通路缺少完整心跳保护的问题。本地 Mod ChatControl 加入后会用官方 `PartyNetworkGetChatControls` 对账当前网络，把在本地连接前就已加入的远端 ChatControl 恢复到权限链；查询失败仍保留原生 join 事件回退，不会拆除会话。Broker guest 的键盘按住说话现在按物理状态持续心跳，失焦、主机隔离、暂停、音频设备离开 `Initialized` 或 350 ms 心跳中断都会立即恢复静音，并要求松开后重新按下。
+32. `0.5.0-preview.22` 接通此前只用于 debug 定位的队伍语音图标正式回路。每次状态刷新只读取一份一致的 Relink 四人 `EntityId` 快照，把已建立 Party ChatControl、当前发言成员和实际占用槽位映射到原生大厅/战斗 HUD 行；已接通成员低亮显示，讲话成员高亮显示，CPU、没有匹配 ChatControl 的成员、未知身份和不一致布局继续 fail-closed。聊天框总开关关闭或精简模式收起时，语音图标仍可独立渲染；菜单、加载、结算与 Full Chain 的原生 HUD 白名单/黑名单保持不变。
+33. `0.5.0-preview.23` 重新反编译普通聊天、自动药水/自动短语、胜利语句和 RPC 回声的完整身份链。`Chat+0x18` 现在先经游戏原生 `0x6CD520` 解析不透明成员键，再查 lobby 成员名；`Chat+0x180` 与 `sendMessage` 第四参数只保留展示/通信提示语义，哪怕内容像 `Djeeta` 或 `trick` 也绝不再成为用户名。本地即时回显固定为 UI 玩家 1，只有成员键证明 RPC 属于本机时才去重，因此队友恰好发送相同文字也不会被吞。每房间前 32 条新增不含聊天正文的归属诊断，方便双端实机核对。
+34. `0.5.0-preview.24` 修复双方客户端都把自己标成 `[房主]` 的回归。房主判断不再接受“第一个命中的 `PFLobbyGetOwner` 候选就是本机”这一猜测，而是先跟踪官方 Party 生命周期：创建者正常经历 `CreateNewNetwork` 后再 `ConnectToNetwork`，角色保持 `Created` 并映射为本机 UI 玩家 1；加入者只有 `ConnectToNetwork`，会排除自己的 EntityId，仅在唯一远端 owner 候选与成员表一致时标记房主。角色未知、本机候选、多个候选或成员快照不一致时一律不显示房主标记，并记录不含 EntityId 的角色/房主槽变化诊断。
 
 当前版本不会构造或修改游戏网络包，也不会尝试绕过任何联机保护。Stage 3 只复用游戏已经认证的 local user、PartyNetwork 和 local device，使用 Party 自带的 ChatControl 与原生音频设备路径，并严格只设置 `SendMicrophoneAudio | ReceiveMicrophoneAudio`（`0x0005`）。松开 `U` 会恢复 Party 输入静音；输入心跳超时、暂停和退出会话同样 fail-closed。所有原生代码 Hook 只在固定 RVA 的必要原始字节、RIP 相对目标以及 Party 路径/版本/导出全部通过同步预检时启用；完整 EXE/PartyWin SHA-256 在 Hook 安装后于后台计算，仅作为诊断信息。
 
@@ -60,7 +64,7 @@ dotnet test tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj
 
 - ImGui 负责聊天窗口、文字输入和交互状态。
 - Win32 输入边界负责区分 ANSI/Unicode 窗口、把 `WM_IME_CHAR`/DBCS `WM_CHAR` 规范化为 UTF-8，并仅在输入框激活期间维护输入法上下文、系统候选窗显示标志与候选窗位置；第三方候选窗不可见时，Overlay 会读取并显示 IMM32 当前候选页。
-- Relink 桥接层负责调用游戏原生聊天发送函数、观察接收消息，并从游戏已验证的四人联机成员表解析空 sender label 对应的真实玩家名。
+- Relink 桥接层负责调用游戏原生聊天发送函数、观察接收消息，把 RPC 的不透明成员键经游戏原生解析器映射为四人成员索引，再从已验证的 lobby 成员表读取真实玩家名；短展示字段和自动通信正文不参与身份判断。
 - `GBFR.ChatOverlay.ConfiguratorUI.dll` 只在 Reloaded-II 启动器中提供麦克风/播放设备 ComboBox；游戏侧主 DLL 不引用 HandyControl 或 WPF。
 - `I` 使用独立的 NAudio/WASAPI 共享模式本地路径，不申请 Party 权限、不连接网络，也不改变 `U` 的 ChatControl 路由。建议戴耳机测试，避免扬声器到麦克风形成声反馈。
 - `U` 不另开 WASAPI 采集，也不创建 audio-manipulation capture stream；它只控制 Party ChatControl 原生所选输入的静音状态。采集、编解码、网络传输和所选输出设备播放均由 Party 负责。

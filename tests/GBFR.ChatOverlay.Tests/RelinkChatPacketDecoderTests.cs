@@ -24,7 +24,7 @@ public sealed class RelinkChatPacketDecoderTests
     }
 
     [Fact]
-    public void TryDecode_ReadsRawUtf8MessageAndSenderLabel()
+    public void TryDecode_ReadsRawUtf8MessageAndKeepsOpaqueSenderFallback()
     {
         var packet = CreatePacket("你好，骑空士", "Djeeta", 0x1234, 7, 9);
         var timestamp = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
@@ -32,13 +32,11 @@ public sealed class RelinkChatPacketDecoderTests
         var decoded = RelinkChatPacketDecoder.TryDecode(
             packet,
             timestamp,
-            out var message,
-            out var hasExplicitSenderLabel);
+            out var message);
 
         Assert.True(decoded);
-        Assert.True(hasExplicitSenderLabel);
         Assert.Equal("你好，骑空士", message.Text);
-        Assert.Equal("Djeeta", message.Sender);
+        Assert.Equal("Player 00001234", message.Sender);
         Assert.Equal(0x1234u, message.SenderId);
         Assert.Equal(7u, message.Category);
         Assert.Equal(9u, message.Metadata);
@@ -63,9 +61,7 @@ public sealed class RelinkChatPacketDecoderTests
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,
             DateTimeOffset.UtcNow,
-            out var message,
-            out var hasExplicitSenderLabel));
-        Assert.False(hasExplicitSenderLabel);
+            out var message));
         Assert.Equal("Player 00001234", message.Sender);
         Assert.Equal("hello", message.Text);
         Assert.Equal(expectedCue, message.CommunicationCue);
@@ -79,25 +75,21 @@ public sealed class RelinkChatPacketDecoderTests
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,
             DateTimeOffset.UtcNow,
-            out var message,
-            out var hasExplicitSenderLabel));
-        Assert.False(hasExplicitSenderLabel);
+            out var message));
         Assert.Equal("Player 89ABCDEF", message.Sender);
         Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
     }
 
     [Fact]
-    public void TryDecode_PlayerNameContainingMachineCueTokenRemainsExplicit()
+    public void TryDecode_PlayerNameLikeMachineCueTokenNeverBecomesSender()
     {
         var packet = CreatePacket("hello", "Kuro_vo_CMM_win_3", 0x1234, 7, 9);
 
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,
             DateTimeOffset.UtcNow,
-            out var message,
-            out var hasExplicitSenderLabel));
-        Assert.True(hasExplicitSenderLabel);
-        Assert.Equal("Kuro_vo_CMM_win_3", message.Sender);
+            out var message));
+        Assert.Equal("Player 00001234", message.Sender);
         Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
     }
 
@@ -109,27 +101,25 @@ public sealed class RelinkChatPacketDecoderTests
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,
             DateTimeOffset.UtcNow,
-            out var message,
-            out var hasExplicitSenderLabel));
-        Assert.False(hasExplicitSenderLabel);
+            out var message));
         Assert.Equal("Player 00000000", message.Sender);
         Assert.Equal("普通聊天文本", message.Text);
         Assert.Equal(0u, message.SenderId);
         Assert.Equal(ChatCommunicationCue.Victory, message.CommunicationCue);
     }
 
-    [Fact]
-    public void TryDecode_PreservesNormalSenderLabelAuthorityWithoutMachineCue()
+    [Theory]
+    [InlineData("Djeeta")]
+    [InlineData("trick")]
+    public void TryDecode_NormalShortLabelsNeverBecomeSender(string senderLabel)
     {
-        var packet = CreatePacket("hello", "Djeeta", 0x1234, 7, 9);
+        var packet = CreatePacket("hello", senderLabel, 0x1234, 7, 9);
 
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,
             DateTimeOffset.UtcNow,
-            out var message,
-            out var hasExplicitSenderLabel));
-        Assert.True(hasExplicitSenderLabel);
-        Assert.Equal("Djeeta", message.Sender);
+            out var message));
+        Assert.Equal("Player 00001234", message.Sender);
         Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
     }
 
@@ -141,9 +131,7 @@ public sealed class RelinkChatPacketDecoderTests
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,
             DateTimeOffset.UtcNow,
-            out var message,
-            out var hasExplicitSenderLabel));
-        Assert.False(hasExplicitSenderLabel);
+            out var message));
         Assert.Equal("Player 89ABCDEF", message.Sender);
     }
 

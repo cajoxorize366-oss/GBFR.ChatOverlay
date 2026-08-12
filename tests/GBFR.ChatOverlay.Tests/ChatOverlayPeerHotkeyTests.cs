@@ -3,6 +3,7 @@ using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Input;
 using GBFR.ChatOverlay.Native;
 using GBFR.ChatOverlay.Overlay;
+using System.Diagnostics;
 using System.Reflection;
 
 namespace GBFR.ChatOverlay.Tests;
@@ -277,6 +278,170 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
+    public void Tick_ReadsOneVoiceIndicatorSnapshotAndSharesItsNormalizedTalkingList()
+    {
+        var reads = 0;
+        var configuration = new Config
+        {
+            EnableOverlay = false,
+            EnableVoiceIndicators = true,
+        };
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getVoiceIndicatorSnapshot: () =>
+            {
+                reads++;
+                return new PartyVoiceIndicatorSnapshot(
+                    true,
+                    [3, 3, 0],
+                    [3, 1, 3],
+                    [3, 3, 0, 4]);
+            },
+            getRemotePlayerName: playerNumber => $"Remote {playerNumber}");
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        Assert.Equal(1, reads);
+        var cachedSnapshot = GetPrivateField<PartyVoiceIndicatorSnapshot>(
+            peer,
+            "_voiceIndicatorSnapshot");
+        Assert.True(cachedSnapshot!.IsValid);
+        Assert.Equal([3], cachedSnapshot.EstablishedRemotePlayers);
+        Assert.Equal([1, 3], cachedSnapshot.OccupiedRemotePlayers);
+        Assert.Equal([3], cachedSnapshot.TalkingRemotePlayers);
+        var startedTalkers = Assert.IsType<HashSet<int>>(
+            GetPrivateField<HashSet<int>>(peer, "_talkingRemotePlayers"));
+        Assert.Equal([3], startedTalkers);
+        Assert.Contains("Remote 3", GetPrivateField<string>(peer, "_statusText"));
+    }
+
+    [Fact]
+    public void Tick_PublishesUnavailableAndClearsStartedTalkersWhenSnapshotGetterThrows()
+    {
+        var shouldThrow = false;
+        var logs = new List<string>();
+        using var peer = CreatePeer(
+            new Config
+            {
+                EnableOverlay = false,
+                EnableVoiceIndicators = true,
+            },
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getVoiceIndicatorSnapshot: () =>
+            {
+                if (shouldThrow)
+                    throw new InvalidOperationException("snapshot failure");
+                return new PartyVoiceIndicatorSnapshot(
+                    true,
+                    [1],
+                    [1],
+                    [1]);
+            },
+            log: logs.Add);
+        SetInitialized(peer);
+
+        peer.Tick();
+        shouldThrow = true;
+        peer.Tick();
+        peer.Tick();
+
+        var cachedSnapshot = GetPrivateField<PartyVoiceIndicatorSnapshot>(
+            peer,
+            "_voiceIndicatorSnapshot");
+        Assert.False(cachedSnapshot!.IsValid);
+        Assert.Empty(Assert.IsType<HashSet<int>>(
+            GetPrivateField<HashSet<int>>(peer, "_talkingRemotePlayers")));
+        Assert.Single(logs, line =>
+            line.Contains(
+                "Voice indicator membership snapshot lookup failed",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Tick_LogsVoiceIndicatorSnapshotTransitionsAndOneRecovery()
+    {
+        var shouldThrow = false;
+        var talking = false;
+        var logs = new List<string>();
+        using var peer = CreatePeer(
+            new Config
+            {
+                EnableOverlay = false,
+                EnableVoiceIndicators = true,
+            },
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getVoiceIndicatorSnapshot: () =>
+            {
+                if (shouldThrow)
+                    throw new InvalidOperationException("snapshot failure");
+                return new PartyVoiceIndicatorSnapshot(
+                    true,
+                    [2],
+                    [1, 2],
+                    talking ? [2] : []);
+            },
+            log: logs.Add);
+        SetInitialized(peer);
+
+        peer.Tick();
+        peer.Tick();
+        talking = true;
+        peer.Tick();
+        shouldThrow = true;
+        peer.Tick();
+        shouldThrow = false;
+        peer.Tick();
+
+        Assert.Equal(
+            3,
+            logs.Count(line => line.Contains(
+                "Voice indicator membership snapshot changed",
+                StringComparison.Ordinal)));
+        Assert.Contains(logs, line =>
+            line.Contains("established=[2]", StringComparison.Ordinal) &&
+            line.Contains("occupied=[1,2]", StringComparison.Ordinal) &&
+            line.Contains("talking=[2]", StringComparison.Ordinal));
+        Assert.Single(logs, line =>
+            line.Contains(
+                "Voice indicator membership snapshot lookup recovered",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Suspend_PublishesUnavailableVoiceSnapshotAndClearsStartedTalkers()
+    {
+        using var peer = CreatePeer(
+            new Config
+            {
+                EnableOverlay = false,
+                EnableVoiceIndicators = true,
+            },
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getVoiceIndicatorSnapshot: () => new PartyVoiceIndicatorSnapshot(
+                true,
+                [1],
+                [1],
+                [1]));
+        SetInitialized(peer);
+
+        peer.Tick();
+        peer.Suspend();
+
+        var cachedSnapshot = GetPrivateField<PartyVoiceIndicatorSnapshot>(
+            peer,
+            "_voiceIndicatorSnapshot");
+        Assert.False(cachedSnapshot!.IsValid);
+        Assert.Empty(Assert.IsType<HashSet<int>>(
+            GetPrivateField<HashSet<int>>(peer, "_talkingRemotePlayers")));
+    }
+
+    [Fact]
     public void CompactMode_KeepsRenderRequestedForVoiceHudWhileChatIsClosed()
     {
         var configuration = new Config
@@ -290,6 +455,45 @@ public sealed class ChatOverlayPeerHotkeyTests
         SetInitialized(peer);
 
         Assert.True(peer.WantsRender);
+    }
+
+    [Fact]
+    public void VoiceIndicators_RequestRenderWhenChatOverlayIsDisabled()
+    {
+        var configuration = new Config
+        {
+            EnableOverlay = false,
+            EnableVoiceIndicators = true,
+        };
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true);
+        SetInitialized(peer);
+
+        Assert.True(peer.WantsRender);
+    }
+
+    [Fact]
+    public void VoiceIndicators_StopRequestingRenderAfterOnlineRoomExit()
+    {
+        var onlineRoomActive = true;
+        var configuration = new Config
+        {
+            EnableOverlay = false,
+            EnableVoiceIndicators = true,
+        };
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => onlineRoomActive);
+        SetInitialized(peer);
+
+        Assert.True(peer.WantsRender);
+        onlineRoomActive = false;
+        peer.Tick();
+
+        Assert.False(peer.WantsRender);
     }
 
     [Fact]
@@ -402,12 +606,14 @@ public sealed class ChatOverlayPeerHotkeyTests
             PushToTalkKeyboardBinding = "U",
         };
         var states = new List<bool>();
+        var logs = new List<string>();
         using var peer = CreatePeer(
             configuration,
             new RecordingTransport(),
             isOnlineRoomActive: () => true,
             canUseVoicePushToTalk: () => true,
-            setVoicePushToTalkPressed: states.Add);
+            setVoicePushToTalkPressed: states.Add,
+            log: logs.Add);
         SetInitialized(peer);
 
         var firstDown = peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
@@ -420,6 +626,8 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.True(release.Handled);
         Assert.Equal([true, false], states);
         Assert.Null(GetPrivateField<string>(peer, "_statusText"));
+        Assert.Single(logs, line =>
+            line.Contains("entered the safety gate", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -432,12 +640,14 @@ public sealed class ChatOverlayPeerHotkeyTests
         };
         var canUse = false;
         var states = new List<bool>();
+        var logs = new List<string>();
         using var peer = CreatePeer(
             configuration,
             new RecordingTransport(),
             isOnlineRoomActive: () => true,
             canUseVoicePushToTalk: () => canUse,
-            setVoicePushToTalkPressed: states.Add);
+            setVoicePushToTalkPressed: states.Add,
+            log: logs.Add);
         SetInitialized(peer);
 
         peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
@@ -450,6 +660,188 @@ public sealed class ChatOverlayPeerHotkeyTests
         peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
 
         Assert.Equal([true, false], states);
+        Assert.Single(logs, line =>
+            line.Contains("Party voice is not ready", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_TickHeartbeatsOnlyWhilePhysicalBindingIsDown()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var physicalKeys = new HashSet<int> { 'U' };
+        var timestamp = 0L;
+        var states = new List<bool>();
+        VoicePushToTalkSafetyGate? gate = null;
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => true,
+            setVoicePushToTalkPressed: states.Add,
+            createWindowVoicePushToTalkGate: callback => gate = new VoicePushToTalkSafetyGate(
+                callback,
+                log: null,
+                heartbeatTimeout: TimeSpan.FromMilliseconds(350),
+                getTimestamp: () => timestamp,
+                startWatchdog: false),
+            isWindowKeyDown: virtualKey => physicalKeys.Contains(virtualKey));
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        timestamp += Stopwatch.Frequency * 300 / 1000;
+        peer.Tick();
+        timestamp += Stopwatch.Frequency * 300 / 1000;
+        gate!.CheckForTimeout();
+        Assert.Equal([true], states);
+
+        physicalKeys.Clear();
+        peer.Tick();
+        Assert.Equal([true, false], states);
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_ReadinessLossRevokesHoldUntilPhysicalReleaseAndRepress()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var canUse = true;
+        var physicalKeys = new HashSet<int> { 'U' };
+        var states = new List<bool>();
+        var logs = new List<string>();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => canUse,
+            setVoicePushToTalkPressed: states.Add,
+            isWindowKeyDown: virtualKey => physicalKeys.Contains(virtualKey),
+            log: logs.Add);
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        canUse = false;
+        peer.Tick();
+
+        Assert.Equal([true, false], states);
+        Assert.Null(GetPrivateField<string>(peer, "_statusText"));
+        Assert.Single(logs, line =>
+            line.Contains("hold was revoked", StringComparison.Ordinal));
+
+        canUse = true;
+        peer.Tick();
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        Assert.Equal([true, false], states);
+
+        physicalKeys.Clear();
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+        physicalKeys.Add('U');
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+
+        Assert.Equal([true, false, true, false], states);
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_TimesOutWithoutTickAfterLostKeyUp()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var timestamp = 0L;
+        var states = new List<bool>();
+        VoicePushToTalkSafetyGate? gate = null;
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => true,
+            setVoicePushToTalkPressed: states.Add,
+            createWindowVoicePushToTalkGate: callback => gate = new VoicePushToTalkSafetyGate(
+                callback,
+                log: null,
+                heartbeatTimeout: TimeSpan.FromMilliseconds(350),
+                getTimestamp: () => timestamp,
+                startWatchdog: false),
+            isWindowKeyDown: _ => true);
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        timestamp += Stopwatch.Frequency * 351 / 1000;
+        gate!.CheckForTimeout();
+
+        Assert.Equal([true, false], states);
+
+        peer.Tick();
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        Assert.Equal([true, false], states);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, 'U', nint.Zero);
+        Assert.Equal([true, false, true, false], states);
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_SuspendAndDisposeForceReleaseActiveWindowSource()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var states = new List<bool>();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => true,
+            setVoicePushToTalkPressed: states.Add,
+            isWindowKeyDown: _ => true);
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        peer.Suspend();
+        Assert.Equal([true, false], states);
+
+        peer.Resume();
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        peer.Dispose();
+
+        Assert.Equal([true, false, true, false], states);
+    }
+
+    [Fact]
+    public void PushToTalkWindowHotkey_HostUnavailableForcesRelease()
+    {
+        var configuration = new Config
+        {
+            EnableVoiceInput = true,
+            PushToTalkKeyboardBinding = "U",
+        };
+        var states = new List<bool>();
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            canUseVoicePushToTalk: () => true,
+            setVoicePushToTalkPressed: states.Add,
+            isWindowKeyDown: _ => true);
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'U', nint.Zero);
+        peer.OnHostUnavailable("peer-local failure: synthetic test");
+
+        Assert.Equal([true, false], states);
+        Assert.False(peer.IsInitialized);
     }
 
     [Fact]
@@ -545,7 +937,126 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
-    public void CommunicationCue_MachineSenderResolvesTheRealRemotePlayerName()
+    public void HistoryHostPredicate_SelfUsesPlayerOneInsteadOfStalePlayerNumber()
+    {
+        var selfMessage = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Kuro",
+            "Hello",
+            ChatMessageKind.Self,
+            PlayerNumber: 3);
+
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(selfMessage, 2));
+        Assert.True(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(selfMessage, 1));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(5)]
+    public void HistoryHostPredicate_InvalidAuthoritativeHostNeverShowsHostLabel(int? hostPlayerNumber)
+    {
+        var partyMessage = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Narmaya",
+            "Hello",
+            ChatMessageKind.Party,
+            PlayerNumber: 2);
+
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, hostPlayerNumber));
+    }
+
+    [Fact]
+    public void HistoryHostPredicate_NullAuthoritativeHostNeverShowsHostLabel()
+    {
+        var partyMessage = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Narmaya",
+            "Hello",
+            ChatMessageKind.Party,
+            PlayerNumber: 2);
+
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, null));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(5)]
+    public void HistoryHostPredicate_UnknownPartyPlayerNeverShowsHostLabel(int playerNumber)
+    {
+        var partyMessage = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Unknown",
+            "Hello",
+            ChatMessageKind.Party,
+            PlayerNumber: playerNumber);
+
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, 1));
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, 2));
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, 4));
+    }
+
+    [Fact]
+    public void HistoryHostPredicate_PartyPlayerTwoMatchesOnlyAuthoritativeHostTwo()
+    {
+        var partyMessage = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Narmaya",
+            "Hello",
+            ChatMessageKind.Party,
+            PlayerNumber: 2);
+
+        Assert.True(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, 2));
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, null));
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, 0));
+        Assert.False(ChatOverlayPeer.IsHistoryMessageHostedByPlayer(partyMessage, 5));
+    }
+
+    [Theory]
+    [InlineData(UiLanguage.SimplifiedChinese, "[房主] Narmaya:", "Kuro:")]
+    [InlineData(UiLanguage.English, "[Host] Narmaya:", "Kuro:")]
+    public void HistoryHostLabel_CombinesAuthoritativeHostPredicateWithSenderFormatting(
+        UiLanguage language,
+        string expectedRemoteHostLabel,
+        string expectedSelfLabel)
+    {
+        var selfMessage = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Kuro",
+            "Hello",
+            ChatMessageKind.Self,
+            PlayerNumber: 4);
+        var remoteHostMessage = new ChatMessage(
+            2,
+            DateTimeOffset.UtcNow,
+            "Narmaya",
+            "Hello",
+            ChatMessageKind.Party,
+            PlayerNumber: 2);
+
+        var selfLabel = ChatOverlayPeer.FormatHistorySenderLabel(
+            selfMessage.Sender,
+            ChatOverlayPeer.IsHistoryMessageHostedByPlayer(selfMessage, 2),
+            language);
+        var remoteHostLabel = ChatOverlayPeer.FormatHistorySenderLabel(
+            remoteHostMessage.Sender,
+            ChatOverlayPeer.IsHistoryMessageHostedByPlayer(remoteHostMessage, 2),
+            language);
+
+        Assert.Equal(expectedSelfLabel, selfLabel);
+        Assert.DoesNotContain("[房主]", selfLabel, StringComparison.Ordinal);
+        Assert.DoesNotContain("[Host]", selfLabel, StringComparison.Ordinal);
+        Assert.Equal(expectedRemoteHostLabel, remoteHostLabel);
+    }
+
+    [Fact]
+    public void HistoryFallbackNeverRebindsToTheCurrentRemoteSlot()
     {
         var requestedRemotePlayer = 0;
         using var peer = CreatePeer(
@@ -566,12 +1077,67 @@ public sealed class ChatOverlayPeerHotkeyTests
             PlayerNumber: 3,
             CommunicationCue: ChatCommunicationCue.Thanks);
 
-        Assert.Equal("Narmaya", peer.ResolveHistorySender(message));
-        Assert.Equal(2, requestedRemotePlayer);
+        Assert.Equal("Player 00001234", peer.ResolveHistorySender(message));
+        Assert.Equal(0, requestedRemotePlayer);
     }
 
     [Fact]
-    public void RawMachineSender_ResolvesTheRealRemotePlayerNameAndClassifiesVictoryCue()
+    public void SelfFallbackSender_StaysOnPlayerOneAndNeverResolvesRemoteName()
+    {
+        var resolverCalls = 0;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: _ =>
+            {
+                resolverCalls++;
+                return "trick";
+            });
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Player 00000000",
+            "Hello",
+            ChatMessageKind.Self,
+            SenderId: 0,
+            PlayerNumber: 3);
+
+        Assert.Equal(1, ChatOverlayPeer.ResolveHistoryPlayerNumber(message));
+        Assert.Equal("Player 00000000", peer.ResolveHistorySender(message));
+        Assert.DoesNotContain("trick", peer.ResolveHistorySender(message), StringComparison.Ordinal);
+        Assert.Equal(0, resolverCalls);
+    }
+
+    [Fact]
+    public void SelfStructuredVictory_KeepsVerifiedNameWithoutResolvingRemoteName()
+    {
+        var resolverCalls = 0;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: _ =>
+            {
+                resolverCalls++;
+                return "trick";
+            });
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Kuro",
+            "Victory!",
+            ChatMessageKind.Self,
+            SenderId: 0,
+            PlayerNumber: 4,
+            CommunicationCue: ChatCommunicationCue.Victory);
+
+        Assert.Equal(1, ChatOverlayPeer.ResolveHistoryPlayerNumber(message));
+        Assert.Equal("Kuro", peer.ResolveHistorySender(message));
+        Assert.Equal(ChatCommunicationCue.Victory, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
+        Assert.Equal(0, resolverCalls);
+    }
+
+    [Fact]
+    public void StructuredVictory_KeepsTheNameResolvedAtEnqueueTime()
     {
         var requestedRemotePlayer = 0;
         using var peer = CreatePeer(
@@ -585,16 +1151,17 @@ public sealed class ChatOverlayPeerHotkeyTests
         var message = new ChatMessage(
             1,
             DateTimeOffset.UtcNow,
-            "vo_CMM_win_3",
+            "Narmaya",
             "Victory!",
             ChatMessageKind.Party,
             SenderId: 0x1234,
-            PlayerNumber: 3);
+            PlayerNumber: 3,
+            CommunicationCue: ChatCommunicationCue.Victory);
 
         var cue = ChatOverlayPeer.GetEffectiveCommunicationCue(message);
 
         Assert.Equal("Narmaya", peer.ResolveHistorySender(message));
-        Assert.Equal(2, requestedRemotePlayer);
+        Assert.Equal(0, requestedRemotePlayer);
         Assert.Equal(ChatCommunicationCue.Victory, cue);
         Assert.Equal(
             "Narmaya (Victory):",
@@ -606,49 +1173,56 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
-    public void RawMachineSender_WithProtocolPaddingResolvesAndClassifies()
-    {
-        var message = new ChatMessage(
-            1,
-            DateTimeOffset.UtcNow,
-            "\uFEFF\u200B\u0001vo_CMM_win_3",
-            "Victory!",
-            ChatMessageKind.Party,
-            SenderId: 0x1234,
-            PlayerNumber: 3);
-        using var peer = CreatePeer(
-            new Config(),
-            new RecordingTransport(),
-            getRemotePlayerName: _ => "Narmaya");
-
-        Assert.Equal("Narmaya", peer.ResolveHistorySender(message));
-        Assert.Equal(ChatCommunicationCue.Victory, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
-    }
-
-    [Fact]
-    public void MachineSenderWithoutAValidPlayerSlotUsesStableSenderIdFallback()
+    public void VerifiedLobbyNameMatchingCueSyntaxRemainsAPlayerName()
     {
         var message = new ChatMessage(
             1,
             DateTimeOffset.UtcNow,
             "vo_CMM_win_3",
-            "Victory!",
+            "Hello",
             ChatMessageKind.Party,
             SenderId: 0x1234,
-            PlayerNumber: 0);
-        using var peer = CreatePeer(new Config(), new RecordingTransport());
+            PlayerNumber: 3);
+        var resolverCalls = 0;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: _ =>
+            {
+                resolverCalls++;
+                return "trick";
+            });
 
-        Assert.Equal("Player 00001234", peer.ResolveHistorySender(message));
-        Assert.DoesNotContain("vo_CMM_", peer.ResolveHistorySender(message), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("vo_CMM_win_3", peer.ResolveHistorySender(message));
+        Assert.Equal(ChatCommunicationCue.None, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
+        Assert.Equal(0, resolverCalls);
     }
 
     [Fact]
-    public void UnknownMachineSenderUsesFallbackWithoutFabricatingCue()
+    public void StructuredVictoryWithoutAValidPlayerSlotUsesStableSenderIdFallback()
     {
         var message = new ChatMessage(
             1,
             DateTimeOffset.UtcNow,
-            "vo_CMM_unknown",
+            "Player 00001234",
+            "Victory!",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 0,
+            CommunicationCue: ChatCommunicationCue.Victory);
+        using var peer = CreatePeer(new Config(), new RecordingTransport());
+
+        Assert.Equal("Player 00001234", peer.ResolveHistorySender(message));
+        Assert.Equal(ChatCommunicationCue.Victory, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
+    }
+
+    [Fact]
+    public void UnresolvedFallbackDoesNotFabricateCommunicationCue()
+    {
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Player 00001234",
             "Unknown",
             ChatMessageKind.Party,
             SenderId: 0x1234,
@@ -684,6 +1258,31 @@ public sealed class ChatOverlayPeerHotkeyTests
 
         Assert.Equal(message.Sender, peer.ResolveHistorySender(message));
         Assert.Equal(ChatCommunicationCue.None, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
+    }
+
+    [Fact]
+    public void PlayerNameBeginningWithFallbackPrefixIsNotResolvedAsAnotherPartyMember()
+    {
+        var resolverCalls = 0;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: _ =>
+            {
+                resolverCalls++;
+                return "trick";
+            });
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Player One",
+            "Hello",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 3);
+
+        Assert.Equal("Player One", peer.ResolveHistorySender(message));
+        Assert.Equal(0, resolverCalls);
     }
 
     [Theory]
@@ -944,9 +1543,13 @@ public sealed class ChatOverlayPeerHotkeyTests
         IIncomingChatSource? incoming = null,
         ChatHistory? history = null,
         Func<int, string?>? getRemotePlayerName = null,
+        Func<PartyVoiceIndicatorSnapshot>? getVoiceIndicatorSnapshot = null,
         Func<PartyRoomTransition?>? readRoomTransition = null,
         Func<int>? getEstablishedVoiceParticipantCount = null,
-        Func<DateTimeOffset>? getCurrentTime = null) =>
+        Func<DateTimeOffset>? getCurrentTime = null,
+        Func<Action<bool>, VoicePushToTalkSafetyGate>? createWindowVoicePushToTalkGate = null,
+        Func<int, bool>? isWindowKeyDown = null,
+        Action<string>? log = null) =>
         new(
             new ChatSession(history ?? new ChatHistory(10), new ChatComposer(), transport, incoming: incoming),
             () => configuration,
@@ -964,12 +1567,15 @@ public sealed class ChatOverlayPeerHotkeyTests
             setVoicePushToTalkPressed ?? (_ => { }),
             () => { },
             _ => { },
-            _ => { },
+            log ?? (_ => { }),
             chatBlacklist: chatBlacklist,
             getRemotePlayerName: getRemotePlayerName,
+            getVoiceIndicatorSnapshot: getVoiceIndicatorSnapshot,
             readRoomTransition: readRoomTransition,
             getEstablishedVoiceParticipantCount: getEstablishedVoiceParticipantCount,
-            getCurrentTime: getCurrentTime);
+            getCurrentTime: getCurrentTime,
+            createWindowVoicePushToTalkGate: createWindowVoicePushToTalkGate,
+            isWindowKeyDown: isWindowKeyDown);
 
     private static void SetInitialized(ChatOverlayPeer peer) =>
         typeof(ChatOverlayPeer)

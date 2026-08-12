@@ -1,3 +1,5 @@
+using GBFR.ChatOverlay.Core;
+
 namespace GBFR.ChatOverlay.Native;
 
 internal sealed class PartyLobbyOwnerBinding
@@ -9,6 +11,7 @@ internal sealed class PartyLobbyOwnerBinding
     private bool _hasObservedRemoteHostPresent;
     private string? _roomName;
     private int _hostPlayerNumber;
+    private PartyNetworkLocalRole _activeRole;
 
     internal void ObserveOwner(nint lobby, string? ownerEntityId)
     {
@@ -24,16 +27,21 @@ internal sealed class PartyLobbyOwnerBinding
         _ownerCandidates[lobby] = ownerEntityId!;
     }
 
-    internal PartyRoomIdentitySnapshot ResolveSnapshot(RelinkPartyMemberIdentitySnapshot snapshot)
+    internal PartyRoomIdentitySnapshot ResolveSnapshot(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        PartyNetworkLocalRole role)
     {
-        var hostState = ResolveHostState(snapshot);
+        var hostState = ResolveHostState(snapshot, role);
         return new PartyRoomIdentitySnapshot(
             hostState == PartyRoomHostState.Unknown ? null : _roomName,
             hostState);
     }
 
-    internal PartyRoomHostState ResolveHostState(RelinkPartyMemberIdentitySnapshot snapshot)
+    internal PartyRoomHostState ResolveHostState(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        PartyNetworkLocalRole role)
     {
+        EnsureRole(role);
         if (!PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
                 snapshot.EntityIds,
                 snapshot.LocalMemberSlot,
@@ -43,39 +51,21 @@ internal sealed class PartyLobbyOwnerBinding
             return PartyRoomHostState.Unknown;
         }
 
-        if (_boundOwnerEntityId is null)
+        return role switch
         {
-            if (!TryBindUniqueCandidate(entityIdSlots, out var owner, out var ownerSlot))
-            {
-                _hostPlayerNumber = 0;
-                return PartyRoomHostState.Unknown;
-            }
-
-            _boundOwnerEntityId = owner;
-            _hasObservedRemoteHostPresent = ownerSlot != snapshot.LocalMemberSlot;
-            _hostPlayerNumber = ownerSlot + 1;
-            _roomName = null;
-        }
-
-        var hostState = PartyRoomIdentitySnapshotResolver.ResolveHostState(
-            _boundOwnerEntityId,
-            snapshot,
-            _hasObservedRemoteHostPresent,
-            out var currentOwnerSlot);
-
-        if (hostState == PartyRoomHostState.RemoteHostPresent)
-            _hasObservedRemoteHostPresent = true;
-        if (hostState is PartyRoomHostState.LocalHost or PartyRoomHostState.RemoteHostPresent)
-            _hostPlayerNumber = currentOwnerSlot + 1;
-        else
-            _hostPlayerNumber = 0;
-
-        return hostState;
+            PartyNetworkLocalRole.Unknown => PartyRoomHostState.Unknown,
+            PartyNetworkLocalRole.Created => ResolveCreatedHostState(),
+            PartyNetworkLocalRole.Connected => ResolveConnectedHostState(snapshot, entityIdSlots),
+            _ => PartyRoomHostState.Unknown,
+        };
     }
 
-    internal bool TryResolveHostPlayerNumber(RelinkPartyMemberIdentitySnapshot snapshot, out int playerNumber)
+    internal bool TryResolveHostPlayerNumber(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        PartyNetworkLocalRole role,
+        out int playerNumber)
     {
-        var hostState = ResolveHostState(snapshot);
+        var hostState = ResolveHostState(snapshot, role);
         playerNumber = hostState is PartyRoomHostState.LocalHost or PartyRoomHostState.RemoteHostPresent
             ? _hostPlayerNumber
             : 0;
@@ -90,7 +80,9 @@ internal sealed class PartyLobbyOwnerBinding
 
     internal void CacheRoomName(string? roomName)
     {
-        if (_boundOwnerEntityId is null || string.IsNullOrWhiteSpace(roomName))
+        if (_activeRole == PartyNetworkLocalRole.Unknown ||
+            string.IsNullOrWhiteSpace(roomName) ||
+            (_activeRole == PartyNetworkLocalRole.Connected && _boundOwnerEntityId is null))
             return;
 
         _roomName = roomName.Trim();
@@ -103,18 +95,90 @@ internal sealed class PartyLobbyOwnerBinding
         _hasObservedRemoteHostPresent = false;
         _roomName = null;
         _hostPlayerNumber = 0;
+        _activeRole = PartyNetworkLocalRole.Unknown;
     }
 
-    private bool TryBindUniqueCandidate(
+    private void EnsureRole(PartyNetworkLocalRole role)
+    {
+        if (_activeRole == role)
+            return;
+
+        _boundOwnerEntityId = null;
+        _hasObservedRemoteHostPresent = false;
+        _roomName = null;
+        _hostPlayerNumber = 0;
+        _activeRole = role;
+    }
+
+    private PartyRoomHostState ResolveCreatedHostState()
+    {
+        _boundOwnerEntityId = null;
+        _hasObservedRemoteHostPresent = false;
+        _hostPlayerNumber = 1;
+        return PartyRoomHostState.LocalHost;
+    }
+
+    private PartyRoomHostState ResolveConnectedHostState(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        IReadOnlyDictionary<string, int> entityIdSlots)
+    {
+        if (_boundOwnerEntityId is not null)
+        {
+            var hostState = PartyRoomIdentitySnapshotResolver.ResolveHostState(
+                _boundOwnerEntityId,
+                snapshot,
+                _hasObservedRemoteHostPresent,
+                out var currentOwnerSlot);
+
+            if (hostState == PartyRoomHostState.LocalHost)
+            {
+                _hostPlayerNumber = 0;
+                return PartyRoomHostState.Unknown;
+            }
+
+            if (hostState == PartyRoomHostState.RemoteHostPresent)
+            {
+                _hasObservedRemoteHostPresent = true;
+                _hostPlayerNumber = ResolveHostPlayerNumber(snapshot, currentOwnerSlot);
+                return PartyRoomHostState.RemoteHostPresent;
+            }
+
+            _hostPlayerNumber = 0;
+            return hostState;
+        }
+
+        if (!TryBindUniqueRemoteCandidate(
+                entityIdSlots,
+                snapshot,
+                out var owner,
+                out var ownerSlot))
+        {
+            _hostPlayerNumber = 0;
+            return PartyRoomHostState.Unknown;
+        }
+
+        _boundOwnerEntityId = owner;
+        _hasObservedRemoteHostPresent = true;
+        _hostPlayerNumber = ResolveHostPlayerNumber(snapshot, ownerSlot);
+        _roomName = null;
+        return PartyRoomHostState.RemoteHostPresent;
+    }
+
+    private bool TryBindUniqueRemoteCandidate(
         IReadOnlyDictionary<string, int> entityIdSlots,
+        RelinkPartyMemberIdentitySnapshot snapshot,
         out string? owner,
         out int ownerSlot)
     {
         owner = null;
         ownerSlot = -1;
+        var localEntityId = snapshot.EntityIds[snapshot.LocalMemberSlot];
         var seenCandidates = new HashSet<string>(StringComparer.Ordinal);
         foreach (var candidate in _ownerCandidates.Values)
         {
+            if (string.Equals(candidate, localEntityId, StringComparison.Ordinal))
+                continue;
+
             if (!seenCandidates.Add(candidate))
                 continue;
 
@@ -145,5 +209,20 @@ internal sealed class PartyLobbyOwnerBinding
         }
 
         return true;
+    }
+
+    private static int ResolveHostPlayerNumber(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        int ownerSlot)
+    {
+        if (ownerSlot == snapshot.LocalMemberSlot)
+            return 1;
+
+        return PartyMemberSlotMap.TryGetPlayerNumber(
+            snapshot.LocalMemberSlot,
+            ownerSlot,
+            out var playerNumber)
+            ? playerNumber
+            : 0;
     }
 }

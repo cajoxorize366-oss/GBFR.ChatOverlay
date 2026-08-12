@@ -195,7 +195,8 @@ public class Mod : ModBase // <= Do not Remove.
                     _hooks,
                     message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
                     _gameContextProbe,
-                    _chatBlacklist);
+                    _chatBlacklist,
+                    GetLocalNetworkRole);
                 StartupPhaseDiagnostic.Run(
                     "native-chat-hooks",
                     moduleLog,
@@ -259,7 +260,7 @@ public class Mod : ModBase // <= Do not Remove.
             chatBlacklist: _chatBlacklist,
             getHostPlayerNumber: GetHostPlayerNumber,
             getRemotePlayerName: GetRemotePlayerName,
-            getTalkingRemotePlayers: GetTalkingRemotePlayers,
+            getVoiceIndicatorSnapshot: GetVoiceIndicatorSnapshot,
             readRoomTransition: ReadRoomTransition,
             getEstablishedVoiceParticipantCount: GetEstablishedVoiceParticipantCount);
 
@@ -474,6 +475,9 @@ public class Mod : ModBase // <= Do not Remove.
     private bool IsOnlineRoomActive() =>
         _partyLifecycleProbe?.IsOnlineRoomActive == true;
 
+    private PartyNetworkLocalRole GetLocalNetworkRole() =>
+        _partyLifecycleProbe?.LocalNetworkRole ?? PartyNetworkLocalRole.Unknown;
+
     private int? GetHostPlayerNumber()
     {
         if (!IsOnlineRoomActive())
@@ -488,8 +492,8 @@ public class Mod : ModBase // <= Do not Remove.
             ? playerName
             : null;
 
-    private IReadOnlyList<int> GetTalkingRemotePlayers() =>
-        _partyLifecycleProbe?.GetTalkingRemotePlayers() ?? Array.Empty<int>();
+    private PartyVoiceIndicatorSnapshot GetVoiceIndicatorSnapshot() =>
+        _partyLifecycleProbe?.GetVoiceIndicatorSnapshot() ?? PartyVoiceIndicatorSnapshot.Unavailable;
 
     private PartyRoomIdentitySnapshot GetRoomIdentitySnapshot() =>
         _nativeChatBridge?.TryGetRoomIdentitySnapshot(out var snapshot) == true

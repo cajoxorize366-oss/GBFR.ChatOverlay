@@ -242,6 +242,18 @@ public sealed class PartyCaptureBridgeCanaryTests
         {
             ChatControl = LocalChatControl,
         });
+        canary.Observe(Manager, new PartyStateChangeSnapshot(
+            (uint)PartyStateChangeType.LocalChatAudioInputChanged)
+        {
+            ChatControl = LocalChatControl,
+            AudioInputState = PartyAudioInputState.Initialized,
+        });
+        canary.Observe(Manager, new PartyStateChangeSnapshot(
+            (uint)PartyStateChangeType.LocalChatAudioOutputChanged)
+        {
+            ChatControl = LocalChatControl,
+            AudioOutputState = PartyAudioOutputState.Initialized,
+        });
         canary.Observe(Manager, AudioCompleted(
             PartyStateChangeType.SetChatAudioInputCompleted,
             canary.AudioInputAsyncIdentifier));
@@ -370,6 +382,13 @@ public sealed class PartyCaptureBridgeCanaryTests
         {
             Calls.Add("GetLocalChatControlCount");
             chatControlCount = 0;
+            return 0;
+        }
+
+        public uint GetNetworkChatControls(nint network, out nint[] chatControls)
+        {
+            Calls.Add("GetNetworkChatControls");
+            chatControls = [];
             return 0;
         }
 

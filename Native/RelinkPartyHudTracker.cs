@@ -20,7 +20,8 @@ internal readonly record struct PartyHudAnchor(
     PartyHudLayout Layout,
     float CenterX,
     float CenterY,
-    float IconSize);
+    float IconSize,
+    int NativeMemberType = -1);
 
 internal sealed class RelinkPartyHudTracker
 {
@@ -65,9 +66,9 @@ internal sealed class RelinkPartyHudTracker
     private nint _chainburstVtable;
     private bool _initialized;
     private bool _suspended;
-    private int _firstAnchorLogged;
     private int _projectionFailureLogged;
     private int _chainburstSuppressionLogged;
+    private string? _lastAnchorFingerprint;
 
     internal RelinkPartyHudTracker(
         ReloadedHooksApi hooks,
@@ -168,6 +169,7 @@ internal sealed class RelinkPartyHudTracker
         // this one native overlay for its complete opening/visible/closing lifetime.
         if (IsChainburstOverlayActive())
         {
+            Volatile.Write(ref _lastAnchorFingerprint, null);
             if (Interlocked.Exchange(ref _chainburstSuppressionLogged, 1) == 0)
                 SafeLog("Full Chain overlay active; native party-HUD microphone anchors are suppressed.");
             return Array.Empty<PartyHudAnchor>();
@@ -205,7 +207,10 @@ internal sealed class RelinkPartyHudTracker
         }
 
         if (candidates.Count == 0)
+        {
+            Volatile.Write(ref _lastAnchorFingerprint, null);
             return Array.Empty<PartyHudAnchor>();
+        }
 
         candidates.Sort(static (left, right) =>
         {
@@ -225,14 +230,29 @@ internal sealed class RelinkPartyHudTracker
                 candidate.Layout,
                 candidate.CenterX,
                 candidate.CenterY,
-                candidate.IconSize);
+                candidate.IconSize,
+                candidate.NativeMemberType);
         }
 
-        if (Interlocked.Exchange(ref _firstAnchorLogged, 1) == 0)
+        var anchorFingerprint = string.Join(
+            '|',
+            anchors.Select(anchor =>
+                $"{anchor.Layout}:{anchor.SlotIndex}:{anchor.IsLocal}:{anchor.NativeMemberType}"));
+        if (!string.Equals(
+                Interlocked.Exchange(ref _lastAnchorFingerprint, anchorFingerprint),
+                anchorFingerprint,
+                StringComparison.Ordinal))
         {
+            var layouts = string.Join(',', anchors.Select(static anchor => anchor.Layout).Distinct());
+            var nativeTypes = string.Join(',', anchors.Select(static anchor => anchor.NativeMemberType));
+            var rowOrder = string.Join(
+                ',',
+                anchors.Select(anchor => $"{anchor.SlotIndex}:{(anchor.IsLocal ? 'L' : 'R')}"));
             SafeLog(
-                $"Native party-HUD microphone anchors are live: layout={anchors[0].Layout}, " +
-                $"activeRows={anchors.Length}, viewport={viewportWidth:0.#}x{viewportHeight:0.#}.");
+                $"Native party-HUD microphone anchors changed: layouts={layouts}, " +
+                $"activeRows={anchors.Length}, localRows={anchors.Count(static anchor => anchor.IsLocal)}, " +
+                $"nativeTypes=[{nativeTypes}], rowOrder=[{rowOrder}], " +
+                $"viewport={viewportWidth:0.#}x{viewportHeight:0.#}.");
         }
 
         return anchors;
@@ -466,8 +486,17 @@ internal sealed class RelinkPartyHudTracker
             var stateOffset = layout == PartyHudLayout.OnlineLobby
                 ? TownSlotOffset
                 : BattleTypeOffset;
-            var isLocal = TryReadInt32(controller + stateOffset, out var state) && state == 0;
-            candidate = new AnchorCandidate(layout, isLocal, center.X, center.Y, iconSize);
+            var nativeMemberType = TryReadInt32(controller + stateOffset, out var state)
+                ? state
+                : -1;
+            var isLocal = nativeMemberType == 0;
+            candidate = new AnchorCandidate(
+                layout,
+                isLocal,
+                center.X,
+                center.Y,
+                iconSize,
+                nativeMemberType);
             return true;
         }
 
@@ -594,7 +623,8 @@ internal sealed class RelinkPartyHudTracker
         bool IsLocal,
         float CenterX,
         float CenterY,
-        float IconSize);
+        float IconSize,
+        int NativeMemberType);
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate nint HudFactoryDelegate(nint context, nint resultStorage);

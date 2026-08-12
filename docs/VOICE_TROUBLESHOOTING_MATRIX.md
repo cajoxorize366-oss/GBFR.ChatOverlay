@@ -1,6 +1,6 @@
 # One-run Party voice troubleshooting matrix
 
-This is the required two-client test for `0.4.0` and later builds, including `0.5.0-preview.1`. It follows Microsoft PlayFab Party's native audio troubleshooting flow. The online U path does not configure an audio-manipulation capture stream: Party owns microphone capture, encoding, transmission and playback. When Relink has configured Party's Audio task as `Manual`, the Mod supplies only the required 40 ms `PartyDoWork(Audio)` pump.
+This is the required two-client test for `0.5.0-preview.22` and later builds. It follows Microsoft PlayFab Party's native audio troubleshooting flow. The online U path does not configure an audio-manipulation capture stream: Party owns microphone capture, encoding, transmission and playback. When Relink has configured Party's Audio task as `Manual`, the Mod supplies only the required 40 ms `PartyDoWork(Audio)` pump.
 
 ## What the package measures
 
@@ -22,11 +22,13 @@ The F10 menu's separate microphone self-test still uses local WASAPI capture and
 2. On both clients, choose the intended `Voice Microphone` and `Voice Playback Device`, save, and restart. `Default` follows the Windows default communications endpoint; a named entry saves that endpoint ID.
 3. Before joining a room, each client wears headphones, holds `I`, speaks, and confirms it hears its own selected microphone. The overlay must reach `本地自检通过`; the log must contain `Local microphone monitor detected input signal` and a `result: PASS` line after release.
 4. Create a private room and wait until both overlays say `[VOICE] 已就绪 · U 队友通话 / F10 设置与自检`.
+   With voice-indicator debug disabled, both clients should now show muted microphone icons on the local row and the exact remote member row whose permissioned ChatControl supplied the matching EntityId. CPU, empty and unresolved rows must remain blank. This verifies the identity/channel correlation, not authenticated Mod-version negotiation.
 5. A holds `U`, speaks continuously for at least three seconds, then releases it. B listens.
 6. B holds `U`, speaks continuously for at least three seconds, then releases it. A listens.
 7. Once, hold `U` and switch focus away from the game. Confirm the 350 ms watchdog forces mute, then return and complete one normal hold/release.
 8. Leave the room normally so both logs receive the diagnostic summary and cleanup chain.
 9. Preserve both complete Reloaded-II logs, labelled A/B, plus the approximate I-preflight, A-talk, B-talk, focus-loss and leave times.
+10. Repeat the established/`Talking` icon checks once in the online lobby and once in battle. Trigger one Full Chain and verify every icon is suppressed until the native chainburst controller closes.
 
 ## Healthy evidence
 
@@ -39,11 +41,14 @@ Party Audio work mode is Manual; started the Mod-owned PartyDoWork(Audio) pump a
 Stage 2 canary creation queued ... Party's native selected microphone path remains active; no audio-manipulation capture stream is configured ...
 Stage 3 Party audio input state: Initialized (1); errorDetail=0x00000000.
 Stage 3 Party audio output state: Initialized (1); errorDetail=0x00000000.
+Stage 3 PartyNetworkGetChatControls reconciliation: total=..., remoteAdded=..., remoteKnown=....
 ```
 
 While A speaks with U held, A should contain:
 
 ```text
+Stage 3 window push-to-talk physical press reached the Chat input route and entered the safety gate.
+Stage 3 push-to-talk press accepted; Party input unmute was queued behind the current state batch.
 Stage 3 push-to-talk microphone UNMUTED while U is held; Party is capturing the configured Windows microphone directly.
 Stage 3 voice diagnostics LOCAL: ... pttKeyHeld=True, nativeInputUnmuted=True, inputMuted=False, localIndicator=Talking (1), ... audioPath=PartyNativeInput, captureSink=enabled:False,... diagnosis=PASS_LOCAL_MICROPHONE_SIGNAL_CAPTURED.
 Stage 3 local microphone capture result for the completed U hold: PASS - Party GetLocalChatIndicator reached Talking.
@@ -75,6 +80,9 @@ This pass means Party observed native local capture plus one specific remote pee
 | `I` starts but reports no microphone signal | Windows capture before Party | Check the physical mic, Windows privacy/input meter, selected endpoint and gain. |
 | Input state other than `Initialized (1)` | Party native capture device | Party cannot establish the selected microphone. Use the state and translated `errorDetail`, then verify the endpoint and Windows privacy settings. |
 | Output state other than `Initialized (1)` | Party render device | The receiving client cannot establish its selected playback endpoint. Check the endpoint, exclusive use and format support. |
+| Pressing U produces no `window push-to-talk physical press reached` line while Extra Sigil owns the Broker | Broker guest input route | The Chat peer did not receive the game-window key message. Preserve the Broker registration/recovery lines and confirm both Mods come from compatible OverlayHub builds. |
+| `PartyNetworkGetChatControls reconciliation` reports `remoteKnown=0` on both clients | Remote ChatControl discovery | Neither client can currently see the other's Mod ChatControl. Confirm both installed the exact same ZIP, fully restarted the game, joined the same online PartyNetwork and waited for both local canaries to join. |
+| Reconciliation reports a remote control, but no `permissions granted ... 0x0005` follows | Chat permission scheduling | Preserve the reconciliation, leave/cleanup and any fail-closed lines. A remote handle was discovered but did not complete the permission work item. |
 | U held but `nativeInputUnmuted=False` or `inputMuted=True` | Push-to-talk mute transition | Party did not open the ChatControl input. Preserve the Set/Get mute logs and lifecycle immediately before U. |
 | U held and `localIndicator=NoAudioInput` after a healthy Automatic owner or active Manual pump | Party native input | Party still has no usable audio input on that ChatControl. Compare the logged selected device ID with Windows and the successful F10 local self-test endpoint. |
 | U held and local remains `Silent` despite speech | Party native capture/signal | Party initialized and unmuted the input but did not detect voice. Verify mic gain/privacy and speak continuously for at least three seconds. |

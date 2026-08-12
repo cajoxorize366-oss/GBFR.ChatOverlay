@@ -23,6 +23,13 @@ internal enum PartyRoomHostState
     RemoteHostMissing,
 }
 
+internal enum PartyNetworkLocalRole
+{
+    Unknown,
+    Created,
+    Connected,
+}
+
 internal readonly record struct PartyRoomIdentitySnapshot(
     string? RoomName,
     PartyRoomHostState HostState);

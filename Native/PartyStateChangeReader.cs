@@ -48,6 +48,10 @@ internal static class PartyStateChangeReader
         var type = ReadUInt32(stateChange, 0);
         return (PartyStateChangeType)type switch
         {
+            PartyStateChangeType.CreateNewNetworkCompleted =>
+                ReadCreateNewNetworkCompleted(stateChange, type),
+            PartyStateChangeType.ConnectToNetworkCompleted =>
+                ReadConnectToNetworkCompleted(stateChange, type),
             PartyStateChangeType.AuthenticateLocalUserCompleted =>
                 ReadAuthenticateLocalUserCompleted(stateChange, type),
             PartyStateChangeType.CreateEndpointCompleted =>
@@ -113,6 +117,24 @@ internal static class PartyStateChangeReader
             _ => new PartyStateChangeSnapshot(type),
         };
     }
+
+    private static PartyStateChangeSnapshot ReadCreateNewNetworkCompleted(nint pointer, uint type) =>
+        new(type)
+        {
+            Result = ReadUInt32(pointer, 4),
+            ErrorDetail = ReadUInt32(pointer, 8),
+            LocalUser = Marshal.ReadIntPtr(pointer, 16),
+            AsyncIdentifier = Marshal.ReadIntPtr(pointer, 64),
+        };
+
+    private static PartyStateChangeSnapshot ReadConnectToNetworkCompleted(nint pointer, uint type) =>
+        new(type)
+        {
+            Result = ReadUInt32(pointer, 4),
+            ErrorDetail = ReadUInt32(pointer, 8),
+            AsyncIdentifier = Marshal.ReadIntPtr(pointer, 376),
+            Network = Marshal.ReadIntPtr(pointer, 384),
+        };
 
     private static PartyStateChangeSnapshot ReadAuthenticateLocalUserCompleted(nint pointer, uint type) =>
         new(type)

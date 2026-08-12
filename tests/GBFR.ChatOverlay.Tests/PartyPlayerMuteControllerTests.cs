@@ -8,6 +8,8 @@ public sealed class PartyPlayerMuteControllerTests
     private static readonly nint LocalChatControl = (nint)0x2000;
     private static readonly nint SecondLocalChatControl = (nint)0x2100;
     private static readonly nint RemoteChatControl = (nint)0x3000;
+    private static readonly nint RemoteChatControlB = (nint)0x3100;
+    private static readonly nint RemoteChatControlC = (nint)0x3300;
     private static readonly nint Manager = (nint)0x4000;
 
     [Fact]
@@ -27,10 +29,16 @@ public sealed class PartyPlayerMuteControllerTests
         var before = Assert.Single(controller.GetSnapshot(), slot => slot.PlayerNumber == 2);
         Assert.True(before.IsAvailable);
         Assert.False(before.IsMuted);
+        Assert.Equal(1, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
 
         var operation = controller.SetPlayerMuted(2, muted: true);
 
         Assert.True(operation.Succeeded);
+        Assert.Equal(2, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
         Assert.Equal(
             new[]
             {
@@ -126,6 +134,163 @@ public sealed class PartyPlayerMuteControllerTests
         Assert.True(Assert.Single(controller.GetSnapshot(), slot => slot.PlayerNumber == 2).IsAvailable);
     }
 
+    [Fact]
+    public void LocalSlotTwo_PlayerTwoTargetsRemoteActualSlotZero()
+    {
+        var api = new FakePartyApi();
+        api.LocalControls.Add(LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "remote-slot-zero";
+        var identities = new FakeIdentityResolver
+        {
+            LocalMemberSlot = 2,
+            [0] = "remote-slot-zero",
+            [2] = "local-player",
+        };
+        var controller = new PartyPlayerMuteController(api, identities, _ => { });
+        ObserveBatch(controller, Joined(LocalChatControl), Joined(RemoteChatControl));
+
+        var status = Assert.Single(controller.GetSnapshot(), slot => slot.PlayerNumber == 2);
+
+        Assert.True(status.IsAvailable);
+        Assert.False(status.IsMuted);
+        Assert.Equal(1, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+        Assert.True(controller.SetPlayerMuted(2, muted: true).Succeeded);
+        Assert.Equal(2, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+        Assert.Equal([(LocalChatControl, RemoteChatControl, true)], api.SetCalls);
+    }
+
+    [Fact]
+    public void LocalSlotTwo_RemoteOrdinalsMapToActualSlotsZeroOneThree()
+    {
+        var api = new FakePartyApi();
+        api.LocalControls.Add(LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "remote-slot-zero";
+        api.EntityIds[RemoteChatControlB] = "remote-slot-one";
+        api.EntityIds[RemoteChatControlC] = "remote-slot-three";
+        var identities = new FakeIdentityResolver
+        {
+            LocalMemberSlot = 2,
+            [0] = "remote-slot-zero",
+            [1] = "remote-slot-one",
+            [2] = "local-player",
+            [3] = "remote-slot-three",
+        };
+        var controller = new PartyPlayerMuteController(api, identities, _ => { });
+        ObserveBatch(
+            controller,
+            Joined(LocalChatControl),
+            Joined(RemoteChatControl),
+            Joined(RemoteChatControlB),
+            Joined(RemoteChatControlC));
+
+        var snapshot = controller.GetSnapshot();
+
+        Assert.Equal(1, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+        Assert.True(Assert.Single(snapshot, slot => slot.PlayerNumber == 2).IsAvailable);
+        Assert.True(Assert.Single(snapshot, slot => slot.PlayerNumber == 3).IsAvailable);
+        Assert.True(Assert.Single(snapshot, slot => slot.PlayerNumber == 4).IsAvailable);
+
+        Assert.True(controller.SetPlayerMuted(2, muted: true).Succeeded);
+        Assert.True(controller.SetPlayerMuted(3, muted: true).Succeeded);
+        Assert.True(controller.SetPlayerMuted(4, muted: true).Succeeded);
+
+        Assert.Equal(
+            [
+                (LocalChatControl, RemoteChatControl, true),
+                (LocalChatControl, RemoteChatControlB, true),
+                (LocalChatControl, RemoteChatControlC, true),
+            ],
+            api.SetCalls);
+        Assert.Equal(4, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+    }
+
+    [Fact]
+    public void LocalSlotTwo_PlayerThreeDoesNotTargetLocalSlotEntity()
+    {
+        var api = new FakePartyApi();
+        api.LocalControls.Add(LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "local-player";
+        var identities = new FakeIdentityResolver
+        {
+            LocalMemberSlot = 2,
+            [2] = "local-player",
+        };
+        var controller = new PartyPlayerMuteController(api, identities, _ => { });
+        ObserveBatch(controller, Joined(LocalChatControl), Joined(RemoteChatControl));
+
+        Assert.False(Assert.Single(controller.GetSnapshot(), slot => slot.PlayerNumber == 3).IsAvailable);
+        Assert.Equal(1, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+        Assert.False(controller.SetPlayerMuted(3, muted: true).Succeeded);
+        Assert.Equal(2, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+        Assert.Empty(api.SetCalls);
+    }
+
+    [Fact]
+    public void MalformedOrDuplicateSnapshot_FailsClosedWithoutPartySetCalls()
+    {
+        var malformed = new FakeIdentityResolver
+        {
+            LocalMemberSlot = 4,
+            [1] = "entity-player-2",
+        };
+        var duplicate = new FakeIdentityResolver
+        {
+            LocalMemberSlot = 2,
+            [0] = "entity-player-2",
+            [1] = "entity-player-2",
+        };
+
+        foreach (var identities in new[] { malformed, duplicate })
+        {
+            var api = new FakePartyApi();
+            api.LocalControls.Add(LocalChatControl);
+            api.EntityIds[RemoteChatControl] = "entity-player-2";
+            var controller = new PartyPlayerMuteController(api, identities, _ => { });
+            ObserveBatch(controller, Joined(LocalChatControl), Joined(RemoteChatControl));
+
+            Assert.All(controller.GetSnapshot(), slot => Assert.False(slot.IsAvailable));
+            Assert.False(controller.SetPlayerMuted(2, muted: true).Succeeded);
+            Assert.Empty(api.SetCalls);
+            Assert.Equal(2, identities.CoherentSnapshotCalls);
+            Assert.Equal(0, identities.SlotResolveCalls);
+            Assert.Equal(0, identities.TryResolveSnapshotCalls);
+        }
+    }
+
+    [Fact]
+    public void SnapshotReadFailure_FailsClosedWithoutPartySetCalls()
+    {
+        var api = new FakePartyApi();
+        api.LocalControls.Add(LocalChatControl);
+        api.EntityIds[RemoteChatControl] = "entity-player-2";
+        var identities = new FakeIdentityResolver
+        {
+            [1] = "entity-player-2",
+            TryResolveResult = false,
+        };
+        var controller = new PartyPlayerMuteController(api, identities, _ => { });
+        ObserveBatch(controller, Joined(LocalChatControl), Joined(RemoteChatControl));
+
+        Assert.All(controller.GetSnapshot(), slot => Assert.False(slot.IsAvailable));
+        Assert.False(controller.SetPlayerMuted(2, muted: true).Succeeded);
+        Assert.Empty(api.SetCalls);
+        Assert.Equal(2, identities.CoherentSnapshotCalls);
+        Assert.Equal(0, identities.SlotResolveCalls);
+        Assert.Equal(0, identities.TryResolveSnapshotCalls);
+    }
+
     private static PartyStateChangeSnapshot Joined(nint chatControl) =>
         new((uint)PartyStateChangeType.ChatControlJoinedNetwork)
         {
@@ -143,17 +308,65 @@ public sealed class PartyPlayerMuteControllerTests
         controller.OnBatchFinished(Manager);
     }
 
-    private sealed class FakeIdentityResolver : IRelinkPartyMemberIdentityResolver
+    private sealed class FakeIdentityResolver :
+        IRelinkPartyMemberIdentityResolver,
+        IRelinkPartyMemberIdentitySnapshotResolver
     {
-        private readonly Dictionary<int, string> _identities = [];
+        private readonly string[] _entityIds = ["", "", "", ""];
 
-        internal string this[int slot]
+        internal int LocalMemberSlot { get; set; }
+
+        internal bool TryResolveResult { get; set; } = true;
+
+        internal int CoherentSnapshotCalls { get; private set; }
+
+        internal int SlotResolveCalls { get; private set; }
+
+        internal int TryResolveSnapshotCalls { get; private set; }
+
+        internal string? this[int slot]
         {
-            set => _identities[slot] = value;
+            set => _entityIds[slot] = value ?? string.Empty;
         }
 
-        public bool TryResolveSlot(int memberSlot, out string entityId) =>
-            _identities.TryGetValue(memberSlot, out entityId!);
+        public bool TryResolveSlot(int memberSlot, out string entityId)
+        {
+            SlotResolveCalls++;
+            if (memberSlot is >= 0 and < 4)
+            {
+                entityId = _entityIds[memberSlot];
+                return true;
+            }
+
+            entityId = string.Empty;
+            return false;
+        }
+
+        public bool TryResolveSnapshot(out string[] entityIds)
+        {
+            TryResolveSnapshotCalls++;
+            if (!TryResolveCoherentSnapshot(out var snapshot))
+            {
+                entityIds = [];
+                return false;
+            }
+
+            entityIds = snapshot.EntityIds;
+            return true;
+        }
+
+        public bool TryResolveCoherentSnapshot(out RelinkPartyMemberIdentitySnapshot snapshot)
+        {
+            CoherentSnapshotCalls++;
+            snapshot = default;
+            if (!TryResolveResult)
+                return false;
+
+            snapshot = new RelinkPartyMemberIdentitySnapshot(
+                (string[])_entityIds.Clone(),
+                LocalMemberSlot);
+            return true;
+        }
     }
 
     private sealed class FakePartyApi : IPartyChatControlApi

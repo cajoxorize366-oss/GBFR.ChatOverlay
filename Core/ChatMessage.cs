@@ -7,6 +7,14 @@ public enum ChatMessageKind
     System,
 }
 
+public enum ChatCommunicationCue
+{
+    None,
+    Victory,
+    LinkAttack,
+    Thanks,
+}
+
 public sealed record ChatMessage(
     long Sequence,
     DateTimeOffset Timestamp,
@@ -14,4 +22,5 @@ public sealed record ChatMessage(
     string Text,
     ChatMessageKind Kind,
     uint SenderId = 0,
-    int PlayerNumber = 0);
+    int PlayerNumber = 0,
+    ChatCommunicationCue CommunicationCue = ChatCommunicationCue.None);

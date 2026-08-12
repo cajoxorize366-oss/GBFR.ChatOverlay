@@ -37,7 +37,8 @@ public sealed class ChatHistory
         ChatMessageKind kind,
         DateTimeOffset? timestamp = null,
         uint senderId = 0,
-        int playerNumber = 0)
+        int playerNumber = 0,
+        ChatCommunicationCue communicationCue = ChatCommunicationCue.None)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sender);
         ArgumentException.ThrowIfNullOrWhiteSpace(text);
@@ -51,7 +52,8 @@ public sealed class ChatHistory
                 text,
                 kind,
                 senderId,
-                playerNumber);
+                playerNumber,
+                communicationCue);
 
             _messages.Enqueue(message);
             while (_messages.Count > _capacity)

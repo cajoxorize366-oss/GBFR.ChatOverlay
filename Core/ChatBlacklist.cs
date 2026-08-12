@@ -11,6 +11,15 @@ public sealed class ChatBlacklist
     private const int AllRemotePlayersMask = 0b111;
     private int _mutedPlayerMask;
 
+    public bool IsMemberSlotMuted(int memberSlot, int localMemberSlot)
+    {
+        if (memberSlot == localMemberSlot)
+            return false;
+
+        return PartyMemberSlotMap.TryGetPlayerNumber(localMemberSlot, memberSlot, out var playerNumber) &&
+               IsMuted(playerNumber);
+    }
+
     public bool IsMuted(int playerNumber)
     {
         if (playerNumber is < FirstRemotePlayer or > LastRemotePlayer)
@@ -18,8 +27,6 @@ public sealed class ChatBlacklist
 
         return (Volatile.Read(ref _mutedPlayerMask) & GetMask(playerNumber)) != 0;
     }
-
-    public bool IsMemberSlotMuted(int memberSlot) => IsMuted(memberSlot + 1);
 
     public bool SetMuted(int playerNumber, bool muted)
     {

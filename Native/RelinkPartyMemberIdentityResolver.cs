@@ -11,7 +11,13 @@ internal interface IRelinkPartyMemberIdentityResolver
 internal interface IRelinkPartyMemberIdentitySnapshotResolver
 {
     bool TryResolveSnapshot(out string[] entityIds);
+
+    bool TryResolveCoherentSnapshot(out RelinkPartyMemberIdentitySnapshot snapshot);
 }
+
+internal readonly record struct RelinkPartyMemberIdentitySnapshot(
+    string[] EntityIds,
+    int LocalMemberSlot);
 
 /// <summary>
 /// Reads the verified 2.0.4 four-member identity table used by Relink's own online-member
@@ -31,6 +37,8 @@ internal sealed class RelinkPartyMemberIdentityResolver :
     // The lookup's R9 predicate resolves to 0x1403AA460, which returns
     // byte [manager+0x6CCE8] and selects the 0x1C288 bank when nonzero.
     private const int OnlineStateOffset = 0x6CCE8;
+    private const int LocalMemberSlotTableOffset = 0x6C828;
+    private const int LocalMemberSlotStride = sizeof(int);
     // 0x14026C960 copies the second MSVC std::string from source+0x28;
     // Relink serializes that copied field under the member_entity_id key.
     private const int EntityIdStringOffset = 0x28;
@@ -132,6 +140,95 @@ internal sealed class RelinkPartyMemberIdentityResolver :
         }
 
         entityIds = snapshot;
+        return true;
+    }
+
+    internal bool TryResolveLocalMemberSlot(out int localMemberSlot)
+    {
+        localMemberSlot = -1;
+        if (!TryBeginPartyRead(out var manager, out var onlineState, out var candidate) ||
+            !TryVerifyPartyRead(manager, onlineState, candidate))
+        {
+            localMemberSlot = -1;
+            return false;
+        }
+
+        localMemberSlot = candidate;
+        return true;
+    }
+
+    public bool TryResolveCoherentSnapshot(out RelinkPartyMemberIdentitySnapshot snapshot)
+    {
+        snapshot = default;
+        if (!TryBeginPartyRead(out var manager, out var onlineState, out var localMemberSlot))
+            return false;
+
+        var bankOffset = onlineState == 0 ? OfflineMemberBankOffset : OnlineMemberBankOffset;
+        var entityIds = new string[MemberCount];
+        for (var memberSlot = 0; memberSlot < MemberCount; memberSlot++)
+        {
+            if (!TryAdd(
+                    manager,
+                    checked(bankOffset + memberSlot * MemberStride + EntityIdStringOffset),
+                    out var nativeString) ||
+                !TryReadNativeString(nativeString, out entityIds[memberSlot], allowEmpty: true))
+            {
+                return false;
+            }
+        }
+
+        if (!TryVerifyPartyRead(manager, onlineState, localMemberSlot))
+            return false;
+
+        snapshot = new RelinkPartyMemberIdentitySnapshot(entityIds, localMemberSlot);
+        return true;
+    }
+
+    private bool TryBeginPartyRead(
+        out nint manager,
+        out byte onlineState,
+        out int localMemberSlot)
+    {
+        manager = nint.Zero;
+        onlineState = 0;
+        localMemberSlot = -1;
+        return _memory.TryReadPointer(_managerSlot, out manager) &&
+               manager != nint.Zero &&
+               TryReadByte(manager, OnlineStateOffset, out onlineState) &&
+               onlineState <= 1 &&
+               TryReadLocalSlot(manager, onlineState, out localMemberSlot) &&
+               localMemberSlot is >= 0 and < MemberCount;
+    }
+
+    private bool TryVerifyPartyRead(
+        nint manager,
+        byte onlineState,
+        int localMemberSlot)
+    {
+        return _memory.TryReadPointer(_managerSlot, out var managerAfter) &&
+               managerAfter == manager &&
+               TryReadByte(manager, OnlineStateOffset, out var onlineStateAfter) &&
+               onlineStateAfter == onlineState &&
+               TryReadLocalSlot(manager, onlineState, out var localMemberSlotAfter) &&
+               localMemberSlotAfter == localMemberSlot;
+    }
+
+    private bool TryReadLocalSlot(nint manager, byte onlineState, out int localMemberSlot)
+    {
+        localMemberSlot = -1;
+        if (!TryAdd(
+                manager,
+                checked(LocalMemberSlotTableOffset + (int)onlineState * LocalMemberSlotStride),
+                out var tableAddress))
+        {
+            return false;
+        }
+
+        Span<byte> encoded = stackalloc byte[sizeof(int)];
+        if (!_memory.TryReadBytes(tableAddress, encoded))
+            return false;
+
+        localMemberSlot = BinaryPrimitives.ReadInt32LittleEndian(encoded);
         return true;
     }
 

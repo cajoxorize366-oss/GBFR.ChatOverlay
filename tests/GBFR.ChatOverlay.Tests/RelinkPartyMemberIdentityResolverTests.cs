@@ -94,6 +94,172 @@ public sealed class RelinkPartyMemberIdentityResolverTests
         Assert.Equal(["owner", string.Empty, string.Empty, string.Empty], entityIds);
     }
 
+    [Theory]
+    [InlineData(0, 0x6C828, 2)]
+    [InlineData(1, 0x6C82C, 3)]
+    public void TryResolveLocalMemberSlot_ReadsSelectedTable(
+        byte onlineState,
+        int tableOffset,
+        int expectedSlot)
+    {
+        var memory = CreateLocalSlotMemory(onlineState, expectedSlot, tableOffset);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+
+        Assert.True(resolver.TryResolveLocalMemberSlot(out var localMemberSlot));
+        Assert.Equal(expectedSlot, localMemberSlot);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public void TryResolveLocalMemberSlot_RejectsSlotsOutsideTheFourMemberTable(int localMemberSlot)
+    {
+        var memory = CreateLocalSlotMemory(1, localMemberSlot, 0x6C82C);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+
+        Assert.False(resolver.TryResolveLocalMemberSlot(out _));
+    }
+
+    [Fact]
+    public void TryResolveLocalMemberSlot_RejectsUnsupportedOnlineState()
+    {
+        var memory = CreateLocalSlotMemory(2, 1, 0x6C830);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+
+        Assert.False(resolver.TryResolveLocalMemberSlot(out _));
+        Assert.False(resolver.TryResolveCoherentSnapshot(out _));
+    }
+
+    [Fact]
+    public void TryResolveLocalMemberSlot_FailsWhenManagerChangesMidRead()
+    {
+        var memory = CreateLocalSlotMemory(1, 3, 0x6C82C);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+        memory.OnRead = (address, length) =>
+        {
+            if (address == ManagerSlot && length == nint.Size)
+                memory.WritePointer(ManagerSlot, Manager + 0x1000);
+        };
+
+        Assert.False(resolver.TryResolveLocalMemberSlot(out _));
+    }
+
+    [Fact]
+    public void TryResolveLocalMemberSlot_FailsWhenOnlineStateChangesMidRead()
+    {
+        var memory = CreateLocalSlotMemory(1, 3, 0x6C82C);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+        var stateReads = 0;
+        memory.OnRead = (address, length) =>
+        {
+            if (address == Manager + 0x6CCE8 && length == 1 && ++stateReads == 1)
+                memory.WriteByte(address, 0);
+        };
+
+        Assert.False(resolver.TryResolveLocalMemberSlot(out _));
+    }
+
+    [Fact]
+    public void TryResolveLocalMemberSlot_FailsWhenLocalSlotChangesMidRead()
+    {
+        var memory = CreateLocalSlotMemory(1, 3, 0x6C82C);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+        var slotReads = 0;
+        memory.OnRead = (address, length) =>
+        {
+            if (address == Manager + 0x6C82C && length == 4 && ++slotReads == 1)
+                memory.WriteInt32(address, 2);
+        };
+
+        Assert.False(resolver.TryResolveLocalMemberSlot(out _));
+    }
+
+    [Fact]
+    public void TryResolveCoherentSnapshot_ReturnsFourEntityIdsAndSameBatchLocalSlot()
+    {
+        var memory = CreateCoherentSnapshotMemory(1, 3, 0x1C288);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+
+        Assert.True(resolver.TryResolveCoherentSnapshot(out var snapshot));
+        Assert.Equal(["entity-1", "entity-2", "entity-3", "entity-4"], snapshot.EntityIds);
+        Assert.Equal(3, snapshot.LocalMemberSlot);
+    }
+
+    [Fact]
+    public void TryResolveCoherentSnapshot_FailsWhenManagerChangesMidRead()
+    {
+        var memory = CreateCoherentSnapshotMemory(1, 3, 0x1C288);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+        memory.OnRead = (address, length) =>
+        {
+            if (address == ManagerSlot && length == nint.Size)
+                memory.WritePointer(ManagerSlot, Manager + 0x1000);
+        };
+
+        Assert.False(resolver.TryResolveCoherentSnapshot(out _));
+    }
+
+    [Fact]
+    public void TryResolveCoherentSnapshot_FailsWhenOnlineStateChangesMidRead()
+    {
+        var memory = CreateCoherentSnapshotMemory(1, 3, 0x1C288);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+        var stateReads = 0;
+        memory.OnRead = (address, length) =>
+        {
+            if (address == Manager + 0x6CCE8 && length == 1 && ++stateReads == 1)
+                memory.WriteByte(address, 0);
+        };
+
+        Assert.False(resolver.TryResolveCoherentSnapshot(out _));
+    }
+
+    [Fact]
+    public void TryResolveCoherentSnapshot_FailsWhenLocalSlotChangesMidRead()
+    {
+        var memory = CreateCoherentSnapshotMemory(1, 3, 0x1C288);
+        var resolver = new RelinkPartyMemberIdentityResolver(ManagerSlot, memory);
+        var slotReads = 0;
+        memory.OnRead = (address, length) =>
+        {
+            if (address == Manager + 0x6C82C && length == 4 && ++slotReads == 1)
+                memory.WriteInt32(address, 2);
+        };
+
+        Assert.False(resolver.TryResolveCoherentSnapshot(out _));
+    }
+
+    private static TestMemoryReader CreateLocalSlotMemory(
+        byte onlineState,
+        int localMemberSlot,
+        int tableOffset)
+    {
+        var memory = new TestMemoryReader();
+        memory.WritePointer(ManagerSlot, Manager);
+        memory.WriteByte(Manager + 0x6CCE8, onlineState);
+        memory.WriteInt32(Manager + tableOffset, localMemberSlot);
+        return memory;
+    }
+
+    private static TestMemoryReader CreateCoherentSnapshotMemory(
+        byte onlineState,
+        int localMemberSlot,
+        int bankOffset)
+    {
+        var memory = CreateLocalSlotMemory(
+            onlineState,
+            localMemberSlot,
+            onlineState == 0 ? 0x6C828 : 0x6C82C);
+        for (var memberSlot = 0; memberSlot < 4; memberSlot++)
+        {
+            WriteInlineString(
+                memory,
+                Manager + bankOffset + memberSlot * 0x58 + 0x28,
+                $"entity-{memberSlot + 1}");
+        }
+        return memory;
+    }
+
     private static void WriteInlineString(TestMemoryReader memory, nint address, string value)
     {
         var encoded = Encoding.UTF8.GetBytes(value);
@@ -134,6 +300,8 @@ public sealed class RelinkPartyMemberIdentityResolverTests
     {
         private readonly Dictionary<nint, byte> _bytes = [];
 
+        internal Action<nint, int>? OnRead { get; set; }
+
         public bool TryReadPointer(nint address, out nint value)
         {
             Span<byte> bytes = stackalloc byte[nint.Size];
@@ -156,6 +324,8 @@ public sealed class RelinkPartyMemberIdentityResolverTests
                 if (!_bytes.TryGetValue(address + index, out destination[index]))
                     return false;
             }
+
+            OnRead?.Invoke(address, destination.Length);
             return true;
         }
 
@@ -170,6 +340,13 @@ public sealed class RelinkPartyMemberIdentityResolverTests
         }
 
         internal void WriteByte(nint address, byte value) => _bytes[address] = value;
+
+        internal void WriteInt32(nint address, int value)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(int)];
+            BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+            Write(address, bytes);
+        }
 
         internal void Write(nint address, ReadOnlySpan<byte> source)
         {

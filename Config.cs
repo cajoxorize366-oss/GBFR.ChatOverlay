@@ -142,6 +142,12 @@ public class Config : Configurable<Config>
     public bool EnableOverlay { get; set; } = true;
 
     [Category("00 通用设置 / General")]
+    [DisplayName("精简模式 / Compact Mode")]
+    [Description("平时隐藏聊天框，按聊天键时显示语音状态和输入框。 / Hide the chat window until the chat key is pressed, then show voice status and the input box.")]
+    [DefaultValue(false)]
+    public bool CompactMode { get; set; }
+
+    [Category("00 通用设置 / General")]
     [DisplayName("快捷菜单（手柄） / Quick Action (Controller)")]
     [Description("打开快捷菜单的手柄按键。 / Controller button used to open the quick action menu.")]
     [DefaultValue("")]

@@ -178,6 +178,27 @@ internal sealed class PartyChatControlCanary : IDisposable
         }
     }
 
+    internal int EstablishedVoiceParticipantCount
+    {
+        get
+        {
+            lock (_stateSync)
+            {
+                if (_disposed != 0 ||
+                    _suspended ||
+                    !_nativeCallsAllowed ||
+                    _sessionFaulted ||
+                    !_joinedObserved ||
+                    _localChatControl == nint.Zero)
+                {
+                    return 0;
+                }
+
+                return 1 + _permissionedRemoteChatControls.Count;
+            }
+        }
+    }
+
     internal PartyVoiceUiStatus VoiceUiStatus
     {
         get

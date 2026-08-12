@@ -38,6 +38,8 @@ public static class RelinkBuildLocator
     private const int ExpectedManagerInstructionRva = 0x025F633A;
     private const int ExpectedLobbyMemberCallsiteRva = 0x003C81B0;
     private const int ExpectedPartyMemberIdentityCallsiteRva = 0x003C773C;
+    private const int ExpectedLocalMemberSlotCallsiteRva = 0x009035D0;
+    private const int ExpectedLocalMemberSlotCallRva = 0x006CD520;
     private const int ExpectedSendStampRva = 0x00903660;
     private const int ExpectedSendFixedPhraseRva = 0x009044F0;
     private const int ExpectedSendEmotionRva = 0x009033A0;
@@ -71,6 +73,10 @@ public static class RelinkBuildLocator
         "48 8B 0D ?? ?? ?? ?? 44 8B 85 14 08 00 00 48 8D 05 ?? ?? ?? ?? " +
         "48 89 85 30 17 00 00 48 89 8D 38 17 00 00 48 8D 95 B0 15 00 00 " +
         "4C 8D 8D 30 17 00 00 E8 ?? ?? ?? ??");
+
+    private static readonly SignaturePattern LocalMemberSlotCallsitePattern = SignaturePattern.Parse(
+        "48 8B 05 ?? ?? ?? ?? 0F B6 88 E8 CC 06 00 48 C1 E1 02 48 81 C9 28 C8 06 00 " +
+        "8B 0C 08 C7 44 24 20 00 00 00 00 48 8D 54 24 20 E8 ?? ?? ?? ??");
 
     private static readonly SignaturePattern SendStampPattern = SignaturePattern.Parse(
         "55 41 57 41 56 56 57 53 48 83 EC 68 48 8D 6C 24 60 " +
@@ -118,6 +124,10 @@ public static class RelinkBuildLocator
             ExpectedPartyMemberIdentityCallsiteRva,
             PartyMemberIdentityCallsitePattern,
             "party member EntityId lookup callsite");
+        preflight.RequirePattern(
+            ExpectedLocalMemberSlotCallsiteRva,
+            LocalMemberSlotCallsitePattern,
+            "authoritative local member slot callsite");
         preflight.RequirePattern(ExpectedSendStampRva, SendStampPattern, "communication stamp send");
         preflight.RequirePattern(
             ExpectedSendFixedPhraseRva,
@@ -149,6 +159,14 @@ public static class RelinkBuildLocator
             ExpectedPartyMemberIdentityCallsiteRva + 3);
         var partyMemberIdentityManagerSlotRva = checked(
             ExpectedPartyMemberIdentityCallsiteRva + 7 + partyMemberIdentityManagerDisplacement);
+        var localMemberSlotManagerDisplacement = preflight.ReadInt32(
+            ExpectedLocalMemberSlotCallsiteRva + 3);
+        var localMemberSlotManagerSlotRva = checked(
+            ExpectedLocalMemberSlotCallsiteRva + 7 + localMemberSlotManagerDisplacement);
+        var localMemberSlotCallDisplacement = preflight.ReadInt32(
+            ExpectedLocalMemberSlotCallsiteRva + 42);
+        var localMemberSlotCallRva = checked(
+            ExpectedLocalMemberSlotCallsiteRva + 46 + localMemberSlotCallDisplacement);
 
         if (sendRva != ExpectedSendMessageRva ||
             rpcRva != ExpectedRpcMessageRva ||
@@ -156,14 +174,18 @@ public static class RelinkBuildLocator
             senderSlotResolverRva != ExpectedSenderSlotResolverRva ||
             lobbyMemberLookupRva != ExpectedLobbyMemberLookupRva ||
             lobbyMemberManagerSlotRva != ExpectedLobbyMemberManagerSlotRva ||
-            partyMemberIdentityManagerSlotRva != ExpectedPartyMemberIdentityManagerSlotRva)
+            partyMemberIdentityManagerSlotRva != ExpectedPartyMemberIdentityManagerSlotRva ||
+            localMemberSlotManagerSlotRva != ExpectedPartyMemberIdentityManagerSlotRva ||
+            localMemberSlotCallRva != ExpectedLocalMemberSlotCallRva)
         {
             throw new InvalidDataException(
                 $"Relink chat signature validation failed: send={sendRva:X}, rpc={rpcRva:X}, " +
                 $"manager={managerSlotRva:X}, senderSlot={senderSlotResolverRva:X}, " +
                 $"memberLookup={lobbyMemberLookupRva:X}, " +
                 $"memberManager={lobbyMemberManagerSlotRva:X}, " +
-                $"partyMemberIdentityManager={partyMemberIdentityManagerSlotRva:X}.");
+                $"partyMemberIdentityManager={partyMemberIdentityManagerSlotRva:X}, " +
+                $"localSlotManager={localMemberSlotManagerSlotRva:X}, " +
+                $"localSlotCall={localMemberSlotCallRva:X}.");
         }
 
         return new RelinkChatRvas(sendRva, rpcRva, managerSlotRva)

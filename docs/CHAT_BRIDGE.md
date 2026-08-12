@@ -32,13 +32,13 @@ optimized machine ABI: (network::protocol::behavior::Chat const*)
 
 For raw free-text records, the verified `Chat` layout exposes:
 
-- `+0x18`: sender/player identifier used by the game's lookup and filtering path;
+- `+0x18`: verified four-party member slot (`0..3`) used directly by the game's identity and filtering path;
 - `+0x1C`: bounded `0x160`-byte text buffer;
 - `+0x17C`: text hash/discriminator (`0x887AE0B0` means literal text);
 - `+0x180`: bounded `0x18`-byte sender label/short field;
 - `+0x198` and `+0x19C`: category/metadata retained for later classification.
 
-The short sender-label field is empty for ordinary online free-text messages in the verified build; the `+0x18` value is an opaque sender identifier, not a display-name string. The bridge therefore uses the game's own sender-to-member-slot resolver at RVA `0x6CD520`, then follows the same lobby member lookup used by the online UI:
+The short sender-label field is empty for ordinary online free-text messages in the verified build. Native inspection confirms that the game feeds `+0x18` directly into its four-entry Party identity bank, so the bridge uses it directly as the member slot. RVA `0x6CD520` instead returns the traversal index of a separate network-object pointer array; it is retained only as a validated native boundary and is never used for display names, player colors, blacklist selection or local identity. Name resolution then follows the same lobby member lookup used by the online UI:
 
 ```text
 member manager global RVA 0x7C21AB8
@@ -48,9 +48,9 @@ profile pointer member+0x5E60
 MSVC std::string member_name profile+0x208
 ```
 
-The name path accepts only active slots `0..3`, a valid profile pointer, a bounded NUL-terminated MSVC string and strict UTF-8. A non-empty RPC sender label remains authoritative. If any lookup or validation fails, the immutable record keeps the stable `Player XXXXXXXX` fallback and emits at most one diagnostic line.
+The authoritative local Party slot is read from the same Party manager used by the identity bank: byte `manager+0x6CCE8` selects the local-slot entry at `manager+0x6C828` or `manager+0x6C82C`. The manager pointer, selector, local slot and all four EntityIds are rechecked as one coherent snapshot before publication; slot 0 is never assumed to be local. The name path accepts only active slots `0..3`, a valid profile pointer, a bounded NUL-terminated MSVC string and strict UTF-8. A normal non-empty RPC sender label remains authoritative. Labels beginning with `vo_CMM_` are machine communication cues rather than player names: the bridge resolves the player through `+0x18`, maps `chance`, `win_*` and `thanks` to structured link-attack, victory and thanks cues, and never publishes the raw cue key as a sender. If any lookup or validation fails, the immutable record keeps the stable `Player XXXXXXXX` fallback and emits at most one diagnostic line.
 
-The callback copies `0x1A0` bytes immediately, calls the original function, strictly validates UTF-8, resolves an empty sender label and enqueues an immutable record. The ImGui render callback drains a bounded queue into `ChatHistory`. Hashed quick messages are currently ignored because displaying them requires the game's text resolver.
+The callback copies `0x1A0` bytes immediately, calls the original function, strictly validates UTF-8, resolves an empty or machine-cue sender label and enqueues an immutable record. It never dereferences the packet again after the original callback returns. The outbound short sender view is also treated as untrusted identity input: `vo_CMM_*` values cannot update the cached local player name, and every incoming record is sanitized once more immediately before enqueue. The ImGui render callback drains a bounded queue into `ChatHistory`, preserving the real player slot and the optional communication cue separately. Hashed quick messages are currently ignored because displaying them requires the game's text resolver.
 
 ## Version and online safety
 
@@ -63,4 +63,4 @@ The callback copies `0x1A0` bytes immediately, calls the original function, stri
 
 ## Remaining runtime criteria
 
-Static location, native ABI inspection, C# integration and unit tests are complete. The `0.5.0-preview.14` local echo behavior is retained, and `0.5.0-preview.15` moves every native bridge profile to the verified Relink 2.0.4 image. The remaining two-client criterion is proving that each teammate free-text line uses the same real player name as Relink's online UI and that a failed name lookup safely retains `Player XXXXXXXX`.
+Static location, native ABI inspection, C# integration and unit tests are complete. The `0.5.0-preview.14` local echo behavior is retained, `0.5.0-preview.15` moves every native bridge profile to the verified Relink 2.0.4 image, and `0.5.0-preview.20` separates Party identity slots from network-object traversal slots while reading the authoritative local Party slot. The remaining criterion is a two-client run with reversed host/join order proving that free text and `vo_CMM_*` cues retain each sender's real name, and that an unresolved lookup safely keeps `Player XXXXXXXX` without inventing a host.

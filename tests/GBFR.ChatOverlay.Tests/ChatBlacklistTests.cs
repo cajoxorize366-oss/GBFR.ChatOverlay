@@ -5,16 +5,16 @@ namespace GBFR.ChatOverlay.Tests;
 public sealed class ChatBlacklistTests
 {
     [Fact]
-    public void PlayerMute_UsesUiPlayerNumbersAndNeverBlocksLocalPlayer()
+    public void PlayerMute_MapsActualSlotsAroundLocalSlotTwoAndNeverBlocksLocal()
     {
         var blacklist = new ChatBlacklist();
 
-        Assert.True(blacklist.SetMuted(3, true));
+        Assert.True(blacklist.SetMuted(2, true));
 
-        Assert.False(blacklist.IsMemberSlotMuted(0));
-        Assert.False(blacklist.IsMemberSlotMuted(1));
-        Assert.True(blacklist.IsMemberSlotMuted(2));
-        Assert.False(blacklist.IsMemberSlotMuted(3));
+        Assert.True(blacklist.IsMemberSlotMuted(0, localMemberSlot: 2));
+        Assert.False(blacklist.IsMemberSlotMuted(1, localMemberSlot: 2));
+        Assert.False(blacklist.IsMemberSlotMuted(2, localMemberSlot: 2));
+        Assert.False(blacklist.IsMemberSlotMuted(3, localMemberSlot: 2));
     }
 
     [Fact]

@@ -32,7 +32,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private const uint WmActivate = 0x0006;
     private const uint WmActivateApp = 0x001C;
     private const int InputBufferSize = 2_048;
-    private const float ComposerReservedHeight = 58.0f;
+    private const float ComposerReservedHeight = ChatOverlayLayout.ComposerReservedHeight;
+    private static readonly TimeSpan RoomTransitionNoticeDuration = TimeSpan.FromSeconds(5);
     private const int WindowHotkeySource = 1 << 0;
     private const int NativeHotkeySource = 1 << 1;
     private const int ControllerHotkeySource = 1 << 2;
@@ -58,6 +59,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly Func<int?> _getHostPlayerNumber;
     private readonly Func<int, string?> _getRemotePlayerName;
     private readonly Func<IReadOnlyList<int>> _getTalkingRemotePlayers;
+    private readonly Func<PartyRoomTransition?> _readRoomTransition;
+    private readonly Func<int> _getEstablishedVoiceParticipantCount;
+    private readonly Func<DateTimeOffset> _getCurrentTime;
     private readonly XInputControllerPoller _controllerInputPoller = new();
     private readonly FlydigiExtendedControllerPoller _flydigiControllerInputPoller = new();
     private readonly MouseInteractionGate _mouseInteractionGate = new();
@@ -111,6 +115,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private float _editWorkHeight;
     private long _lastRenderedSequence;
     private string? _statusText;
+    private string? _composerStatusText;
+    private string? _transientNoticeText;
+    private DateTimeOffset _transientNoticeExpiresAt;
     private string? _selectedQuickActionId;
     private BindingCaptureRequest? _bindingCapture;
     private BindingCaptureRequest? _bindingResultRequest;
@@ -160,7 +167,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ChatBlacklist? chatBlacklist = null,
         Func<int?>? getHostPlayerNumber = null,
         Func<int, string?>? getRemotePlayerName = null,
-        Func<IReadOnlyList<int>>? getTalkingRemotePlayers = null)
+        Func<IReadOnlyList<int>>? getTalkingRemotePlayers = null,
+        Func<PartyRoomTransition?>? readRoomTransition = null,
+        Func<int>? getEstablishedVoiceParticipantCount = null,
+        Func<DateTimeOffset>? getCurrentTime = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -190,6 +200,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _getHostPlayerNumber = getHostPlayerNumber ?? (() => null);
         _getRemotePlayerName = getRemotePlayerName ?? (_ => null);
         _getTalkingRemotePlayers = getTalkingRemotePlayers ?? (() => Array.Empty<int>());
+        _readRoomTransition = readRoomTransition ?? (() => null);
+        _getEstablishedVoiceParticipantCount = getEstablishedVoiceParticipantCount ?? (() => 0);
+        _getCurrentTime = getCurrentTime ?? (() => DateTimeOffset.UtcNow);
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -384,7 +397,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     private string ResolveRemotePlayerName(
         int remotePlayerNumber,
-        int? fallbackPlayerNumber = null)
+        int? fallbackPlayerNumber = null,
+        string? fallbackLabel = null)
     {
         try
         {
@@ -398,6 +412,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 $"Remote player {remotePlayerNumber} name lookup failed; the stable slot label was kept: " +
                 $"{exception.GetType().Name}: {exception.Message}.");
         }
+
+        if (!string.IsNullOrWhiteSpace(fallbackLabel))
+            return fallbackLabel;
 
         var displayedPlayerNumber = fallbackPlayerNumber ?? remotePlayerNumber;
         return T($"玩家 {displayedPlayerNumber}", $"Player {displayedPlayerNumber}");
@@ -872,7 +889,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                    Volatile.Read(ref _openRequested) != 0 ||
                    _session.Composer.IsOpen ||
                    configuration.EffectiveShowAllVoiceIndicatorSlots ||
-                   (configuration.EnableOverlay && IsOnlineRoomActive());
+                   (configuration.EnableOverlay &&
+                    (IsOnlineRoomActive() || HasActiveTransientNotice()));
         }
     }
 
@@ -882,6 +900,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             return;
         PollManagedControllerInput();
         var configuration = _getConfiguration();
+        DrainRoomTransitions();
         if (!configuration.EnableImeCandidateFallback)
             ClearImeCandidateSnapshot();
         var onlineRoomActive = IsOnlineRoomActive();
@@ -919,6 +938,141 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             _session.DrainIncoming();
         }
     }
+
+    private void DrainRoomTransitions()
+    {
+        while (true)
+        {
+            PartyRoomTransition? pending;
+            try
+            {
+                pending = _readRoomTransition();
+            }
+            catch (Exception exception)
+            {
+                LogSafely(
+                    $"Room transition reader failed; remaining transitions were deferred: " +
+                    $"{exception.GetType().Name}: {exception.Message}.");
+                return;
+            }
+
+            if (pending is not { } transition)
+                return;
+
+            var language = CurrentLanguage;
+            var establishedVoiceParticipantCount = transition.Kind == PartyRoomTransitionKind.Entered
+                ? ReadEstablishedVoiceParticipantCount()
+                : 0;
+            var notice = FormatRoomTransitionNotice(
+                transition,
+                language,
+                establishedVoiceParticipantCount);
+            var now = ReadCurrentTime();
+            _session.History.Add(
+                UiLocalization.Select(language, "系统", "System"),
+                notice,
+                ChatMessageKind.System,
+                now);
+            _transientNoticeText = notice;
+            _transientNoticeExpiresAt = now + RoomTransitionNoticeDuration;
+        }
+    }
+
+    private int ReadEstablishedVoiceParticipantCount()
+    {
+        try
+        {
+            return Math.Max(0, _getEstablishedVoiceParticipantCount());
+        }
+        catch (Exception exception)
+        {
+            LogSafely(
+                $"Established voice participant count lookup failed; using zero: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+            return 0;
+        }
+    }
+
+    private DateTimeOffset ReadCurrentTime()
+    {
+        try
+        {
+            return _getCurrentTime();
+        }
+        catch (Exception exception)
+        {
+            LogSafely(
+                $"Transient notice time lookup failed; using UTC now: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+            return DateTimeOffset.UtcNow;
+        }
+    }
+
+    private bool HasActiveTransientNotice() =>
+        IsTransientNoticeActive(
+            _transientNoticeText,
+            ReadCurrentTime(),
+            _transientNoticeExpiresAt);
+
+    internal static bool IsTransientNoticeActive(
+        string? notice,
+        DateTimeOffset now,
+        DateTimeOffset expiresAt) =>
+        !string.IsNullOrWhiteSpace(notice) && now < expiresAt;
+
+    internal static string FormatRoomTransitionNotice(
+        PartyRoomTransition transition,
+        UiLanguage language,
+        int establishedVoiceParticipantCount = 0)
+    {
+        var roomName = string.IsNullOrWhiteSpace(transition.RoomName)
+            ? null
+            : transition.RoomName.Trim();
+        return transition.Kind switch
+        {
+            PartyRoomTransitionKind.Entered =>
+                roomName is null
+                    ? UiLocalization.Select(
+                        language,
+                        $"已进入当前房间，{GetEnteredVoiceParticipantCount(transition.VoiceParticipantCount, establishedVoiceParticipantCount)}人成功建立语音通道",
+                        $"Entered the current room; {GetEnteredVoiceParticipantCount(transition.VoiceParticipantCount, establishedVoiceParticipantCount)} people established voice channels.")
+                    : UiLocalization.Select(
+                        language,
+                        $"已进入{roomName}的房间，{GetEnteredVoiceParticipantCount(transition.VoiceParticipantCount, establishedVoiceParticipantCount)}人成功建立语音通道",
+                        $"Entered {roomName}'s room; {GetEnteredVoiceParticipantCount(transition.VoiceParticipantCount, establishedVoiceParticipantCount)} people established voice channels."),
+            PartyRoomTransitionKind.Exited =>
+                roomName is null
+                    ? UiLocalization.Select(
+                        language,
+                        $"你已退出当前房间，原因是：{FormatRoomExitReason(transition.ExitReason, language)}",
+                        $"You left the current room. Reason: {FormatRoomExitReason(transition.ExitReason, language)}")
+                    : UiLocalization.Select(
+                        language,
+                        $"你已退出{roomName}的房间，原因是：{FormatRoomExitReason(transition.ExitReason, language)}",
+                        $"You left {roomName}'s room. Reason: {FormatRoomExitReason(transition.ExitReason, language)}"),
+            _ => UiLocalization.Select(language, "房间状态已更新。", "Room status updated."),
+        };
+    }
+
+    internal static int GetEnteredVoiceParticipantCount(
+        int transitionVoiceParticipantCount,
+        int establishedVoiceParticipantCount) =>
+        Math.Max(0, Math.Max(transitionVoiceParticipantCount, establishedVoiceParticipantCount));
+
+    internal static string FormatRoomExitReason(
+        PartyRoomExitReason reason,
+        UiLanguage language) =>
+        reason switch
+        {
+            PartyRoomExitReason.SelfLeft => UiLocalization.Select(language, "自行退房", "Left voluntarily"),
+            PartyRoomExitReason.HostDisconnected => UiLocalization.Select(language, "房主掉线", "Host disconnected"),
+            PartyRoomExitReason.Kicked => UiLocalization.Select(language, "你已被踢除房间", "You were kicked from the room"),
+            PartyRoomExitReason.NetworkInterrupted or PartyRoomExitReason.None => UiLocalization.Select(
+                language,
+                "网络波动已退出房间",
+                "Network interruption caused you to leave"),
+            _ => UiLocalization.Select(language, "网络波动已退出房间", "Network interruption caused you to leave"),
+        };
 
     public bool BindGraphics(OverlayGraphicsBinding binding)
     {
@@ -969,6 +1123,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _releaseCaptureFrames = 0;
         _focusInputNextFrame = false;
         _statusText = null;
+        _composerStatusText = null;
         _playerMuteStatusText = null;
         _voiceMuteStatusText = null;
         _registration?.SetInputCapture(OverlayInputDevices.None);
@@ -991,6 +1146,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             var configuration = _getConfiguration();
             var onlineRoomActive = IsOnlineRoomActive();
             var voiceUiStatus = _getVoiceUiStatus();
+            if (configuration.EnableOverlay)
+                DrawTransientRoomNotice(configuration);
             if (onlineRoomActive || configuration.EffectiveShowAllVoiceIndicatorSlots)
                 VoiceIndicatorOverlay.Draw(configuration, voiceUiStatus, _getPartyHudAnchors);
 
@@ -1070,7 +1227,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 _session.Composer.OpenKeyboard();
                 SyncInputBufferFromDraft();
                 _focusInputNextFrame = true;
-                _statusText = _session.TransportStatusText;
+                _composerStatusText = null;
+                _statusText = configuration.CompactMode
+                    ? null
+                    : _session.TransportStatusText;
             }
 
             if (_session.Composer.IsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
@@ -1080,6 +1240,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
                 ClearImeCandidateSnapshot();
                 _statusText = null;
+                _composerStatusText = null;
             }
 
             DrawChatWindow(configuration, openedThisFrame, voiceUiStatus, editMode: false);
@@ -1088,6 +1249,49 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             ResetInteractionState();
             LogSafely($"Render callback recovered from an exception: {exception}");
+        }
+    }
+
+    private void DrawTransientRoomNotice(Config configuration)
+    {
+        var notice = _transientNoticeText;
+        if (!IsTransientNoticeActive(notice, ReadCurrentTime(), _transientNoticeExpiresAt))
+            return;
+
+        var viewport = ImGui.GetMainViewport();
+        var workPosition = viewport.WorkPos;
+        var workSize = viewport.WorkSize;
+        var width = Math.Min(
+            OverlayUiScale.Scale(760.0f),
+            Math.Max(1.0f, workSize.X - OverlayUiScale.Scale(48.0f)));
+        using var position = CreateVector2(
+            workPosition.X + Math.Max(0.0f, (workSize.X - width) * 0.5f),
+            workPosition.Y + OverlayUiScale.Scale(72.0f));
+        using var size = CreateVector2(width, 0.0f);
+        using var pivot = CreateVector2(0.0f, 0.0f);
+        ImGui.SetNextWindowPos(position, (int)ImGuiCond.Always, pivot);
+        ImGui.SetNextWindowSize(size, (int)ImGuiCond.Always);
+        ImGui.SetNextWindowBgAlpha(0.72f);
+
+        var flags = ImGuiWindowFlags.NoDecoration |
+                    ImGuiWindowFlags.NoDocking |
+                    ImGuiWindowFlags.NoSavedSettings |
+                    ImGuiWindowFlags.NoFocusOnAppearing |
+                    ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoResize |
+                    ImGuiWindowFlags.NoInputs;
+        var open = true;
+        var began = ImGui.Begin("##GBFRRoomTransitionNotice", ref open, (int)flags);
+        try
+        {
+            if (!began)
+                return;
+            ImGui.SetWindowFontScale(Math.Clamp((float)configuration.ChatFontSize / 18.0f, 0.67f, 1.67f));
+            ImGui.TextWrapped(notice);
+        }
+        finally
+        {
+            ImGui.End();
         }
     }
 
@@ -1100,7 +1304,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         var viewport = ImGui.GetMainViewport();
         var workPosition = viewport.WorkPos;
         var workSize = viewport.WorkSize;
-        var rect = editMode && _editedChatRect is { } edited
+        var fullRect = editMode && _editedChatRect is { } edited
             ? edited
             : ChatOverlayLayout.Resolve(
                 configuration,
@@ -1108,9 +1312,35 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 workPosition.Y,
                 workSize.X,
                 workSize.Y);
+        var composerOpen = _session.Composer.IsOpen;
+        var presentation = ChatOverlayLayout.ResolvePresentation(
+            configuration.CompactMode,
+            composerOpen,
+            editMode);
+        if (presentation == ChatOverlayPresentationMode.Hidden)
+            return;
+
+        var voicePresentation = VoiceOverlayPresenter.Create(voiceUiStatus, CurrentLanguage);
+        var voiceText = voicePresentation.IsVisible ? voicePresentation.Text : null;
+        var imeCandidateText = composerOpen
+            ? GetImeCandidateFallbackText(configuration.EnableImeCandidateFallback)
+            : null;
+        var fontScale = Math.Clamp((float)configuration.ChatFontSize / 18.0f, 0.67f, 1.67f);
+        var compactContentWidth = Math.Max(
+            1.0f,
+            fullRect.Width - OverlayUiScale.Scale(16.0f));
+        var rect = presentation == ChatOverlayPresentationMode.Compact
+            ? ChatOverlayLayout.ResolveCompactInputRect(
+                fullRect,
+                MeasureCompactTextItemHeight(voiceText, compactContentWidth, fontScale),
+                MeasureCompactTextItemHeight(imeCandidateText, compactContentWidth, fontScale),
+                MeasureCompactTextItemHeight(_composerStatusText, compactContentWidth, fontScale),
+                fontScale,
+                workPosition.Y)
+            : fullRect;
+        var rectBeforeEditHandles = rect;
         if (editMode)
         {
-            _editedChatRect = rect;
             _editWorkX = workPosition.X;
             _editWorkY = workPosition.Y;
             _editWorkWidth = workSize.X;
@@ -1123,7 +1353,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ImGui.SetNextWindowPos(position, (int)ImGuiCond.Always, pivot);
         ImGui.SetNextWindowSize(size, (int)ImGuiCond.Always);
 
-        var composerOpen = _session.Composer.IsOpen;
         var opacity = editMode
             ? Math.Clamp((float)configuration.BackgroundOpacity, 0.25f, 1.0f)
             : composerOpen
@@ -1137,7 +1366,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     ImGuiWindowFlags.NoFocusOnAppearing |
                     ImGuiWindowFlags.NoMove |
                     ImGuiWindowFlags.NoResize;
-        if (!composerOpen && !editMode)
+        if (presentation == ChatOverlayPresentationMode.Full && !composerOpen && !editMode)
             flags |= ImGuiWindowFlags.NoInputs;
 
         var began = ImGui.Begin("GBFR Chat##GBFRChatOverlay", ref _windowOpen, (int)flags);
@@ -1146,16 +1375,32 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             if (!began)
                 return;
 
-            ImGui.SetWindowFontScale(Math.Clamp((float)configuration.ChatFontSize / 18.0f, 0.67f, 1.67f));
-            var imeCandidateText = composerOpen
-                ? GetImeCandidateFallbackText(configuration.EnableImeCandidateFallback)
-                : null;
-            DrawVoiceStatus(voiceUiStatus);
-            DrawHistory(configuration, composerOpen, imeCandidateText);
-            if (composerOpen)
-                DrawComposer(openedThisFrame, imeCandidateText);
-            else if (!string.IsNullOrEmpty(_statusText))
-                ImGui.TextWrapped(_statusText);
+            ImGui.SetWindowFontScale(fontScale);
+            if (presentation == ChatOverlayPresentationMode.Full)
+            {
+                DrawVoiceStatus(voiceUiStatus);
+                DrawHistory(configuration, composerOpen, imeCandidateText);
+                if (composerOpen)
+                    DrawComposer(
+                        openedThisFrame,
+                        imeCandidateText,
+                        showTopSeparator: true,
+                        compactStatusOnly: false,
+                        readOnly: false);
+                else if (!string.IsNullOrEmpty(_statusText))
+                    ImGui.TextWrapped(_statusText);
+            }
+            else
+            {
+                if (voicePresentation.IsVisible)
+                    DrawVoiceStatus(voiceUiStatus);
+                DrawComposer(
+                    openedThisFrame,
+                    imeCandidateText,
+                    showTopSeparator: false,
+                    compactStatusOnly: true,
+                    readOnly: editMode);
+            }
             if (editMode)
             {
                 DrawChatEditHandles(
@@ -1164,8 +1409,18 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     workPosition.X,
                     workPosition.Y,
                     workSize.X,
-                    workSize.Y);
-                _editedChatRect = rect;
+                    workSize.Y,
+                    compactPresentation: presentation == ChatOverlayPresentationMode.Compact);
+                _editedChatRect = presentation == ChatOverlayPresentationMode.Compact
+                    ? ChatOverlayLayout.ApplyCompactEditToFullRect(
+                        fullRect,
+                        rectBeforeEditHandles,
+                        rect,
+                        workPosition.X,
+                        workPosition.Y,
+                        workSize.X,
+                        workSize.Y)
+                    : rect;
             }
         }
         finally
@@ -1588,6 +1843,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             T("启用聊天框", "Enable Chat Overlay"),
             configuration.EnableOverlay,
             (value, enabled) => value.EnableOverlay = enabled);
+        DrawConfigurationCheckbox(
+            T("精简模式", "Compact Mode"),
+            configuration.CompactMode,
+            (value, enabled) => value.CompactMode = enabled);
         DrawConfigurationCheckbox(
             T("输入法候选框兼容", "IME Candidate Fallback"),
             configuration.EnableImeCandidateFallback,
@@ -2520,7 +2779,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         float workX,
         float workY,
         float workWidth,
-        float workHeight)
+        float workHeight,
+        bool compactPresentation)
     {
         ImGui.BeginDisabled(!_mouseInteractionGate.IsArmed);
         try
@@ -2554,14 +2814,20 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             {
                 using var delta = CreateVector2(0.0f, 0.0f);
                 ImGui.GetMouseDragDelta(delta, 0, 0.0f);
-                rect = ChatOverlayLayout.Resize(
-                    rect,
-                    delta.X,
-                    delta.Y,
-                    workX,
-                    workY,
-                    workWidth,
-                    workHeight);
+                rect = compactPresentation
+                    ? ChatOverlayLayout.ResizeWidth(
+                        rect,
+                        delta.X,
+                        workX,
+                        workWidth)
+                    : ChatOverlayLayout.Resize(
+                        rect,
+                        delta.X,
+                        delta.Y,
+                        workX,
+                        workY,
+                        workWidth,
+                        workHeight);
                 ImGui.ResetMouseDragDelta(0);
             }
         }
@@ -2657,10 +2923,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
         var playerNumber = message.PlayerNumber > 0 ? message.PlayerNumber : 0;
         var color = GetPlayerNameColor(configuration, playerNumber);
+        var communicationCue = GetEffectiveCommunicationCue(message);
         var name = FormatHistorySenderLabel(
-            message.Sender,
+            ResolveHistorySender(message),
             playerNumber > 0 && playerNumber == hostPlayerNumber,
-            configuration.InterfaceLanguage);
+            configuration.InterfaceLanguage,
+            communicationCue);
         var nameScale = playerNumber > 0
             ? Math.Clamp((float)configuration.PlayerNameFontSize / 18.0f, 0.67f, 1.67f)
             : baseScale;
@@ -2695,13 +2963,67 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         DrawMessageContextMenu(message, playerNumber);
     }
 
+    internal string ResolveHistorySender(ChatMessage message)
+    {
+        if (!IsMachineGeneratedSender(message.Sender))
+            return message.Sender;
+
+        var fallbackLabel = FormatHistorySenderFallback(message.SenderId);
+        if (message.PlayerNumber is < 2 or > 4)
+            return fallbackLabel;
+
+        return ResolveRemotePlayerName(
+            message.PlayerNumber - 1,
+            fallbackLabel: fallbackLabel);
+    }
+
+    internal static ChatCommunicationCue GetEffectiveCommunicationCue(ChatMessage message)
+    {
+        if (message.CommunicationCue != ChatCommunicationCue.None)
+            return message.CommunicationCue;
+
+        return ChatCommunicationCueClassifier.TryClassifySenderLabel(
+            message.Sender,
+            out var communicationCue)
+            ? communicationCue
+            : ChatCommunicationCue.None;
+    }
+
+    private static string FormatHistorySenderFallback(uint senderId) =>
+        $"Player {senderId:X8}";
+
+    private static bool IsMachineGeneratedSender(string? sender) =>
+        ChatCommunicationCueClassifier.TryClassifySenderLabel(sender, out _) ||
+        sender?.StartsWith("Player ", StringComparison.OrdinalIgnoreCase) == true;
+
     internal static string FormatHistorySenderLabel(
         string sender,
         bool isHost,
+        UiLanguage language,
+        ChatCommunicationCue communicationCue = ChatCommunicationCue.None)
+    {
+        var hostPrefix = isHost
+            ? $"[{UiLocalization.Select(language, "房主", "Host")}] "
+            : string.Empty;
+        if (communicationCue == ChatCommunicationCue.None)
+            return $"{hostPrefix}{sender}:";
+
+        var cueLabel = FormatCommunicationCueLabel(communicationCue, language);
+        return language == UiLanguage.English
+            ? $"{hostPrefix}{sender} ({cueLabel}):"
+            : $"{hostPrefix}{sender}（{cueLabel}）:";
+    }
+
+    internal static string FormatCommunicationCueLabel(
+        ChatCommunicationCue communicationCue,
         UiLanguage language) =>
-        isHost
-            ? $"[{UiLocalization.Select(language, "房主", "Host")}] {sender}:"
-            : $"{sender}:";
+        communicationCue switch
+        {
+            ChatCommunicationCue.Victory => UiLocalization.Select(language, "胜利", "Victory"),
+            ChatCommunicationCue.LinkAttack => UiLocalization.Select(language, "连携攻击", "Link Attack"),
+            ChatCommunicationCue.Thanks => UiLocalization.Select(language, "感谢", "Thanks"),
+            _ => string.Empty,
+        };
 
     private void DrawMessageContextMenu(ChatMessage message, int playerNumber)
     {
@@ -2767,47 +3089,96 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         return -(ComposerReservedHeight + safeCandidateHeight);
     }
 
-    private static float MeasureWrappedTextItemHeight(string? text)
+    private static float MeasureWrappedTextItemHeight(
+        string? text,
+        float? availableWidth = null,
+        float fontScale = 1.0f)
     {
         if (string.IsNullOrEmpty(text))
             return 0.0f;
 
-        using var available = CreateVector2(0.0f, 0.0f);
-        ImGui.GetContentRegionAvail(available);
+        var safeFontScale = float.IsFinite(fontScale) && fontScale > 0.0f
+            ? fontScale
+            : 1.0f;
+        var width = availableWidth;
+        if (width is null)
+        {
+            using var available = CreateVector2(0.0f, 0.0f);
+            ImGui.GetContentRegionAvail(available);
+            width = available.X;
+        }
         using var textSize = CreateVector2(0.0f, 0.0f);
         ImGui.CalcTextSize(
             textSize,
             text,
             null!,
             false,
-            Math.Max(1.0f, available.X));
+            Math.Max(1.0f, width.Value / safeFontScale));
         var itemSpacing = Math.Max(
             0.0f,
             ImGui.GetTextLineHeightWithSpacing() - ImGui.GetTextLineHeight());
-        return Math.Max(0.0f, textSize.Y) + itemSpacing;
+        return (Math.Max(0.0f, textSize.Y) + itemSpacing) * safeFontScale;
     }
 
-    private unsafe void DrawComposer(bool openedThisFrame, string? imeCandidateText)
+    private static float MeasureCompactTextItemHeight(
+        string? text,
+        float availableWidth,
+        float fontScale)
     {
-        ImGui.Separator();
-        DrawImeCandidateFallback(imeCandidateText);
-        if (_focusInputNextFrame && !openedThisFrame)
+        var safeFontScale = float.IsFinite(fontScale) && fontScale > 0.0f
+            ? fontScale
+            : 1.0f;
+        var renderedHeight = MeasureWrappedTextItemHeight(text, availableWidth, safeFontScale);
+        return renderedHeight / safeFontScale;
+    }
+
+    private unsafe void DrawComposer(
+        bool openedThisFrame,
+        string? imeCandidateText,
+        bool showTopSeparator,
+        bool compactStatusOnly,
+        bool readOnly)
+    {
+        if (showTopSeparator)
+            ImGui.Separator();
+        if (!compactStatusOnly)
+            DrawImeCandidateFallback(imeCandidateText);
+        if (!readOnly && _focusInputNextFrame && !openedThisFrame)
         {
             ImGui.SetKeyboardFocusHere(0);
             _focusInputNextFrame = false;
         }
 
         ImGui.SetNextItemWidth(-1.0f);
-        bool submitRequested;
-        fixed (byte* buffer = _inputBuffer)
+        var submitRequested = false;
+        if (readOnly)
+            ImGui.BeginDisabled(true);
+        try
         {
-            submitRequested = ImGui.InputText(
-                "##GBFRChatInput",
-                (sbyte*)buffer,
-                (nint)_inputBuffer.Length,
-                (int)ImGuiInputTextFlags.EnterReturnsTrue,
-                null!,
-                nint.Zero);
+            fixed (byte* buffer = _inputBuffer)
+            {
+                submitRequested = ImGui.InputText(
+                    "##GBFRChatInput",
+                    (sbyte*)buffer,
+                    (nint)_inputBuffer.Length,
+                    (int)ImGuiInputTextFlags.EnterReturnsTrue,
+                    null!,
+                    nint.Zero);
+            }
+        }
+        finally
+        {
+            if (readOnly)
+                ImGui.EndDisabled();
+        }
+
+        if (compactStatusOnly)
+            DrawImeCandidateFallback(imeCandidateText);
+        if (readOnly)
+        {
+            if (!string.IsNullOrEmpty(_composerStatusText))
+                ImGui.TextWrapped(_composerStatusText);
+            return;
         }
 
         var currentDraft = ReadInputBuffer();
@@ -2837,16 +3208,19 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 Interlocked.Exchange(ref _pendingAnsiLeadByte, -1);
                 ClearImeCandidateSnapshot();
                 _statusText = null;
+                _composerStatusText = null;
             }
             else
             {
-                _statusText = result.Error ?? result.Status.ToString();
+                _composerStatusText = result.Error ?? result.Status.ToString();
+                _statusText = _composerStatusText;
                 _focusInputNextFrame = true;
             }
         }
 
-        if (!string.IsNullOrEmpty(_statusText))
-            ImGui.TextWrapped(_statusText);
+        var visibleStatusText = compactStatusOnly ? _composerStatusText : _statusText;
+        if (!string.IsNullOrEmpty(visibleStatusText))
+            ImGui.TextWrapped(visibleStatusText);
     }
 
     public unsafe OverlayWindowMessageResult ObserveWindowMessage(
@@ -3555,6 +3929,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ClearPendingQuickActions();
         _focusInputNextFrame = false;
         _statusText = null;
+        _composerStatusText = null;
         UpdateInputCapture();
     }
 

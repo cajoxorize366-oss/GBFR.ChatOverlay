@@ -277,6 +277,22 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
+    public void CompactMode_KeepsRenderRequestedForVoiceHudWhileChatIsClosed()
+    {
+        var configuration = new Config
+        {
+            CompactMode = true,
+        };
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true);
+        SetInitialized(peer);
+
+        Assert.True(peer.WantsRender);
+    }
+
+    [Fact]
     public void SettingsMenu_ForwardsUnboundEditingKeysToImGui()
     {
         var configuration = new Config
@@ -508,6 +524,358 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.Equal(expected, ChatOverlayPeer.FormatHistorySenderLabel("Kuro", isHost, language));
     }
 
+    [Theory]
+    [InlineData(UiLanguage.SimplifiedChinese, false, ChatCommunicationCue.Victory, "Kuro（胜利）:")]
+    [InlineData(UiLanguage.English, false, ChatCommunicationCue.Victory, "Kuro (Victory):")]
+    [InlineData(UiLanguage.SimplifiedChinese, false, ChatCommunicationCue.LinkAttack, "Kuro（连携攻击）:")]
+    [InlineData(UiLanguage.English, false, ChatCommunicationCue.LinkAttack, "Kuro (Link Attack):")]
+    [InlineData(UiLanguage.SimplifiedChinese, false, ChatCommunicationCue.Thanks, "Kuro（感谢）:")]
+    [InlineData(UiLanguage.English, false, ChatCommunicationCue.Thanks, "Kuro (Thanks):")]
+    [InlineData(UiLanguage.SimplifiedChinese, true, ChatCommunicationCue.LinkAttack, "[房主] Kuro（连携攻击）:")]
+    [InlineData(UiLanguage.English, true, ChatCommunicationCue.LinkAttack, "[Host] Kuro (Link Attack):")]
+    public void HistorySenderLabel_FormatsCommunicationCues(
+        UiLanguage language,
+        bool isHost,
+        ChatCommunicationCue communicationCue,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            ChatOverlayPeer.FormatHistorySenderLabel("Kuro", isHost, language, communicationCue));
+    }
+
+    [Fact]
+    public void CommunicationCue_MachineSenderResolvesTheRealRemotePlayerName()
+    {
+        var requestedRemotePlayer = 0;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: playerNumber =>
+            {
+                requestedRemotePlayer = playerNumber;
+                return "Narmaya";
+            });
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Player 00001234",
+            "Thanks!",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 3,
+            CommunicationCue: ChatCommunicationCue.Thanks);
+
+        Assert.Equal("Narmaya", peer.ResolveHistorySender(message));
+        Assert.Equal(2, requestedRemotePlayer);
+    }
+
+    [Fact]
+    public void RawMachineSender_ResolvesTheRealRemotePlayerNameAndClassifiesVictoryCue()
+    {
+        var requestedRemotePlayer = 0;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: playerNumber =>
+            {
+                requestedRemotePlayer = playerNumber;
+                return "Narmaya";
+            });
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "vo_CMM_win_3",
+            "Victory!",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 3);
+
+        var cue = ChatOverlayPeer.GetEffectiveCommunicationCue(message);
+
+        Assert.Equal("Narmaya", peer.ResolveHistorySender(message));
+        Assert.Equal(2, requestedRemotePlayer);
+        Assert.Equal(ChatCommunicationCue.Victory, cue);
+        Assert.Equal(
+            "Narmaya (Victory):",
+            ChatOverlayPeer.FormatHistorySenderLabel(
+                peer.ResolveHistorySender(message),
+                false,
+                UiLanguage.English,
+                cue));
+    }
+
+    [Fact]
+    public void RawMachineSender_WithProtocolPaddingResolvesAndClassifies()
+    {
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "\uFEFF\u200B\u0001vo_CMM_win_3",
+            "Victory!",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 3);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: _ => "Narmaya");
+
+        Assert.Equal("Narmaya", peer.ResolveHistorySender(message));
+        Assert.Equal(ChatCommunicationCue.Victory, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
+    }
+
+    [Fact]
+    public void MachineSenderWithoutAValidPlayerSlotUsesStableSenderIdFallback()
+    {
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "vo_CMM_win_3",
+            "Victory!",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 0);
+        using var peer = CreatePeer(new Config(), new RecordingTransport());
+
+        Assert.Equal("Player 00001234", peer.ResolveHistorySender(message));
+        Assert.DoesNotContain("vo_CMM_", peer.ResolveHistorySender(message), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void UnknownMachineSenderUsesFallbackWithoutFabricatingCue()
+    {
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "vo_CMM_unknown",
+            "Unknown",
+            ChatMessageKind.Party,
+            SenderId: 0x1234,
+            PlayerNumber: 3);
+        using var peer = CreatePeer(new Config(), new RecordingTransport());
+
+        var resolvedSender = peer.ResolveHistorySender(message);
+        var cue = ChatOverlayPeer.GetEffectiveCommunicationCue(message);
+
+        Assert.Equal("Player 00001234", resolvedSender);
+        Assert.Equal(ChatCommunicationCue.None, cue);
+        Assert.Equal(
+            "Player 00001234:",
+            ChatOverlayPeer.FormatHistorySenderLabel(
+                resolvedSender,
+                false,
+                UiLanguage.English,
+                cue));
+    }
+
+    [Fact]
+    public void PlayerNameContainingMachinePrefixRemainsUnchanged()
+    {
+        var message = new ChatMessage(
+            1,
+            DateTimeOffset.UtcNow,
+            "Kuro_vo_CMM_win_3",
+            "Hello",
+            ChatMessageKind.Self,
+            SenderId: 0x1234,
+            PlayerNumber: 3);
+        using var peer = CreatePeer(new Config(), new RecordingTransport());
+
+        Assert.Equal(message.Sender, peer.ResolveHistorySender(message));
+        Assert.Equal(ChatCommunicationCue.None, ChatOverlayPeer.GetEffectiveCommunicationCue(message));
+    }
+
+    [Theory]
+    [InlineData(
+        UiLanguage.SimplifiedChinese,
+        PartyRoomExitReason.SelfLeft,
+        "Arca",
+        "你已退出Arca的房间，原因是：自行退房")]
+    [InlineData(
+        UiLanguage.SimplifiedChinese,
+        PartyRoomExitReason.HostDisconnected,
+        "Arca",
+        "你已退出Arca的房间，原因是：房主掉线")]
+    [InlineData(
+        UiLanguage.SimplifiedChinese,
+        PartyRoomExitReason.Kicked,
+        "Arca",
+        "你已退出Arca的房间，原因是：你已被踢除房间")]
+    [InlineData(
+        UiLanguage.SimplifiedChinese,
+        PartyRoomExitReason.NetworkInterrupted,
+        "Arca",
+        "你已退出Arca的房间，原因是：网络波动已退出房间")]
+    [InlineData(
+        UiLanguage.SimplifiedChinese,
+        PartyRoomExitReason.None,
+        null,
+        "你已退出当前房间，原因是：网络波动已退出房间")]
+    [InlineData(
+        UiLanguage.English,
+        PartyRoomExitReason.SelfLeft,
+        "Arca",
+        "You left Arca's room. Reason: Left voluntarily")]
+    [InlineData(
+        UiLanguage.English,
+        PartyRoomExitReason.HostDisconnected,
+        "Arca",
+        "You left Arca's room. Reason: Host disconnected")]
+    [InlineData(
+        UiLanguage.English,
+        PartyRoomExitReason.Kicked,
+        "Arca",
+        "You left Arca's room. Reason: You were kicked from the room")]
+    [InlineData(
+        UiLanguage.English,
+        PartyRoomExitReason.NetworkInterrupted,
+        "Arca",
+        "You left Arca's room. Reason: Network interruption caused you to leave")]
+    [InlineData(
+        UiLanguage.English,
+        PartyRoomExitReason.None,
+        "",
+        "You left the current room. Reason: Network interruption caused you to leave")]
+    public void RoomTransitionNotice_FormatsExitReasonsAndRoomNames(
+        UiLanguage language,
+        object reasonValue,
+        string? roomName,
+        string expected)
+    {
+        var reason = Assert.IsType<PartyRoomExitReason>(reasonValue);
+        Assert.Equal(
+            expected,
+            ChatOverlayPeer.FormatRoomTransitionNotice(
+                new PartyRoomTransition(
+                    PartyRoomTransitionKind.Exited,
+                    reason,
+                    roomName),
+                language));
+    }
+
+    [Theory]
+    [InlineData(UiLanguage.SimplifiedChinese, "Arca", 2, 5, "已进入Arca的房间，5人成功建立语音通道")]
+    [InlineData(UiLanguage.English, "", 3, 1, "Entered the current room; 3 people established voice channels.")]
+    public void RoomTransitionNotice_UsesMaximumEstablishedVoiceCount(
+        UiLanguage language,
+        string roomName,
+        int transitionCount,
+        int establishedCount,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            ChatOverlayPeer.FormatRoomTransitionNotice(
+                new PartyRoomTransition(
+                    PartyRoomTransitionKind.Entered,
+                    RoomName: roomName,
+                    VoiceParticipantCount: transitionCount),
+                language,
+                establishedCount));
+    }
+
+    [Fact]
+    public void Tick_DrainsAllRoomTransitions_WritesSystemHistory_AndUsesMaximumVoiceCount()
+    {
+        var transitions = new Queue<PartyRoomTransition>([
+            new(
+                PartyRoomTransitionKind.Entered,
+                RoomName: "Arca",
+                VoiceParticipantCount: 2),
+            new(
+                PartyRoomTransitionKind.Exited,
+                PartyRoomExitReason.HostDisconnected,
+                "Arca"),
+        ]);
+        var history = new ChatHistory(10);
+        var now = DateTimeOffset.UtcNow;
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            isOnlineRoomActive: () => false,
+            history: history,
+            readRoomTransition: () => transitions.Count == 0 ? null : transitions.Dequeue(),
+            getEstablishedVoiceParticipantCount: () => 5,
+            getCurrentTime: () => now);
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        var snapshot = history.Snapshot();
+        Assert.Equal(2, snapshot.Count);
+        Assert.All(snapshot, message => Assert.Equal(ChatMessageKind.System, message.Kind));
+        Assert.Equal("已进入Arca的房间，5人成功建立语音通道", snapshot[0].Text);
+        Assert.Equal("你已退出Arca的房间，原因是：房主掉线", snapshot[1].Text);
+        Assert.Empty(transitions);
+    }
+
+    [Fact]
+    public void Tick_ProcessesTheSameRoomTransitionOnlyOnce()
+    {
+        var transition = new PartyRoomTransition(
+            PartyRoomTransitionKind.Entered,
+            RoomName: "Arca",
+            VoiceParticipantCount: 1);
+        var pending = transition;
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            history: history,
+            readRoomTransition: () =>
+            {
+                var current = pending;
+                pending = default;
+                return current == default ? null : current;
+            });
+        SetInitialized(peer);
+
+        peer.Tick();
+        peer.Tick();
+
+        Assert.Single(history.Snapshot());
+    }
+
+    [Fact]
+    public void WantsRender_RemainsTrueForOfflineCompactTransientNotice()
+    {
+        var configuration = new Config
+        {
+            EnableOverlay = true,
+            CompactMode = true,
+        };
+        var pending = new PartyRoomTransition(
+            PartyRoomTransitionKind.Exited,
+            PartyRoomExitReason.Kicked,
+            "Arca");
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => false,
+            readRoomTransition: () =>
+            {
+                var current = pending;
+                pending = default;
+                return current == default ? null : current;
+            });
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        Assert.True(peer.WantsRender);
+    }
+
+    [Fact]
+    public void TransientNotice_RemainsActiveForFiveSecondsAndExpiresAfterward()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var expiresAt = now.AddSeconds(5);
+
+        Assert.True(ChatOverlayPeer.IsTransientNoticeActive("notice", now.AddSeconds(4.999), expiresAt));
+        Assert.False(ChatOverlayPeer.IsTransientNoticeActive("notice", expiresAt, expiresAt));
+    }
+
     [Fact]
     public void Tick_KeepsIncomingQueuedUntilTheOnlineRoomIsActive()
     {
@@ -574,7 +942,11 @@ public sealed class ChatOverlayPeerHotkeyTests
         Func<bool>? canUseVoicePushToTalk = null,
         Action<bool>? setVoicePushToTalkPressed = null,
         IIncomingChatSource? incoming = null,
-        ChatHistory? history = null) =>
+        ChatHistory? history = null,
+        Func<int, string?>? getRemotePlayerName = null,
+        Func<PartyRoomTransition?>? readRoomTransition = null,
+        Func<int>? getEstablishedVoiceParticipantCount = null,
+        Func<DateTimeOffset>? getCurrentTime = null) =>
         new(
             new ChatSession(history ?? new ChatHistory(10), new ChatComposer(), transport, incoming: incoming),
             () => configuration,
@@ -593,7 +965,11 @@ public sealed class ChatOverlayPeerHotkeyTests
             () => { },
             _ => { },
             _ => { },
-            chatBlacklist);
+            chatBlacklist: chatBlacklist,
+            getRemotePlayerName: getRemotePlayerName,
+            readRoomTransition: readRoomTransition,
+            getEstablishedVoiceParticipantCount: getEstablishedVoiceParticipantCount,
+            getCurrentTime: getCurrentTime);
 
     private static void SetInitialized(ChatOverlayPeer peer) =>
         typeof(ChatOverlayPeer)

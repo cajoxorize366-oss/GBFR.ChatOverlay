@@ -90,14 +90,23 @@ public static class RelinkChatPacketDecoder
             SenderLabelBufferSize - 1,
             out var senderLabel);
 
-        hasExplicitSenderLabel = decodedSenderLabel && !string.IsNullOrWhiteSpace(senderLabel);
+        var cue = ClassifyCommunicationCue(senderLabel, out var isMachineCue);
+        hasExplicitSenderLabel = decodedSenderLabel && !string.IsNullOrWhiteSpace(senderLabel) && !isMachineCue;
         var sender = !hasExplicitSenderLabel
             ? $"Player {senderId:X8}"
             : senderLabel.Trim();
         var category = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(CategoryOffset, sizeof(uint)));
         var metadata = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(MetadataOffset, sizeof(uint)));
-        message = new IncomingChatMessage(sender, text, senderId, category, metadata, receivedAt);
+        message = new IncomingChatMessage(sender, text, senderId, category, metadata, receivedAt, CommunicationCue: cue);
         return true;
+    }
+
+    internal static ChatCommunicationCue ClassifyCommunicationCue(string? senderLabel, out bool isMachineCue)
+    {
+        isMachineCue = ChatCommunicationCueClassifier.TryClassifySenderLabel(
+            senderLabel,
+            out var communicationCue);
+        return communicationCue;
     }
 
     private static bool TryDecodeNullTerminated(

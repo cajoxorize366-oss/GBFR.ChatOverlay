@@ -61,7 +61,8 @@ public sealed class ChatSession
                 message.IsLocal ? ChatMessageKind.Self : ChatMessageKind.Party,
                 message.ReceivedAt,
                 message.SenderId,
-                message.PlayerNumber);
+                message.PlayerNumber,
+                message.CommunicationCue);
             count++;
         }
 

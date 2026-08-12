@@ -1,3 +1,5 @@
+using GBFR.ChatOverlay.Core;
+
 namespace GBFR.ChatOverlay.Native;
 
 internal readonly record struct PartyPlayerMuteSlotStatus(
@@ -24,7 +26,7 @@ internal sealed class PartyPlayerMuteController
     private const long RefreshIntervalMilliseconds = 250;
 
     private readonly IPartyChatControlApi _api;
-    private readonly IRelinkPartyMemberIdentityResolver _identityResolver;
+    private readonly IRelinkPartyMemberIdentitySnapshotResolver _identityResolver;
     private readonly Action<string> _log;
     private readonly object _sync = new();
     private readonly HashSet<nint> _localChatControls = [];
@@ -42,7 +44,7 @@ internal sealed class PartyPlayerMuteController
 
     internal PartyPlayerMuteController(
         IPartyChatControlApi api,
-        IRelinkPartyMemberIdentityResolver identityResolver,
+        IRelinkPartyMemberIdentitySnapshotResolver identityResolver,
         Action<string> log)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
@@ -52,11 +54,14 @@ internal sealed class PartyPlayerMuteController
 
     internal IReadOnlyList<PartyPlayerMuteSlotStatus> GetSnapshot()
     {
-        var identities = new string?[3];
-        for (var index = 0; index < identities.Length; index++)
+        if (!_identityResolver.TryResolveCoherentSnapshot(out var snapshot) ||
+            !PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
+                snapshot.EntityIds,
+                snapshot.LocalMemberSlot,
+                out _))
         {
-            if (_identityResolver.TryResolveSlot(index + 1, out var entityId))
-                identities[index] = entityId;
+            return PartyPlayerMuteSlotStatus.Unavailable(
+                "Party 身份快照不可用。 / Party identity snapshot is unavailable.");
         }
 
         lock (_sync)
@@ -65,8 +70,21 @@ internal sealed class PartyPlayerMuteController
             for (var index = 0; index < result.Length; index++)
             {
                 var playerNumber = index + 2;
-                var entityId = identities[index];
-                result[index] = CreateStatusLocked(playerNumber, entityId);
+                var remoteOrdinal = index + 1;
+                if (!PartyMemberSlotMap.TryGetActualSlot(
+                        snapshot.LocalMemberSlot,
+                        remoteOrdinal,
+                        out var actualSlot))
+                {
+                    result[index] = new PartyPlayerMuteSlotStatus(
+                        playerNumber,
+                        false,
+                        false,
+                        "Party 玩家映射不可用。 / Party player mapping is unavailable.");
+                    continue;
+                }
+
+                result[index] = CreateStatusLocked(playerNumber, snapshot.EntityIds[actualSlot]);
             }
             return result;
         }
@@ -80,12 +98,24 @@ internal sealed class PartyPlayerMuteController
                 false,
                 "无效的玩家槽位。 / Invalid player slot.");
         }
-        if (!_identityResolver.TryResolveSlot(playerNumber - 1, out var entityId))
+        var remoteOrdinal = playerNumber - 1;
+        if (!_identityResolver.TryResolveCoherentSnapshot(out var snapshot) ||
+            !PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
+                snapshot.EntityIds,
+                snapshot.LocalMemberSlot,
+                out _) ||
+            !PartyMemberSlotMap.TryGetActualSlot(
+                snapshot.LocalMemberSlot,
+                remoteOrdinal,
+                out var actualSlot) ||
+            string.IsNullOrEmpty(snapshot.EntityIds[actualSlot]))
         {
             return new PartyPlayerMuteOperationResult(
                 false,
                 $"玩家 {playerNumber} 的游戏身份尚未就绪。 / Player {playerNumber} identity is not ready.");
         }
+
+        var entityId = snapshot.EntityIds[actualSlot];
 
         lock (_sync)
         {

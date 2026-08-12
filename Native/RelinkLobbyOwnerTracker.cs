@@ -13,7 +13,6 @@ namespace GBFR.ChatOverlay.Native;
 internal sealed class RelinkLobbyOwnerTracker
 {
     internal const int MaximumEntityIdBytes = 512;
-    private const long HostSlotRefreshIntervalMilliseconds = 500;
 
     private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
     private static ReadOnlySpan<byte> ExpectedImportThunk => [0xFF, 0x25, 0x42, 0x4C, 0x91, 0x01];
@@ -26,9 +25,7 @@ internal sealed class RelinkLobbyOwnerTracker
     private readonly object _stateSync = new();
 
     private IHook<PFLobbyGetOwnerDelegate>? _ownerHook;
-    private string? _ownerEntityId;
-    private int _hostPlayerNumber;
-    private long _nextHostSlotRefreshMilliseconds;
+    private readonly PartyLobbyOwnerBinding _binding = new();
     private int _initialized;
     private int _suspended;
 
@@ -85,63 +82,72 @@ internal sealed class RelinkLobbyOwnerTracker
 
     internal bool TryGetHostPlayerNumber(out int playerNumber)
     {
-        string? ownerEntityId;
-        var now = Environment.TickCount64;
         lock (_stateSync)
         {
             if (Volatile.Read(ref _initialized) == 0 ||
-                Volatile.Read(ref _suspended) != 0 ||
-                string.IsNullOrEmpty(_ownerEntityId))
+                Volatile.Read(ref _suspended) != 0)
             {
                 playerNumber = 0;
                 return false;
             }
 
-            if (now < _nextHostSlotRefreshMilliseconds)
+            try
             {
-                if (_hostPlayerNumber is >= 1 and <= 4)
+                playerNumber = 0;
+                return RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+                    _identityResolver,
+                    _binding,
+                    out playerNumber);
+            }
+            catch (Exception exception)
+            {
+                playerNumber = 0;
+                SafeLog(
+                    $"Relink lobby-owner host slot refresh failed closed: " +
+                    $"{exception.GetType().Name}: {exception.Message}");
+                return false;
+            }
+        }
+    }
+
+    internal bool TryGetRoomIdentitySnapshot(out PartyRoomIdentitySnapshot snapshot)
+    {
+        snapshot = default;
+        lock (_stateSync)
+        {
+            if (Volatile.Read(ref _initialized) == 0 ||
+                Volatile.Read(ref _suspended) != 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!_identityResolver.TryResolveCoherentSnapshot(out var identitySnapshot))
                 {
-                    playerNumber = _hostPlayerNumber;
+                    snapshot = new PartyRoomIdentitySnapshot(null, PartyRoomHostState.Unknown);
                     return true;
                 }
 
-                playerNumber = 0;
+                snapshot = _binding.ResolveSnapshot(identitySnapshot);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                snapshot = default;
+                SafeLog(
+                    $"Relink lobby-owner snapshot failed closed: " +
+                    $"{exception.GetType().Name}: {exception.Message}");
                 return false;
             }
-
-            ownerEntityId = _ownerEntityId;
         }
+    }
 
-        if (!_identityResolver.TryResolveSnapshot(out var memberEntityIds) ||
-            !PartyHostSlotResolver.TryResolvePlayerNumber(
-                ownerEntityId,
-                memberEntityIds,
-                out playerNumber))
-        {
-            lock (_stateSync)
-            {
-                if (string.Equals(_ownerEntityId, ownerEntityId, StringComparison.Ordinal))
-                {
-                    _hostPlayerNumber = 0;
-                    _nextHostSlotRefreshMilliseconds = now + HostSlotRefreshIntervalMilliseconds;
-                }
-            }
-            playerNumber = 0;
-            return false;
-        }
-
+    internal void CacheRoomName(string? roomName)
+    {
         lock (_stateSync)
         {
-            if (Volatile.Read(ref _suspended) != 0 ||
-                !string.Equals(_ownerEntityId, ownerEntityId, StringComparison.Ordinal))
-            {
-                playerNumber = 0;
-                return false;
-            }
-
-            _hostPlayerNumber = playerNumber;
-            _nextHostSlotRefreshMilliseconds = now + HostSlotRefreshIntervalMilliseconds;
-            return true;
+            _binding.CacheRoomName(roomName);
         }
     }
 
@@ -149,9 +155,7 @@ internal sealed class RelinkLobbyOwnerTracker
     {
         lock (_stateSync)
         {
-            _ownerEntityId = null;
-            _hostPlayerNumber = 0;
-            _nextHostSlotRefreshMilliseconds = 0;
+            _binding.Reset();
         }
     }
 
@@ -197,7 +201,7 @@ internal sealed class RelinkLobbyOwnerTracker
         }
         catch (Exception exception)
         {
-            Reset();
+            ObserveOwnerCandidate(lobby, null);
             SafeLog(
                 $"Relink PFLobbyGetOwner original call failed: " +
                 $"{exception.GetType().Name}: {exception.Message}");
@@ -212,15 +216,15 @@ internal sealed class RelinkLobbyOwnerTracker
             if (result < 0 ||
                 !TryReadOwnerEntityId(_memory, ownerOutput, out var entityId))
             {
-                Reset();
+                ObserveOwnerCandidate(lobby, null);
                 return result;
             }
 
-            CaptureOwnerEntityId(entityId);
+            ObserveOwnerCandidate(lobby, entityId);
         }
         catch (Exception exception)
         {
-            Reset();
+            ObserveOwnerCandidate(lobby, null);
             SafeLog(
                 $"Relink lobby-owner capture failed closed: " +
                 $"{exception.GetType().Name}: {exception.Message}");
@@ -229,23 +233,20 @@ internal sealed class RelinkLobbyOwnerTracker
         return result;
     }
 
-    private void CaptureOwnerEntityId(string? entityId)
+    private void ObserveOwnerCandidate(nint lobby, string? ownerEntityId)
     {
-        if (string.IsNullOrWhiteSpace(entityId) ||
-            entityId.Length > MaximumEntityIdBytes ||
-            entityId.IndexOfAny(['\0', '\r', '\n']) >= 0)
+        try
         {
-            Reset();
-            return;
+            lock (_stateSync)
+            {
+                _binding.ObserveOwner(lobby, ownerEntityId);
+            }
         }
-
-        lock (_stateSync)
+        catch (Exception exception)
         {
-            if (string.Equals(_ownerEntityId, entityId, StringComparison.Ordinal))
-                return;
-            _ownerEntityId = entityId;
-            _hostPlayerNumber = 0;
-            _nextHostSlotRefreshMilliseconds = 0;
+            SafeLog(
+                $"Relink lobby-owner candidate update failed closed: " +
+                $"{exception.GetType().Name}: {exception.Message}");
         }
     }
 
@@ -318,6 +319,25 @@ internal sealed class RelinkLobbyOwnerTracker
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate int PFLobbyGetOwnerDelegate(nint lobby, nint ownerOutput);
+}
+
+internal static class RelinkLobbyOwnerHostRefresh
+{
+    internal static bool TryRefreshHostPlayerNumber(
+        IRelinkPartyMemberIdentitySnapshotResolver identityResolver,
+        PartyLobbyOwnerBinding binding,
+        out int playerNumber)
+    {
+        playerNumber = 0;
+        if (identityResolver is null ||
+            binding is null ||
+            !identityResolver.TryResolveCoherentSnapshot(out var snapshot))
+        {
+            return false;
+        }
+
+        return binding.TryResolveHostPlayerNumber(snapshot, out playerNumber);
+    }
 }
 
 internal static class PartyHostSlotResolver

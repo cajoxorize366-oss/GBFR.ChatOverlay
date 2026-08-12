@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Native;
 
 namespace GBFR.ChatOverlay.Tests;
@@ -42,6 +43,94 @@ public sealed class RelinkChatPacketDecoderTests
         Assert.Equal(7u, message.Category);
         Assert.Equal(9u, message.Metadata);
         Assert.Equal(timestamp, message.ReceivedAt);
+    }
+
+    [Theory]
+    [InlineData("vo_CMM_chance", ChatCommunicationCue.LinkAttack)]
+    [InlineData("vo_CMM_thanks", ChatCommunicationCue.Thanks)]
+    [InlineData("vo_CMM_win_3", ChatCommunicationCue.Victory)]
+    [InlineData("VO_CMM_ChAnCe", ChatCommunicationCue.LinkAttack)]
+    [InlineData("vo_CMM_win_quest_clear", ChatCommunicationCue.Victory)]
+    [InlineData("\uFEFFvo_CMM_win_3", ChatCommunicationCue.Victory)]
+    [InlineData("\u200Bvo_CMM_chance", ChatCommunicationCue.LinkAttack)]
+    [InlineData("\u0001vo_CMM_thanks", ChatCommunicationCue.Thanks)]
+    public void TryDecode_MachineCueLabelsAreNotPlayerNames(
+        string senderLabel,
+        ChatCommunicationCue expectedCue)
+    {
+        var packet = CreatePacket("hello", senderLabel, 0x1234, 7, 9);
+
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message,
+            out var hasExplicitSenderLabel));
+        Assert.False(hasExplicitSenderLabel);
+        Assert.Equal("Player 00001234", message.Sender);
+        Assert.Equal("hello", message.Text);
+        Assert.Equal(expectedCue, message.CommunicationCue);
+    }
+
+    [Fact]
+    public void TryDecode_UnknownMachineCuePrefixHidesRawLabelWithNoCue()
+    {
+        var packet = CreatePacket("hello", "vo_CMM_unknown_action", 0x89ABCDEF, 0, 0);
+
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message,
+            out var hasExplicitSenderLabel));
+        Assert.False(hasExplicitSenderLabel);
+        Assert.Equal("Player 89ABCDEF", message.Sender);
+        Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
+    }
+
+    [Fact]
+    public void TryDecode_PlayerNameContainingMachineCueTokenRemainsExplicit()
+    {
+        var packet = CreatePacket("hello", "Kuro_vo_CMM_win_3", 0x1234, 7, 9);
+
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message,
+            out var hasExplicitSenderLabel));
+        Assert.True(hasExplicitSenderLabel);
+        Assert.Equal("Kuro_vo_CMM_win_3", message.Sender);
+        Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
+    }
+
+    [Fact]
+    public void TryDecode_MachineCueWithZeroSenderIdNeverLeaksRawLabel()
+    {
+        var packet = CreatePacket("普通聊天文本", "vo_CMM_win_3", 0, 7, 9);
+
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message,
+            out var hasExplicitSenderLabel));
+        Assert.False(hasExplicitSenderLabel);
+        Assert.Equal("Player 00000000", message.Sender);
+        Assert.Equal("普通聊天文本", message.Text);
+        Assert.Equal(0u, message.SenderId);
+        Assert.Equal(ChatCommunicationCue.Victory, message.CommunicationCue);
+    }
+
+    [Fact]
+    public void TryDecode_PreservesNormalSenderLabelAuthorityWithoutMachineCue()
+    {
+        var packet = CreatePacket("hello", "Djeeta", 0x1234, 7, 9);
+
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message,
+            out var hasExplicitSenderLabel));
+        Assert.True(hasExplicitSenderLabel);
+        Assert.Equal("Djeeta", message.Sender);
+        Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
     }
 
     [Fact]

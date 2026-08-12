@@ -4,11 +4,112 @@ namespace GBFR.ChatOverlay.Overlay;
 
 internal readonly record struct ChatOverlayRect(float X, float Y, float Width, float Height);
 
+internal enum ChatOverlayPresentationMode
+{
+    Full,
+    Hidden,
+    Compact,
+}
+
 internal static class ChatOverlayLayout
 {
     internal const float MinimumWidth = 320.0f;
     internal const float MinimumHeight = 160.0f;
     internal const float DefaultInset = 24.0f;
+    internal const float ComposerReservedHeight = 58.0f;
+
+    internal static ChatOverlayPresentationMode ResolvePresentation(
+        bool compactMode,
+        bool composerOpen,
+        bool editMode)
+    {
+        if (!compactMode)
+            return ChatOverlayPresentationMode.Full;
+
+        return editMode || composerOpen
+            ? ChatOverlayPresentationMode.Compact
+            : ChatOverlayPresentationMode.Hidden;
+    }
+
+    internal static float ResolveCompactInputHeight(
+        float candidateHeight,
+        float statusHeight) =>
+        ResolveCompactInputHeight(0.0f, candidateHeight, statusHeight, 1.0f);
+
+    internal static float ResolveCompactInputHeight(
+        float voiceHeight,
+        float candidateHeight,
+        float statusHeight,
+        float fontScale)
+    {
+        var safeFontScale = NormalizeFontScale(fontScale);
+        var safeVoiceHeight = NormalizeAdditionalHeight(voiceHeight);
+        var safeCandidateHeight = NormalizeAdditionalHeight(candidateHeight);
+        var safeStatusHeight = NormalizeAdditionalHeight(statusHeight);
+        return (ComposerReservedHeight +
+                safeVoiceHeight +
+                safeCandidateHeight +
+                safeStatusHeight) * safeFontScale;
+    }
+
+    internal static ChatOverlayRect ResolveCompactInputRect(
+        ChatOverlayRect fullRect,
+        float candidateHeight,
+        float statusHeight,
+        float minimumY) =>
+        ResolveCompactInputRect(
+            fullRect,
+            voiceHeight: 0.0f,
+            candidateHeight: candidateHeight,
+            statusHeight: statusHeight,
+            fontScale: 1.0f,
+            minimumY: minimumY);
+
+    internal static ChatOverlayRect ResolveCompactInputRect(
+        ChatOverlayRect fullRect,
+        float voiceHeight,
+        float candidateHeight,
+        float statusHeight,
+        float fontScale,
+        float minimumY)
+    {
+        var bottom = fullRect.Y + fullRect.Height;
+        var requestedHeight = ResolveCompactInputHeight(
+            voiceHeight,
+            candidateHeight,
+            statusHeight,
+            fontScale);
+        var y = Math.Max(minimumY, bottom - requestedHeight);
+        return fullRect with
+        {
+            Y = y,
+            Height = Math.Max(1.0f, bottom - y),
+        };
+    }
+
+    internal static ChatOverlayRect ApplyCompactEditToFullRect(
+        ChatOverlayRect fullRect,
+        ChatOverlayRect compactRect,
+        ChatOverlayRect editedCompactRect,
+        float workX,
+        float workY,
+        float workWidth,
+        float workHeight)
+    {
+        var moved = Move(
+            fullRect,
+            editedCompactRect.X - compactRect.X,
+            editedCompactRect.Y - compactRect.Y,
+            workX,
+            workY,
+            workWidth,
+            workHeight);
+        return ResizeWidth(
+            moved,
+            editedCompactRect.Width - compactRect.Width,
+            workX,
+            workWidth);
+    }
 
     internal static ChatOverlayRect Resolve(
         Config configuration,
@@ -79,6 +180,20 @@ internal static class ChatOverlayLayout
         return new ChatOverlayRect(rect.X, rect.Y, width, height);
     }
 
+    internal static ChatOverlayRect ResizeWidth(
+        ChatOverlayRect rect,
+        float deltaX,
+        float workX,
+        float workWidth)
+    {
+        var maximumWidth = Math.Max(1.0f, workX + workWidth - rect.X);
+        var width = Math.Clamp(
+            rect.Width + deltaX,
+            Math.Min(MinimumWidth, maximumWidth),
+            Math.Min(1_200.0f, maximumWidth));
+        return rect with { Width = width };
+    }
+
     internal static (double XRatio, double YRatio) ToRatios(
         ChatOverlayRect rect,
         float workX,
@@ -113,4 +228,14 @@ internal static class ChatOverlayLayout
         double.IsFinite(value) && value >= 0.0
             ? (float)Math.Clamp(value, 0.0, 1.0)
             : null;
+
+    private static float NormalizeAdditionalHeight(float value) =>
+        float.IsFinite(value) && value > 0.0f
+            ? value
+            : 0.0f;
+
+    private static float NormalizeFontScale(float value) =>
+        float.IsFinite(value) && value > 0.0f
+            ? value
+            : 1.0f;
 }

@@ -16,10 +16,10 @@ public sealed class RelinkPlayerNameResolverTests
     {
         var memory = CreateActiveMemberMemory();
         WriteInlineName(memory, "Djeeta");
-        var native = new TestPlayerNameNativeApi(0x1234, 2, Member);
+        var native = new TestPlayerNameNativeApi(Member);
         var resolver = new RelinkPlayerNameResolver(MemberManagerSlot, memory, native, _ => { });
 
-        Assert.True(resolver.TryResolve(0x1234, out var playerName));
+        Assert.True(resolver.TryResolve(2, out var playerName));
         Assert.Equal("Djeeta", playerName);
         Assert.Equal(MemberManager, native.LastManager);
         Assert.Equal(2, native.LastMemberSlot);
@@ -30,11 +30,28 @@ public sealed class RelinkPlayerNameResolverTests
     {
         var memory = CreateActiveMemberMemory();
         WriteHeapName(memory, "VeryLong骑空士Persona");
-        var native = new TestPlayerNameNativeApi(7, 3, Member);
+        var native = new TestPlayerNameNativeApi(Member);
         var resolver = new RelinkPlayerNameResolver(MemberManagerSlot, memory, native, _ => { });
 
-        Assert.True(resolver.TryResolve(7, out var playerName));
+        Assert.True(resolver.TryResolve(3, out var playerName));
         Assert.Equal("VeryLong骑空士Persona", playerName);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void TryResolve_UsesSenderIdDirectlyAsPartyMemberSlot(uint senderId)
+    {
+        var memory = CreateActiveMemberMemory();
+        WriteInlineName(memory, $"Player {senderId}");
+        var native = new TestPlayerNameNativeApi(Member);
+        var resolver = new RelinkPlayerNameResolver(MemberManagerSlot, memory, native, _ => { });
+
+        Assert.True(resolver.TryResolve(senderId, out var playerName));
+        Assert.Equal($"Player {senderId}", playerName);
+        Assert.Equal(checked((int)senderId), native.LastMemberSlot);
     }
 
     [Fact]
@@ -44,7 +61,7 @@ public sealed class RelinkPlayerNameResolverTests
         var memory = new TestRelinkMemoryReader();
         memory.WritePointer(MemberManagerSlot, MemberManager);
         memory.WriteByte(Member + 0x5EBC, 0);
-        var native = new TestPlayerNameNativeApi(0, 0, Member);
+        var native = new TestPlayerNameNativeApi(Member);
         var resolver = new RelinkPlayerNameResolver(MemberManagerSlot, memory, native, logs.Add);
 
         Assert.False(resolver.TryResolve(0, out _));
@@ -70,36 +87,24 @@ public sealed class RelinkPlayerNameResolverTests
         var resolver = new RelinkPlayerNameResolver(
             MemberManagerSlot,
             memory,
-            new TestPlayerNameNativeApi(1, 1, Member),
+            new TestPlayerNameNativeApi(Member),
             _ => { });
 
         Assert.False(resolver.TryResolve(1, out _));
     }
 
     [Fact]
-    public void TryResolve_RejectsOutOfRangeSlotBeforeLobbyLookup()
+    public void TryResolve_RejectsInvalidSenderIdEvenWhenOldNetworkResolverWouldHaveMappedToZero()
     {
-        var memory = new TestRelinkMemoryReader();
-        memory.WritePointer(MemberManagerSlot, MemberManager);
-        var native = new TestPlayerNameNativeApi(5, 4, Member);
+        var memory = CreateActiveMemberMemory();
+        WriteInlineName(memory, "Djeeta");
+        var native = new TestPlayerNameNativeApi(Member);
         var resolver = new RelinkPlayerNameResolver(MemberManagerSlot, memory, native, _ => { });
 
         Assert.False(resolver.TryResolve(5, out _));
         Assert.Equal(0, native.MemberLookupCount);
     }
 
-    [Fact]
-    public void TryResolveMemberSlot_DoesNotRequireReadablePlayerName()
-    {
-        var resolver = new RelinkPlayerNameResolver(
-            MemberManagerSlot,
-            new TestRelinkMemoryReader(),
-            new TestPlayerNameNativeApi(9, 2, Member),
-            _ => { });
-
-        Assert.True(resolver.TryResolveMemberSlot(9, out var memberSlot));
-        Assert.Equal(2, memberSlot);
-    }
 
     private static TestRelinkMemoryReader CreateActiveMemberMemory()
     {
@@ -110,7 +115,10 @@ public sealed class RelinkPlayerNameResolverTests
         return memory;
     }
 
-    private static void WriteInlineName(TestRelinkMemoryReader memory, string name)
+    private static void WriteInlineName(TestRelinkMemoryReader memory, string name) =>
+        WriteInlineName(memory, Profile + 0x208, name);
+
+    private static void WriteInlineName(TestRelinkMemoryReader memory, nint address, string name)
     {
         var encoded = Encoding.UTF8.GetBytes(name);
         Assert.InRange(encoded.Length, 1, 15);
@@ -118,7 +126,7 @@ public sealed class RelinkPlayerNameResolverTests
         encoded.CopyTo(layout, 0);
         BinaryPrimitives.WriteUInt64LittleEndian(layout.AsSpan(0x10), (ulong)encoded.Length);
         BinaryPrimitives.WriteUInt64LittleEndian(layout.AsSpan(0x18), 0x0F);
-        memory.Write(Profile + 0x208, layout);
+        memory.Write(address, layout);
     }
 
     private static void WriteHeapName(TestRelinkMemoryReader memory, string name)
@@ -141,8 +149,6 @@ public sealed class RelinkPlayerNameResolverTests
     }
 
     private sealed class TestPlayerNameNativeApi(
-        uint expectedSenderId,
-        int memberSlot,
         nint member) : IRelinkPlayerNameNativeApi
     {
         internal nint LastManager { get; private set; }
@@ -150,12 +156,6 @@ public sealed class RelinkPlayerNameResolverTests
         internal int LastMemberSlot { get; private set; } = -1;
 
         internal int MemberLookupCount { get; private set; }
-
-        public bool TryResolveMemberSlot(uint senderId, out int resolvedMemberSlot)
-        {
-            resolvedMemberSlot = memberSlot;
-            return senderId == expectedSenderId;
-        }
 
         public nint GetLobbyMember(nint manager, int resolvedMemberSlot)
         {
@@ -165,6 +165,7 @@ public sealed class RelinkPlayerNameResolverTests
             return member;
         }
     }
+
 
     private sealed class TestRelinkMemoryReader : IRelinkMemoryReader
     {

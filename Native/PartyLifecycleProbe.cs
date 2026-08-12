@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using GBFR.ChatOverlay.Audio;
+using GBFR.ChatOverlay.Core;
 using Reloaded.Hooks.Definitions;
 using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
 
@@ -26,6 +27,7 @@ public sealed class PartyLifecycleProbe
     private readonly ResolvedAudioEndpointSelection _audioInputSelection;
     private readonly ResolvedAudioEndpointSelection _audioOutputSelection;
     private readonly Action _invalidateRoomIdentity;
+    private readonly Func<PartyRoomIdentitySnapshot>? _roomIdentityReader;
     private readonly object _lifecycleSync = new();
     private readonly ConcurrentQueue<string> _pendingLogs = new();
     private readonly PartyRoomSessionTracker _onlineRoom = new();
@@ -60,6 +62,29 @@ public sealed class PartyLifecycleProbe
         ResolvedAudioEndpointSelection? audioInputSelection = null,
         ResolvedAudioEndpointSelection? audioOutputSelection = null,
         Action? invalidateRoomIdentity = null)
+        : this(
+            hooks,
+            log,
+            enableLifecycleLogging,
+            enableMutedChatControlCanary,
+            enableVoiceTest,
+            audioInputSelection,
+            audioOutputSelection,
+            invalidateRoomIdentity,
+            null)
+    {
+    }
+
+    internal PartyLifecycleProbe(
+        ReloadedHooksApi hooks,
+        Action<string> log,
+        bool enableLifecycleLogging,
+        bool enableMutedChatControlCanary,
+        bool enableVoiceTest,
+        ResolvedAudioEndpointSelection? audioInputSelection,
+        ResolvedAudioEndpointSelection? audioOutputSelection,
+        Action? invalidateRoomIdentity = null,
+        Func<PartyRoomIdentitySnapshot>? roomIdentityReader = null)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
@@ -71,6 +96,10 @@ public sealed class PartyLifecycleProbe
         _audioOutputSelection = audioOutputSelection ??
             ResolvedAudioEndpointSelection.SystemDefault();
         _invalidateRoomIdentity = invalidateRoomIdentity ?? (() => { });
+        _roomIdentityReader = roomIdentityReader;
+        _onlineRoom.ConfigureSnapshotReaders(
+            ReadRoomIdentitySnapshotSafely,
+            GetEstablishedVoiceParticipantCount);
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
@@ -86,6 +115,32 @@ public sealed class PartyLifecycleProbe
         IsVoiceTestAvailable &&
         !Volatile.Read(ref _suspended) &&
         _chatControlCanary?.IsRemotePushToTalkReady == true;
+
+    internal int EstablishedVoiceParticipantCount
+    {
+        get
+        {
+            if (!_enableVoiceTest || !IsInitialized || Volatile.Read(ref _suspended))
+                return 0;
+
+            try
+            {
+                return _chatControlCanary?.EstablishedVoiceParticipantCount ?? 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
+
+    internal bool TryReadRoomTransition(out PartyRoomTransition transition)
+    {
+        transition = default;
+        if (!IsInitialized)
+            return false;
+        return _onlineRoom.TryReadTransition(out transition);
+    }
 
     internal PartyVoiceUiStatus VoiceUiStatus
     {
@@ -131,17 +186,12 @@ public sealed class PartyLifecycleProbe
         {
             var talkingEntityIds = _chatControlCanary?.GetTalkingRemoteEntityIds();
             if (talkingEntityIds is null || talkingEntityIds.Count == 0 ||
-                _partyIdentityResolver?.TryResolveSnapshot(out var partyEntityIds) != true)
+                _partyIdentityResolver?.TryResolveCoherentSnapshot(out var snapshot) != true)
             {
                 return Array.Empty<int>();
             }
 
-            var talking = talkingEntityIds.ToHashSet(StringComparer.Ordinal);
-            return Enumerable.Range(1, 3)
-                .Where(remotePlayerNumber =>
-                    !string.IsNullOrEmpty(partyEntityIds[remotePlayerNumber]) &&
-                    talking.Contains(partyEntityIds[remotePlayerNumber]))
-                .ToArray();
+            return MapTalkingRemotePlayers(snapshot, talkingEntityIds);
         }
         catch (Exception exception)
         {
@@ -153,6 +203,41 @@ public sealed class PartyLifecycleProbe
             }
             return Array.Empty<int>();
         }
+    }
+
+    internal static IReadOnlyList<int> MapTalkingRemotePlayers(
+        RelinkPartyMemberIdentitySnapshot snapshot,
+        IReadOnlyCollection<string>? talkingEntityIds)
+    {
+        if (talkingEntityIds is null || talkingEntityIds.Count == 0 ||
+            !PartyRoomIdentitySnapshotResolver.TryNormalizeSnapshot(
+                snapshot.EntityIds,
+                snapshot.LocalMemberSlot,
+                out _))
+        {
+            return Array.Empty<int>();
+        }
+
+        var entityIds = snapshot.EntityIds;
+        var talking = talkingEntityIds.ToHashSet(StringComparer.Ordinal);
+        var result = new List<int>(3);
+        for (var actualSlot = 0; actualSlot < PartyMemberSlotMap.MemberCount; actualSlot++)
+        {
+            if (actualSlot == snapshot.LocalMemberSlot ||
+                string.IsNullOrEmpty(entityIds[actualSlot]) ||
+                !talking.Contains(entityIds[actualSlot]) ||
+                !PartyMemberSlotMap.TryGetRemoteOrdinal(
+                    snapshot.LocalMemberSlot,
+                    actualSlot,
+                    out var remoteOrdinal))
+            {
+                continue;
+            }
+
+            result.Add(remoteOrdinal);
+        }
+
+        return result;
     }
 
     internal PartyPlayerMuteOperationResult SetPlayerMuted(int playerNumber, bool muted)
@@ -453,6 +538,7 @@ public sealed class PartyLifecycleProbe
 
     private uint PartyCleanup(nint handle)
     {
+        var roomIdentity = ReadRoomIdentitySnapshotSafely();
         InvalidateRoomIdentitySafely();
         Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
         _audioWorkPump?.DetachManager(
@@ -466,7 +552,7 @@ public sealed class PartyLifecycleProbe
             if (result == 0)
             {
                 Interlocked.CompareExchange(ref _partyHandle, nint.Zero, handle);
-                _onlineRoom.Reset();
+                _onlineRoom.ResetPreservingTransitions(roomIdentity);
             }
             _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: result == 0);
             return result;
@@ -477,7 +563,7 @@ public sealed class PartyLifecycleProbe
             if (result == 0)
             {
                 Interlocked.CompareExchange(ref _partyHandle, nint.Zero, handle);
-                _onlineRoom.Reset();
+                _onlineRoom.ResetPreservingTransitions(roomIdentity);
                 _chatControlCanary?.CompleteManagerCleanup(handle, succeeded: true);
                 EnqueueLog($"PartyCleanup completed for manager 0x{(nuint)handle:X}.");
             }
@@ -497,7 +583,7 @@ public sealed class PartyLifecycleProbe
 
     private uint PartyNetworkLeaveNetwork(nint network, nint asyncIdentifier)
     {
-        InvalidateRoomIdentitySafely();
+        var roomIdentity = ReadRoomIdentitySnapshotSafely();
         if (!Volatile.Read(ref _suspended))
         {
             try
@@ -514,8 +600,12 @@ public sealed class PartyLifecycleProbe
         }
 
         var result = _leaveNetworkHook!.OriginalFunction(network, asyncIdentifier);
-        if (!Volatile.Read(ref _suspended) && result == 0)
-            _onlineRoom.MarkNetworkLeaveQueued(network);
+        if (result == 0)
+        {
+            InvalidateRoomIdentitySafely();
+            if (!Volatile.Read(ref _suspended))
+                _onlineRoom.MarkNetworkLeaveQueued(network, roomIdentity);
+        }
         return result;
     }
 
@@ -711,6 +801,19 @@ public sealed class PartyLifecycleProbe
 
             _playerMuteController?.Observe(snapshot);
             _chatControlCanary?.Observe(handle, snapshot);
+            if (snapshot.Type == (uint)PartyStateChangeType.LocalUserKicked)
+            {
+                try
+                {
+                    _chatControlCanary?.DisableFailClosed("local Party user kicked");
+                }
+                catch (Exception exception)
+                {
+                    EnqueueLog(
+                        $"Party canary kick cleanup failed closed: " +
+                        $"{exception.GetType().Name}: {exception.Message}");
+                }
+            }
         }
     }
 
@@ -804,6 +907,30 @@ public sealed class PartyLifecycleProbe
         catch
         {
             // Never allow a logger failure to escape the asynchronous probe drain.
+        }
+    }
+
+    private PartyRoomIdentitySnapshot ReadRoomIdentitySnapshotSafely()
+    {
+        try
+        {
+            return _roomIdentityReader?.Invoke() ?? default;
+        }
+        catch
+        {
+            return default;
+        }
+    }
+
+    private int GetEstablishedVoiceParticipantCount()
+    {
+        try
+        {
+            return EstablishedVoiceParticipantCount;
+        }
+        catch
+        {
+            return 0;
         }
     }
 

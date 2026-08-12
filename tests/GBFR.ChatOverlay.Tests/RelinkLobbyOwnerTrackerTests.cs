@@ -53,6 +53,57 @@ public sealed class RelinkLobbyOwnerTrackerTests
         Assert.False(RelinkLobbyOwnerTracker.TryReadOwnerEntityId(memory, OwnerOutput, out _));
     }
 
+    [Fact]
+    public void TryRefreshHostPlayerNumber_ReReadsSnapshotAndDoesNotReuseOwnerAfterMissing()
+    {
+        var binding = new PartyLobbyOwnerBinding();
+        binding.ObserveOwner((nint)0x5000, "owner");
+        var resolver = new SequenceSnapshotResolver(
+            new RelinkPartyMemberIdentitySnapshot(["owner", "", "", ""], LocalMemberSlot: 1),
+            new RelinkPartyMemberIdentitySnapshot(["", "", "", ""], LocalMemberSlot: 1));
+
+        Assert.True(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+            resolver,
+            binding,
+            out var first));
+        Assert.Equal(1, first);
+
+        Assert.False(RelinkLobbyOwnerHostRefresh.TryRefreshHostPlayerNumber(
+            resolver,
+            binding,
+            out var second));
+        Assert.Equal(0, second);
+    }
+
+    private sealed class SequenceSnapshotResolver : IRelinkPartyMemberIdentitySnapshotResolver
+    {
+        private readonly RelinkPartyMemberIdentitySnapshot[] _snapshots;
+        private int _index;
+
+        internal SequenceSnapshotResolver(params RelinkPartyMemberIdentitySnapshot[] snapshots)
+        {
+            _snapshots = snapshots;
+        }
+
+        public bool TryResolveSnapshot(out string[] entityIds)
+        {
+            entityIds = _index < _snapshots.Length ? _snapshots[_index].EntityIds : [];
+            return true;
+        }
+
+        public bool TryResolveCoherentSnapshot(out RelinkPartyMemberIdentitySnapshot snapshot)
+        {
+            if (_index >= _snapshots.Length)
+            {
+                snapshot = default;
+                return false;
+            }
+
+            snapshot = _snapshots[_index++];
+            return true;
+        }
+    }
+
     private sealed class TestMemoryReader : IRelinkMemoryReader
     {
         private readonly Dictionary<nint, byte> _bytes = [];

@@ -8,7 +8,8 @@ public readonly record struct IncomingChatMessage(
     uint Metadata,
     DateTimeOffset ReceivedAt,
     int PlayerNumber = 0,
-    bool IsLocal = false);
+    bool IsLocal = false,
+    ChatCommunicationCue CommunicationCue = ChatCommunicationCue.None);
 
 public interface IIncomingChatSource
 {

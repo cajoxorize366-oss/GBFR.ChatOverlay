@@ -6,15 +6,12 @@ namespace GBFR.ChatOverlay.Native;
 
 internal interface IRelinkPlayerNameNativeApi
 {
-    bool TryResolveMemberSlot(uint senderId, out int memberSlot);
-
     nint GetLobbyMember(nint manager, int memberSlot);
 }
 
 /// <summary>
-/// Resolves the opaque sender identifier carried by Relink's chat RPC through the
-/// same four-slot member table used by the verified 2.0.4 executable when it exports
-/// <c>member_name</c> to the online UI.
+/// Resolves Relink's verified four-party sender slot through the same member table
+/// used by the 2.0.4 executable when it exports <c>member_name</c> to the online UI.
 /// </summary>
 internal sealed class RelinkPlayerNameResolver
 {
@@ -54,7 +51,6 @@ internal sealed class RelinkPlayerNameResolver
         Action<string> log)
     {
         if (moduleBase == nint.Zero ||
-            rvas.SenderSlotResolver <= 0 ||
             rvas.LobbyMemberLookup <= 0 ||
             rvas.LobbyMemberManagerSlot <= 0)
         {
@@ -73,9 +69,13 @@ internal sealed class RelinkPlayerNameResolver
         playerName = string.Empty;
         try
         {
-            if (!TryResolveMemberSlot(senderId, out var memberSlot))
+            if (senderId > 3)
+            {
+                LogFailureOnce(senderId, "the sender id was outside the four party slots");
                 return false;
-            return TryResolveName(memberSlot, senderId, out playerName);
+            }
+
+            return TryResolveName((int)senderId, senderId, out playerName);
         }
         catch (Exception exception)
         {
@@ -83,30 +83,6 @@ internal sealed class RelinkPlayerNameResolver
             LogFailureOnce(
                 senderId,
                 $"the resolver failed closed with {exception.GetType().Name}: {exception.Message}");
-            return false;
-        }
-    }
-
-    internal bool TryResolveMemberSlot(uint senderId, out int memberSlot)
-    {
-        memberSlot = -1;
-        try
-        {
-            if (!_native.TryResolveMemberSlot(senderId, out memberSlot) || memberSlot is < 0 or >= 4)
-            {
-                memberSlot = -1;
-                LogFailureOnce(senderId, "the member slot was unavailable");
-                return false;
-            }
-
-            return true;
-        }
-        catch (Exception exception)
-        {
-            memberSlot = -1;
-            LogFailureOnce(
-                senderId,
-                $"the member-slot resolver failed closed with {exception.GetType().Name}: {exception.Message}");
             return false;
         }
     }
@@ -251,26 +227,16 @@ internal sealed class RelinkPlayerNameResolver
 
     private sealed class CurrentProcessRelinkPlayerNameNativeApi : IRelinkPlayerNameNativeApi
     {
-        private readonly SenderSlotResolverDelegate _senderSlotResolver;
         private readonly LobbyMemberLookupDelegate _lobbyMemberLookup;
 
         internal CurrentProcessRelinkPlayerNameNativeApi(nint moduleBase, RelinkChatRvas rvas)
         {
-            _senderSlotResolver = Marshal.GetDelegateForFunctionPointer<SenderSlotResolverDelegate>(
-                moduleBase + rvas.SenderSlotResolver);
             _lobbyMemberLookup = Marshal.GetDelegateForFunctionPointer<LobbyMemberLookupDelegate>(
                 moduleBase + rvas.LobbyMemberLookup);
         }
 
-        public bool TryResolveMemberSlot(uint senderId, out int memberSlot) =>
-            _senderSlotResolver(senderId, out memberSlot);
-
         public nint GetLobbyMember(nint manager, int memberSlot) =>
             _lobbyMemberLookup(manager, memberSlot);
-
-        [UnmanagedFunctionPointer(CallingConvention.Winapi)]
-        [return: MarshalAs(UnmanagedType.I1)]
-        private delegate bool SenderSlotResolverDelegate(uint senderId, out int memberSlot);
 
         [UnmanagedFunctionPointer(CallingConvention.Winapi)]
         private delegate nint LobbyMemberLookupDelegate(nint manager, int memberSlot);

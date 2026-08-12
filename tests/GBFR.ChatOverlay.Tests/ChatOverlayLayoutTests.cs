@@ -5,6 +5,116 @@ namespace GBFR.ChatOverlay.Tests;
 
 public sealed class ChatOverlayLayoutTests
 {
+    [Theory]
+    [InlineData(false, false, false, "Full")]
+    [InlineData(false, true, false, "Full")]
+    [InlineData(true, false, false, "Hidden")]
+    [InlineData(true, true, false, "Compact")]
+    [InlineData(true, false, true, "Compact")]
+    [InlineData(false, false, true, "Full")]
+    public void ResolvePresentation_SelectsExpectedMode(
+        bool compactMode,
+        bool composerOpen,
+        bool editMode,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            ChatOverlayLayout.ResolvePresentation(compactMode, composerOpen, editMode).ToString());
+    }
+
+    [Fact]
+    public void ResolveCompactInputRect_PreservesWidthAndAnchorsToFullRectBottom()
+    {
+        var fullRect = new ChatOverlayRect(100, 200, 560, 260);
+
+        var compactRect = ChatOverlayLayout.ResolveCompactInputRect(
+            fullRect,
+            voiceHeight: 0.0f,
+            candidateHeight: 20.0f,
+            statusHeight: 30.0f,
+            fontScale: 1.0f,
+            minimumY: 0.0f);
+
+        Assert.Equal(100.0f, compactRect.X);
+        Assert.Equal(560.0f, compactRect.Width);
+        Assert.Equal(108.0f, compactRect.Height);
+        Assert.Equal(352.0f, compactRect.Y);
+        Assert.Equal(fullRect.Y + fullRect.Height, compactRect.Y + compactRect.Height);
+    }
+
+    [Fact]
+    public void ResolveCompactInputRect_ClampsTopToViewportWorkArea()
+    {
+        var fullRect = new ChatOverlayRect(100, 20, 560, 160);
+
+        var compactRect = ChatOverlayLayout.ResolveCompactInputRect(
+            fullRect,
+            voiceHeight: 0.0f,
+            candidateHeight: 100.0f,
+            statusHeight: 100.0f,
+            fontScale: 1.0f,
+            minimumY: 10.0f);
+
+        Assert.Equal(10.0f, compactRect.Y);
+        Assert.Equal(170.0f, compactRect.Height);
+        Assert.Equal(fullRect.Y + fullRect.Height, compactRect.Y + compactRect.Height);
+    }
+
+    [Theory]
+    [InlineData(float.NaN, float.PositiveInfinity, -1.0f, 58.0f)]
+    [InlineData(-1.0f, 0.0f, 0.0f, 58.0f)]
+    [InlineData(0.0f, 20.0f, 30.0f, 108.0f)]
+    public void ResolveCompactInputHeight_UsesOnlyFinitePositiveAdditionalHeights(
+        float voiceHeight,
+        float candidateHeight,
+        float statusHeight,
+        float expected)
+    {
+        Assert.Equal(
+            expected,
+            ChatOverlayLayout.ResolveCompactInputHeight(
+                voiceHeight,
+                candidateHeight,
+                statusHeight,
+                fontScale: 1.0f));
+    }
+
+    [Fact]
+    public void ResolveCompactInputHeight_IncludesVisibleVoiceHeightAndScalesWithFont()
+    {
+        Assert.Equal(
+            296.0f,
+            ChatOverlayLayout.ResolveCompactInputHeight(
+                voiceHeight: 20.0f,
+                candidateHeight: 30.0f,
+                statusHeight: 40.0f,
+                fontScale: 2.0f));
+    }
+
+    [Fact]
+    public void ApplyCompactEditToFullRect_PreservesFullHeightAndBottomAnchor()
+    {
+        var fullRect = new ChatOverlayRect(100, 200, 560, 260);
+        var compactRect = new ChatOverlayRect(100, 352, 560, 108);
+        var editedCompactRect = new ChatOverlayRect(120, 362, 640, 108);
+
+        var editedFullRect = ChatOverlayLayout.ApplyCompactEditToFullRect(
+            fullRect,
+            compactRect,
+            editedCompactRect,
+            workX: 0.0f,
+            workY: 0.0f,
+            workWidth: 1_000.0f,
+            workHeight: 800.0f);
+
+        Assert.Equal(120.0f, editedFullRect.X);
+        Assert.Equal(210.0f, editedFullRect.Y);
+        Assert.Equal(640.0f, editedFullRect.Width);
+        Assert.Equal(260.0f, editedFullRect.Height);
+        Assert.Equal(470.0f, editedFullRect.Y + editedFullRect.Height);
+    }
+
     [Fact]
     public void CalculateHistoryChildHeight_UsesBaseComposerReserveWithoutCandidates()
     {

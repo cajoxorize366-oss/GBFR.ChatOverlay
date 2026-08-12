@@ -23,6 +23,7 @@ public sealed unsafe class RelinkChatBridge :
     private readonly ConcurrentQueue<IncomingChatMessage> _incoming = new();
     private readonly RecentEchoSuppressor _echoSuppressor = new();
     private readonly object _lifecycleSync = new();
+    private readonly LocalChatIdentityCache _localIdentityCache = new();
 
     private IHook<SendMessageDelegate>? _sendHook;
     private IHook<RpcMessageDelegate>? _rpcHook;
@@ -32,9 +33,8 @@ public sealed unsafe class RelinkChatBridge :
     private PlayFixedPhraseDelegate? _playFixedPhrase;
     private PlayEmotionDelegate? _playEmotion;
     private RelinkPlayerNameResolver? _playerNameResolver;
+    private RelinkPartyMemberIdentityResolver? _partyMemberIdentityResolver;
     private RelinkLobbyOwnerTracker? _lobbyOwnerTracker;
-    private string? _localPlayerName;
-    private int _localPlayerNumber;
     private int _localIdentityLogged;
     private bool _initialized;
     private bool _suspended;
@@ -102,6 +102,7 @@ public sealed unsafe class RelinkChatBridge :
                     var partyIdentityResolver = RelinkPartyMemberIdentityResolver.CreateForCurrentProcess(
                         moduleBase,
                         rvas);
+                    _partyMemberIdentityResolver = partyIdentityResolver;
                     var lobbyOwnerTracker = new RelinkLobbyOwnerTracker(
                         _hooks,
                         partyIdentityResolver,
@@ -124,10 +125,9 @@ public sealed unsafe class RelinkChatBridge :
                     $"Relink 2.0.4 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
                     $"receive=0x{(nuint)(moduleBase + rvas.RpcMessage):X}.");
                 _log(
-                    $"Relink incoming player-name resolver attached: senderSlot=0x" +
-                    $"{(nuint)(moduleBase + rvas.SenderSlotResolver):X}, memberLookup=0x" +
-                    $"{(nuint)(moduleBase + rvas.LobbyMemberLookup):X}; empty RPC sender labels now use " +
-                    $"the verified four-slot lobby member table.");
+                    $"Relink incoming player-name resolver attached: memberLookup=0x" +
+                    $"{(nuint)(moduleBase + rvas.LobbyMemberLookup):X}; RPC sender ids are used " +
+                    $"directly as the verified four-party member slot.");
                 _log(
                     $"Relink official communication actions attached: stamp=0x" +
                     $"{(nuint)(moduleBase + rvas.SendStamp):X}, fixed=0x" +
@@ -142,6 +142,7 @@ public sealed unsafe class RelinkChatBridge :
                 _rpcHook = null;
                 _sendHook = null;
                 _playerNameResolver = null;
+                _partyMemberIdentityResolver = null;
                 _lobbyOwnerTracker = null;
                 _sendStamp = null;
                 _sendFixedPhrase = null;
@@ -293,32 +294,104 @@ public sealed unsafe class RelinkChatBridge :
 
     internal LocalChatIdentity GetLocalIdentity()
     {
-        var cachedName = Volatile.Read(ref _localPlayerName);
-        var cachedNumber = Volatile.Read(ref _localPlayerNumber);
-        if (!string.IsNullOrWhiteSpace(cachedName))
-            return new LocalChatIdentity(cachedName, cachedNumber);
-
-        if (_playerNameResolver?.TryResolveName(0, 0, out var resolvedName) == true)
+        if (TryResolveLocalSlot(out var localMemberSlot))
         {
-            Volatile.Write(ref _localPlayerName, resolvedName);
-            return new LocalChatIdentity(resolvedName, cachedNumber);
+            string? resolvedName = null;
+            if (_playerNameResolver?.TryResolveName(localMemberSlot, 0, out var playerName) == true &&
+                RelinkChatMessageCueNormalization.TryGetCacheableLocalSenderName(
+                    playerName,
+                    out var cacheablePlayerName))
+            {
+                resolvedName = cacheablePlayerName;
+            }
+
+            _localIdentityCache.Update(resolvedName, localMemberSlot + 1);
         }
 
-        return new LocalChatIdentity("Local", cachedNumber);
+        return _localIdentityCache.Read();
+    }
+
+    internal bool TryResolveLocalSlot(out int localMemberSlot)
+    {
+        if (_partyMemberIdentityResolver?.TryResolveLocalMemberSlot(out localMemberSlot) == true &&
+            localMemberSlot is >= 0 and <= 3)
+        {
+            return true;
+        }
+
+        var cachedNumber = _localIdentityCache.Read().PlayerNumber;
+        if (cachedNumber is >= 1 and <= 4)
+        {
+            localMemberSlot = cachedNumber - 1;
+            return true;
+        }
+
+        localMemberSlot = -1;
+        return false;
+    }
+
+    internal bool TryGetRoomIdentitySnapshot(out PartyRoomIdentitySnapshot snapshot)
+    {
+        snapshot = default;
+        try
+        {
+            if (_lobbyOwnerTracker?.TryGetRoomIdentitySnapshot(out snapshot) != true)
+                return false;
+
+            if (snapshot.HostState == PartyRoomHostState.Unknown)
+                return true;
+
+            var roomName = snapshot.RoomName;
+            if (string.IsNullOrWhiteSpace(roomName))
+            {
+                if (snapshot.HostState == PartyRoomHostState.LocalHost)
+                {
+                    roomName = GetLocalIdentity().Sender;
+                }
+                else if (TryGetHostPlayerNumber(out var hostPlayerNumber) &&
+                         hostPlayerNumber is >= 1 and <= 4 &&
+                         _playerNameResolver?.TryResolveName(
+                             hostPlayerNumber - 1,
+                             0,
+                             out var resolvedName) == true &&
+                         !string.IsNullOrWhiteSpace(resolvedName))
+                {
+                    roomName = resolvedName.Trim();
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(roomName))
+            {
+                _lobbyOwnerTracker.CacheRoomName(roomName);
+            }
+
+            snapshot = snapshot with { RoomName = roomName };
+            return true;
+        }
+        catch
+        {
+            snapshot = default;
+            return false;
+        }
     }
 
     internal bool TryGetRemotePlayerName(int remotePlayerNumber, out string playerName)
     {
         playerName = string.Empty;
-        return remotePlayerNumber is >= 1 and <= 3 &&
-               _playerNameResolver?.TryResolveName(remotePlayerNumber, 0, out playerName) == true;
+        if (remotePlayerNumber is < 1 or > 3 ||
+            !TryResolveLocalSlot(out var localMemberSlot) ||
+            !PartyMemberSlotMap.TryGetActualSlot(localMemberSlot, remotePlayerNumber, out var actualSlot))
+        {
+            return false;
+        }
+
+        return _playerNameResolver?.TryResolveName(actualSlot, 0, out playerName) == true;
     }
 
     internal void ResetLobbyOwner()
     {
         _lobbyOwnerTracker?.Reset();
-        Volatile.Write(ref _localPlayerName, null);
-        Volatile.Write(ref _localPlayerNumber, 0);
+        _localIdentityCache.Clear();
         Volatile.Write(ref _localIdentityLogged, 0);
     }
 
@@ -398,19 +471,21 @@ public sealed unsafe class RelinkChatBridge :
         IncomingChatMessage pending = default;
         var decoded = false;
         var hasExplicitSenderLabel = false;
-        var senderId = 0u;
-        var memberSlot = -1;
+        var partyMemberSlot = -1;
+        var localMemberSlot = -1;
         try
         {
             if (chat != nint.Zero)
             {
                 var packet = new ReadOnlySpan<byte>((void*)chat, RelinkChatPacketDecoder.PacketBytesToCopy);
-                if (RelinkChatPacketDecoder.TryReadSenderId(packet, out senderId))
+                if (RelinkChatPacketDecoder.TryReadSenderId(packet, out var senderId))
                 {
-                    var resolvedMember =
-                        _playerNameResolver?.TryResolveMemberSlot(senderId, out memberSlot) == true;
-                    if ((resolvedMember && _chatBlacklist.IsMemberSlotMuted(memberSlot)) ||
-                        (!resolvedMember && _chatBlacklist.AreAllRemotePlayersMuted))
+                    partyMemberSlot = senderId <= 3 ? (int)senderId : -1;
+                    TryResolveLocalSlot(out localMemberSlot);
+                    if (RelinkChatSenderPolicy.ShouldBlockBlacklistedRpc(
+                            partyMemberSlot,
+                            localMemberSlot,
+                            _chatBlacklist))
                     {
                         // This is the authoritative receive gate. Returning here prevents Relink's
                         // own handler from accepting raw text, stamps and fixed phrases from the player.
@@ -443,16 +518,20 @@ public sealed unsafe class RelinkChatBridge :
         if (!decoded)
             return;
 
-        if (memberSlot < 0)
-            _playerNameResolver?.TryResolveMemberSlot(pending.SenderId, out memberSlot);
+        if (!PartyMemberSlotMap.IsValidSlot(localMemberSlot))
+            TryResolveLocalSlot(out localMemberSlot);
 
-        var publishAuthoritativeEcho = _echoSuppressor.TryConsume(
+        var isLocal = PartyMemberSlotMap.IsValidSlot(localMemberSlot) &&
+                      RelinkChatSenderPolicy.IsLocalRpc(partyMemberSlot, localMemberSlot);
+        var publishAuthoritativeEcho = RelinkChatSenderPolicy.TryConsumeAuthoritativeLocalEcho(
+            _echoSuppressor,
+            isLocal,
             pending.Text,
             pending.ReceivedAt,
             out var wasLocalEcho);
         if (wasLocalEcho)
         {
-            ObserveLocalEcho(memberSlot, pending.SenderId, pending.Sender, hasExplicitSenderLabel);
+            ObserveLocalEcho(partyMemberSlot, pending.SenderId, pending.Sender, hasExplicitSenderLabel);
             if (publishAuthoritativeEcho)
             {
                 var identity = GetLocalIdentity();
@@ -466,15 +545,38 @@ public sealed unsafe class RelinkChatBridge :
             return;
         }
 
-        if (!hasExplicitSenderLabel &&
-            memberSlot >= 0 &&
-            _playerNameResolver?.TryResolveName(memberSlot, pending.SenderId, out var playerName) == true)
+        if (isLocal)
         {
-            pending = pending with { Sender = playerName };
+            var identity = ResolveLocalRpcIdentity(
+                partyMemberSlot,
+                pending.SenderId,
+                pending.Sender,
+                hasExplicitSenderLabel);
+            EnqueueIncoming(pending with
+            {
+                Sender = identity.Sender,
+                PlayerNumber = identity.PlayerNumber,
+                IsLocal = true,
+            });
+            return;
         }
 
-        if (memberSlot >= 0)
-            pending = pending with { PlayerNumber = memberSlot + 1 };
+        string? resolvedPlayerName = null;
+        if (!hasExplicitSenderLabel &&
+            partyMemberSlot >= 0 &&
+            _playerNameResolver?.TryResolveName(
+                partyMemberSlot,
+                pending.SenderId,
+                out var playerName) == true)
+        {
+            resolvedPlayerName = playerName;
+        }
+
+        pending = RelinkChatMessageAttribution.ApplyRemoteIdentity(
+            pending,
+            hasExplicitSenderLabel,
+            partyMemberSlot,
+            resolvedPlayerName);
 
         EnqueueIncoming(pending);
     }
@@ -505,12 +607,43 @@ public sealed unsafe class RelinkChatBridge :
     private LocalChatIdentity ResolveLocalIdentity(nint senderView)
     {
         if (TryReadOutgoingText(senderView, out var senderName) &&
-            !string.IsNullOrWhiteSpace(senderName))
+            RelinkChatMessageCueNormalization.TryGetCacheableLocalSenderName(
+                senderName,
+                out var cacheableSenderName))
         {
-            Volatile.Write(ref _localPlayerName, senderName.Trim());
+            _localIdentityCache.UpdateName(cacheableSenderName);
         }
 
         return GetLocalIdentity();
+    }
+
+    private LocalChatIdentity ResolveLocalRpcIdentity(
+        int memberSlot,
+        uint senderId,
+        string decodedSender,
+        bool hasExplicitSenderLabel)
+    {
+        if (memberSlot is < 0 or >= 4)
+            return GetLocalIdentity();
+
+        string? playerName = null;
+        if (_playerNameResolver?.TryResolveName(memberSlot, senderId, out var resolvedName) == true &&
+            RelinkChatMessageCueNormalization.TryGetCacheableLocalSenderName(
+                resolvedName,
+                out var cacheableResolvedName))
+        {
+            playerName = cacheableResolvedName;
+        }
+        else if (hasExplicitSenderLabel &&
+                 RelinkChatMessageCueNormalization.TryGetCacheableLocalSenderName(
+                     decodedSender,
+                     out var cacheableDecodedSender))
+        {
+            playerName = cacheableDecodedSender;
+        }
+
+        _localIdentityCache.Update(playerName, memberSlot + 1);
+        return _localIdentityCache.Read();
     }
 
     private void ObserveLocalEcho(
@@ -519,30 +652,27 @@ public sealed unsafe class RelinkChatBridge :
         string decodedSender,
         bool hasExplicitSenderLabel)
     {
-        if (memberSlot is < 0 or >= 4)
-            return;
-
-        string? playerName = null;
-        if (_playerNameResolver?.TryResolveName(memberSlot, senderId, out var resolvedName) == true)
-            playerName = resolvedName;
-        else if (hasExplicitSenderLabel && !string.IsNullOrWhiteSpace(decodedSender))
-            playerName = decodedSender.Trim();
-
-        if (!string.IsNullOrWhiteSpace(playerName))
-            Volatile.Write(ref _localPlayerName, playerName);
-        Volatile.Write(ref _localPlayerNumber, memberSlot + 1);
+        var identity = ResolveLocalRpcIdentity(
+            memberSlot,
+            senderId,
+            decodedSender,
+            hasExplicitSenderLabel);
 
         if (Interlocked.Exchange(ref _localIdentityLogged, 1) == 0)
         {
             SafeLog(
                 $"Relink local chat identity learned from the authoritative RPC echo: " +
                 $"member_slot={memberSlot}, player_number={memberSlot + 1}, " +
-                $"name='{playerName ?? "unavailable"}'.");
+                $"name='{identity.Sender}'.");
         }
     }
 
+    internal static IncomingChatMessage NormalizeIncomingForEnqueue(IncomingChatMessage message) =>
+        RelinkChatMessageCueNormalization.SanitizeIncomingSenderForEnqueue(message);
+
     private void EnqueueIncoming(IncomingChatMessage message)
     {
+        message = NormalizeIncomingForEnqueue(message);
         Interlocked.Increment(ref _incomingCount);
         _incoming.Enqueue(message);
         while (Volatile.Read(ref _incomingCount) > MaximumQueuedIncomingMessages &&

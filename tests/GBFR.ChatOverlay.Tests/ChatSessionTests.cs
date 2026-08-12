@@ -77,7 +77,15 @@ public sealed class ChatSessionTests
     public void DrainIncoming_AppendsHookRecordsOnOwningThread()
     {
         var source = new StubIncomingSource(
-            new IncomingChatMessage("Lyria", "Ready!", 1, 2, 3, DateTimeOffset.UtcNow, 3));
+            new IncomingChatMessage(
+                "Lyria",
+                "Ready!",
+                1,
+                2,
+                3,
+                DateTimeOffset.UtcNow,
+                3,
+                CommunicationCue: ChatCommunicationCue.Victory));
         var session = new ChatSession(
             new ChatHistory(10),
             new ChatComposer(),
@@ -91,6 +99,7 @@ public sealed class ChatSessionTests
         Assert.Equal(ChatMessageKind.Party, message.Kind);
         Assert.Equal(1u, message.SenderId);
         Assert.Equal(3, message.PlayerNumber);
+        Assert.Equal(ChatCommunicationCue.Victory, message.CommunicationCue);
         Assert.Equal(0, session.DrainIncoming());
     }
 

@@ -1322,6 +1322,49 @@ public sealed class PartyChatControlCanaryTests
             api.Calls);
     }
 
+    [Fact]
+    public void EstablishedVoiceParticipantCount_StartsZeroAndTracksJoinedAndPermissionedRemotes()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        Assert.Equal(0, canary.EstablishedVoiceParticipantCount);
+
+        AdvanceToJoined(canary);
+        Assert.Equal(1, canary.EstablishedVoiceParticipantCount);
+
+        ObserveRemoteJoined(canary);
+        Assert.Equal(1, canary.EstablishedVoiceParticipantCount);
+        canary.OnBatchFinished(Manager);
+        Assert.Equal(2, canary.EstablishedVoiceParticipantCount);
+
+        ObserveRemoteJoined(canary, SecondRemoteChatControl);
+        canary.OnBatchFinished(Manager);
+        Assert.Equal(3, canary.EstablishedVoiceParticipantCount);
+    }
+
+    [Fact]
+    public void DisableFailClosed_AfterJoined_ClearsEstablishedVoiceCount()
+    {
+        var api = new FakePartyChatControlApi(LocalDevice, LocalChatControl);
+        using var canary = new PartyChatControlCanary(
+            api,
+            _ => { },
+            action => action(),
+            enableVoiceTest: true);
+
+        AdvanceToJoined(canary);
+        Assert.Equal(1, canary.EstablishedVoiceParticipantCount);
+
+        canary.DisableFailClosed("local Party user kicked");
+
+        Assert.Equal(0, canary.EstablishedVoiceParticipantCount);
+        Assert.Equal(PartyChatControlCanaryPhase.Disabled, canary.Phase);
+    }
     private static void ObserveReadySession(PartyChatControlCanary canary)
     {
         canary.Observe(Manager, new PartyStateChangeSnapshot((uint)PartyStateChangeType.AuthenticateLocalUserCompleted)

@@ -34,6 +34,7 @@ public sealed class ConfigDefaultsTests
     [InlineData(nameof(Config.Player4NameColor), "玩家 4 颜色 / Player 4 Color")]
     [InlineData(nameof(Config.EnableImeCandidateFallback), "输入法兼容 / IME Compatibility")]
     [InlineData(nameof(Config.EnableOverlay), "启用聊天界面 / Enable Chat Overlay")]
+    [InlineData(nameof(Config.CompactMode), "精简模式 / Compact Mode")]
     [InlineData(nameof(Config.QuickActionsControllerBinding), "快捷菜单（手柄） / Quick Action (Controller)")]
     [InlineData(nameof(Config.GlobalMuteControllerBinding), "全局聊天禁言（手柄） / Block All Chat (Controller)")]
     [InlineData(nameof(Config.GlobalMuteKeyboardBinding), "全局聊天禁言（键盘） / Block All Chat (Keyboard)")]
@@ -65,6 +66,7 @@ public sealed class ConfigDefaultsTests
                  {
                      nameof(Config.InterfaceLanguage),
                      nameof(Config.EnableOverlay),
+                     nameof(Config.CompactMode),
                      nameof(Config.EnableImeCandidateFallback),
                      nameof(Config.BackgroundOpacity),
                      nameof(Config.ChatFontSize),
@@ -97,6 +99,21 @@ public sealed class ConfigDefaultsTests
     public void ImeCandidateFallback_IsEnabledForThirdPartyInputMethods()
     {
         Assert.True(new Config().EnableImeCandidateFallback);
+    }
+
+    [Fact]
+    public void CompactMode_IsDisabledByDefault()
+    {
+        Assert.False(new Config().CompactMode);
+    }
+
+    [Fact]
+    public void CompactMode_DescriptionMatchesVoiceRowAndInputPresentation()
+    {
+        var property = TypeDescriptor.GetProperties(typeof(Config))[nameof(Config.CompactMode)]!;
+
+        Assert.Contains("语音状态和输入框", property.Description, StringComparison.Ordinal);
+        Assert.Contains("voice status and the input box", property.Description, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -123,7 +123,8 @@ public class Mod : ModBase // <= Do not Remove.
                     enableVoiceTest: _configuration.EnableVoiceInput,
                     audioInputSelection: audioInputSelection,
                     audioOutputSelection: audioOutputSelection,
-                    invalidateRoomIdentity: ResetLobbyOwner);
+                    invalidateRoomIdentity: ResetLobbyOwner,
+                    roomIdentityReader: GetRoomIdentitySnapshot);
                 StartupPhaseDiagnostic.Run(
                     "party-lifecycle-hooks",
                     moduleLog,
@@ -258,7 +259,9 @@ public class Mod : ModBase // <= Do not Remove.
             chatBlacklist: _chatBlacklist,
             getHostPlayerNumber: GetHostPlayerNumber,
             getRemotePlayerName: GetRemotePlayerName,
-            getTalkingRemotePlayers: GetTalkingRemotePlayers);
+            getTalkingRemotePlayers: GetTalkingRemotePlayers,
+            readRoomTransition: ReadRoomTransition,
+            getEstablishedVoiceParticipantCount: GetEstablishedVoiceParticipantCount);
 
         try
         {
@@ -487,6 +490,19 @@ public class Mod : ModBase // <= Do not Remove.
 
     private IReadOnlyList<int> GetTalkingRemotePlayers() =>
         _partyLifecycleProbe?.GetTalkingRemotePlayers() ?? Array.Empty<int>();
+
+    private PartyRoomIdentitySnapshot GetRoomIdentitySnapshot() =>
+        _nativeChatBridge?.TryGetRoomIdentitySnapshot(out var snapshot) == true
+            ? snapshot
+            : default;
+
+    private PartyRoomTransition? ReadRoomTransition() =>
+        _partyLifecycleProbe?.TryReadRoomTransition(out var transition) == true
+            ? transition
+            : null;
+
+    private int GetEstablishedVoiceParticipantCount() =>
+        Math.Max(0, _partyLifecycleProbe?.EstablishedVoiceParticipantCount ?? 0);
 
     private void ResetLobbyOwner() => _nativeChatBridge?.ResetLobbyOwner();
 

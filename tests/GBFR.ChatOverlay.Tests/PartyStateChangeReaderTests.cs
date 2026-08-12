@@ -89,6 +89,30 @@ public sealed class PartyStateChangeReaderTests
     }
 
     [Fact]
+    public void Read_EndpointCreated_UsesOfficialPack8Offsets()
+    {
+        var pointer = Marshal.AllocHGlobal(24);
+        try
+        {
+            Zero(pointer, 24);
+            Marshal.WriteInt32(pointer, 0, (int)PartyStateChangeType.EndpointCreated);
+            Marshal.WriteIntPtr(pointer, 8, (nint)0x1111);
+            Marshal.WriteIntPtr(pointer, 16, (nint)0x2222);
+
+            var snapshot = PartyStateChangeReader.Read(pointer);
+
+            Assert.Equal((uint)PartyStateChangeType.EndpointCreated, snapshot.Type);
+            Assert.Equal((nint)0x1111, snapshot.Network);
+            Assert.Equal((nint)0x2222, snapshot.Endpoint);
+            Assert.Equal(nint.Zero, snapshot.ChatControl);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(pointer);
+        }
+    }
+
+    [Fact]
     public void Read_EndpointDestroyedAndLocalUserKicked_CopyTeardownHandles()
     {
         var endpointPointer = Marshal.AllocHGlobal(32);

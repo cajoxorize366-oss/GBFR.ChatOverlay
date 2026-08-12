@@ -85,6 +85,13 @@ internal interface IPartyAudioWorkApi
     uint DoWork(nint manager, PartyThreadId threadId);
 }
 
+internal interface IPartyEndpointApi
+{
+    uint IsEndpointLocal(nint endpoint, out bool isLocal);
+
+    uint GetEndpointEntityId(nint endpoint, out string? entityId);
+}
+
 internal enum PartyChatControlChatIndicator : uint
 {
     Silent = 0,
@@ -226,7 +233,7 @@ internal interface IPartyChatControlApi
 /// initializes another Party runtime. The only exposed permission call is restricted by the caller
 /// to microphone send/receive; no text, TTS, transcription or endpoint-send API is bound.
 /// </summary>
-internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
+internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi, IPartyEndpointApi
 {
     private const uint MaximumNetworkChatControls = 64;
 
@@ -246,6 +253,8 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
     private readonly PartyChatControlGetIncomingAudioMutedDelegate _chatControlGetIncomingAudioMuted;
     private readonly PartyChatControlGetEntityIdDelegate _chatControlGetEntityId;
     private readonly PartyChatControlIsLocalDelegate _chatControlIsLocal;
+    private readonly PartyEndpointIsLocalDelegate _endpointIsLocal;
+    private readonly PartyEndpointGetEntityIdDelegate _endpointGetEntityId;
     private readonly PartyChatControlSetIncomingAudioMutedDelegate
         _chatControlSetIncomingAudioMuted;
     private readonly PartyChatControlGetLocalChatIndicatorDelegate _chatControlGetLocalChatIndicator;
@@ -316,6 +325,12 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
         _chatControlIsLocal = Bind<PartyChatControlIsLocalDelegate>(
             verifiedPartyModule,
             "PartyChatControlIsLocal");
+        _endpointIsLocal = Bind<PartyEndpointIsLocalDelegate>(
+            verifiedPartyModule,
+            "PartyEndpointIsLocal");
+        _endpointGetEntityId = Bind<PartyEndpointGetEntityIdDelegate>(
+            verifiedPartyModule,
+            "PartyEndpointGetEntityId");
         _chatControlSetIncomingAudioMuted =
             Bind<PartyChatControlSetIncomingAudioMutedDelegate>(
                 verifiedPartyModule,
@@ -531,6 +546,22 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
     {
         var result = _chatControlIsLocal(chatControl, out var nativeIsLocal);
         isLocal = nativeIsLocal != 0;
+        return result;
+    }
+
+    public uint IsEndpointLocal(nint endpoint, out bool isLocal)
+    {
+        var result = _endpointIsLocal(endpoint, out var nativeIsLocal);
+        isLocal = nativeIsLocal != 0;
+        return result;
+    }
+
+    public uint GetEndpointEntityId(nint endpoint, out string? entityId)
+    {
+        var result = _endpointGetEntityId(endpoint, out var nativeEntityId);
+        entityId = result == 0 && nativeEntityId != nint.Zero
+            ? Marshal.PtrToStringUTF8(nativeEntityId)
+            : null;
         return result;
     }
 
@@ -804,6 +835,16 @@ internal sealed class PartyNativeApi : IPartyChatControlApi, IPartyAudioWorkApi
     private delegate uint PartyChatControlIsLocalDelegate(
         nint chatControl,
         out byte isLocal);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyEndpointIsLocalDelegate(
+        nint endpoint,
+        out byte isLocal);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate uint PartyEndpointGetEntityIdDelegate(
+        nint endpoint,
+        out nint entityId);
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint PartyChatControlSetIncomingAudioMutedDelegate(

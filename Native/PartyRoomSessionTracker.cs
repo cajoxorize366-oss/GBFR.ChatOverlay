@@ -11,6 +11,7 @@ internal sealed class PartyRoomSessionTracker
     private readonly Queue<PartyRoomTransition> _transitions = new();
     private Func<PartyRoomIdentitySnapshot>? _roomIdentityReader;
     private Func<int>? _voiceParticipantCountReader;
+    private PartyRoomMemberTracker? _memberTracker;
     private nint _network;
     private nint _localUser;
     private nint _localEndpoint;
@@ -49,6 +50,52 @@ internal sealed class PartyRoomSessionTracker
         }
     }
 
+    internal void ConfigureMemberTracking(
+        IPartyEndpointApi? endpointApi,
+        Func<RelinkPartyMemberIdentitySnapshot>? identitySnapshotReader = null)
+    {
+        lock (_sync)
+        {
+            _memberTracker?.Reset();
+            _memberTracker = endpointApi is null
+                ? null
+                : new PartyRoomMemberTracker(endpointApi, identitySnapshotReader);
+        }
+    }
+
+    internal bool TryReadMemberTransition(out PartyMemberTransition transition)
+    {
+        lock (_sync)
+        {
+            transition = default;
+            return _memberTracker?.TryReadTransition(out transition) ?? false;
+        }
+    }
+
+    internal void BeginStateChangeBatch(nint manager)
+    {
+        lock (_sync)
+            _memberTracker?.BeginStateChangeBatch(manager);
+    }
+
+    internal void CancelStateChangeBatch(nint manager)
+    {
+        lock (_sync)
+            _memberTracker?.CancelStateChangeBatch(manager);
+    }
+
+    internal void OnBatchFinished(nint manager)
+    {
+        lock (_sync)
+            _memberTracker?.OnBatchFinished(manager);
+    }
+
+    internal void ResetMemberTransitions()
+    {
+        lock (_sync)
+            _memberTracker?.Reset();
+    }
+
     internal bool TryReadTransition(out PartyRoomTransition transition)
     {
         lock (_sync)
@@ -81,6 +128,8 @@ internal sealed class PartyRoomSessionTracker
                     break;
                 case PartyStateChangeType.CreateEndpointCompleted:
                     ObserveEndpointCreationLocked(snapshot);
+                    if (Volatile.Read(ref _active) != 0)
+                        _memberTracker?.ActivateRoom();
                     break;
                 case PartyStateChangeType.DestroyEndpointCompleted:
                     if (!_leaveQueued &&
@@ -94,7 +143,13 @@ internal sealed class PartyRoomSessionTracker
                             errorDetail: snapshot.ErrorDetail);
                     }
                     break;
+                case PartyStateChangeType.EndpointCreated:
+                    if (MatchesNetworkLocked(snapshot.Network))
+                        _memberTracker?.ObserveEndpointCreated(snapshot);
+                    break;
                 case PartyStateChangeType.EndpointDestroyed:
+                    if (MatchesNetworkLocked(snapshot.Network))
+                        _memberTracker?.ObserveEndpointDestroyed(snapshot);
                     if (!_leaveQueued && MatchesEndpointLocked(snapshot.Network, snapshot.Endpoint))
                     {
                         ResetLocked(
@@ -204,6 +259,7 @@ internal sealed class PartyRoomSessionTracker
                     PartyRoomExitReason.SelfLeft,
                 _ => PartyRoomExitReason.NetworkInterrupted,
             };
+            _memberTracker?.Reset();
             _leaveQueued = true;
             _pendingExitReason = reason;
             _pendingExitRoomName = identity?.RoomName;
@@ -445,6 +501,7 @@ internal sealed class PartyRoomSessionTracker
 
     private void ClearSessionLocked()
     {
+        _memberTracker?.Reset();
         Volatile.Write(ref _active, 0);
         _network = nint.Zero;
         _localUser = nint.Zero;

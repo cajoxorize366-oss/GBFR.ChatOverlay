@@ -147,6 +147,14 @@ public sealed class PartyLifecycleProbe
         return _onlineRoom.TryReadTransition(out transition);
     }
 
+    internal bool TryReadMemberTransition(out PartyMemberTransition transition)
+    {
+        transition = default;
+        if (!IsInitialized || Volatile.Read(ref _suspended))
+            return false;
+        return _onlineRoom.TryReadMemberTransition(out transition);
+    }
+
     internal PartyVoiceUiStatus VoiceUiStatus
     {
         get
@@ -414,6 +422,15 @@ public sealed class PartyLifecycleProbe
                     }
                 }
 
+                _onlineRoom.ConfigureMemberTracking(
+                    partyApi,
+                    () =>
+                    {
+                        if (_partyIdentityResolver?.TryResolveCoherentSnapshot(out var snapshot) == true)
+                            return snapshot;
+                        return default;
+                    });
+
                 if (_enableMutedChatControlCanary && partyApi is not null)
                 {
                     try
@@ -483,6 +500,7 @@ public sealed class PartyLifecycleProbe
             catch
             {
                 DisableHooks();
+                _onlineRoom.ResetMemberTransitions();
                 ClearHooks();
                 _audioWorkPump?.Dispose();
                 _audioWorkPump = null;
@@ -505,6 +523,7 @@ public sealed class PartyLifecycleProbe
             Volatile.Write(ref _suspended, true);
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             DisableHooks();
+            _onlineRoom.ResetMemberTransitions();
         }
         _audioWorkPump?.DetachManager(nint.Zero, "Mod suspension");
         _chatControlCanary?.SuspendBestEffort();
@@ -529,6 +548,7 @@ public sealed class PartyLifecycleProbe
             {
                 Volatile.Write(ref _suspended, true);
                 DisableHooks();
+                _onlineRoom.ResetMemberTransitions();
                 _audioWorkPump?.DetachManager(nint.Zero, "failed Mod resume");
                 _chatControlCanary?.SuspendBestEffort();
                 throw;
@@ -673,6 +693,7 @@ public sealed class PartyLifecycleProbe
         nint stateChangeCountOutput,
         nint stateChangesOutput)
     {
+        _onlineRoom.BeginStateChangeBatch(handle);
         _playerMuteController?.BeginStateChangeBatch(handle);
         _chatControlCanary?.BeginStateChangeBatch(handle);
         uint result;
@@ -688,6 +709,7 @@ public sealed class PartyLifecycleProbe
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
+            _onlineRoom.CancelStateChangeBatch(handle);
             throw;
         }
 
@@ -696,6 +718,7 @@ public sealed class PartyLifecycleProbe
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
+            _onlineRoom.CancelStateChangeBatch(handle);
             return result;
         }
 
@@ -704,6 +727,7 @@ public sealed class PartyLifecycleProbe
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
+            _onlineRoom.CancelStateChangeBatch(handle);
             if (Interlocked.Exchange(ref _startFailureLogged, 1) == 0)
             {
                 EnqueueLog(
@@ -742,12 +766,14 @@ public sealed class PartyLifecycleProbe
             Interlocked.Exchange(ref _audioWorkStartPendingManager, nint.Zero);
             _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
+            _onlineRoom.CancelStateChangeBatch(handle);
             throw;
         }
         if (!Volatile.Read(ref _suspended) && result == 0)
         {
             try
             {
+                _onlineRoom.OnBatchFinished(handle);
                 _playerMuteController?.OnBatchFinished(handle);
                 _chatControlCanary?.OnBatchFinished(handle);
                 var pendingManager = Interlocked.Exchange(
@@ -781,6 +807,7 @@ public sealed class PartyLifecycleProbe
             else
                 _playerMuteController?.CancelStateChangeBatch(handle);
             _chatControlCanary?.CancelStateChangeBatch(handle);
+            _onlineRoom.CancelStateChangeBatch(handle);
         }
         if (!Volatile.Read(ref _suspended) &&
             result != 0 &&

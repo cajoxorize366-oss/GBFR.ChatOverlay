@@ -58,6 +58,12 @@ internal static class PartyStateChangeReader
                 ReadCreateEndpointCompleted(stateChange, type),
             PartyStateChangeType.DestroyEndpointCompleted =>
                 ReadDestroyEndpointCompleted(stateChange, type),
+            PartyStateChangeType.EndpointCreated =>
+                new PartyStateChangeSnapshot(type)
+                {
+                    Network = Marshal.ReadIntPtr(stateChange, 8),
+                    Endpoint = Marshal.ReadIntPtr(stateChange, 16),
+                },
             PartyStateChangeType.EndpointDestroyed =>
                 ReadEndpointDestroyed(stateChange, type),
             PartyStateChangeType.DestroyLocalUserCompleted =>

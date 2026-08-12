@@ -60,6 +60,15 @@ internal sealed class LocalChatIdentityCache
         }
     }
 
+    internal bool TryReadVerifiedName(out string sender)
+    {
+        lock (_sync)
+        {
+            sender = _sender ?? string.Empty;
+            return _sender is not null;
+        }
+    }
+
     internal void UpdateName(string? senderName)
     {
         if (string.IsNullOrWhiteSpace(senderName))

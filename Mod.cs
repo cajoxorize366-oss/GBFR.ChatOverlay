@@ -262,7 +262,9 @@ public class Mod : ModBase // <= Do not Remove.
             getRemotePlayerName: GetRemotePlayerName,
             getVoiceIndicatorSnapshot: GetVoiceIndicatorSnapshot,
             readRoomTransition: ReadRoomTransition,
-            getEstablishedVoiceParticipantCount: GetEstablishedVoiceParticipantCount);
+            getEstablishedVoiceParticipantCount: GetEstablishedVoiceParticipantCount,
+            getLocalPlayerName: GetLocalPlayerName,
+            readMemberTransition: ReadMemberTransition);
 
         try
         {
@@ -492,6 +494,11 @@ public class Mod : ModBase // <= Do not Remove.
             ? playerName
             : null;
 
+    private string? GetLocalPlayerName() =>
+        _nativeChatBridge?.TryGetLocalPlayerName(out var playerName) == true
+            ? playerName
+            : null;
+
     private PartyVoiceIndicatorSnapshot GetVoiceIndicatorSnapshot() =>
         _partyLifecycleProbe?.GetVoiceIndicatorSnapshot() ?? PartyVoiceIndicatorSnapshot.Unavailable;
 
@@ -502,6 +509,11 @@ public class Mod : ModBase // <= Do not Remove.
 
     private PartyRoomTransition? ReadRoomTransition() =>
         _partyLifecycleProbe?.TryReadRoomTransition(out var transition) == true
+            ? transition
+            : null;
+
+    private PartyMemberTransition? ReadMemberTransition() =>
+        _partyLifecycleProbe?.TryReadMemberTransition(out var transition) == true
             ? transition
             : null;
 

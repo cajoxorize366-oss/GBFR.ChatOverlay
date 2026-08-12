@@ -80,6 +80,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly byte[] _quickActionTextBuffer = new byte[InputBufferSize];
     private readonly Dictionary<string, int> _quickActionKeyDown = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingQuickActions = new();
+    private readonly object _memberNameSync = new();
     private readonly Dictionary<string, string> _memberNamesByEntityId = new(StringComparer.Ordinal);
     private int _voicePushToTalkKeyDown;
     private int _windowVoicePushToTalkPhysicalDown;
@@ -407,7 +408,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             var muted = _chatBlacklist.Toggle(playerNumber);
             var remotePlayerNumber = playerNumber - 1;
-            var playerName = ResolveRemotePlayerName(remotePlayerNumber);
+            var playerName = ResolveRemotePlayerName(remotePlayerNumber, playerNumber);
             var message = muted
                 ? T($"已禁言 {playerName}。", $"Muted {playerName}.")
                 : T($"已解除禁言 {playerName}。", $"Unmuted {playerName}.");
@@ -482,19 +483,22 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         PartyVoiceUiStatus voiceUiStatus,
         PartyVoiceIndicatorSnapshot snapshot)
     {
-        if (!snapshot.IsValid ||
-            voiceUiStatus.State is not (PartyVoiceUiState.Ready or PartyVoiceUiState.Speaking))
+        if (voiceUiStatus.State is not (PartyVoiceUiState.Ready or PartyVoiceUiState.Speaking))
         {
             return Array.Empty<string>();
         }
 
-        var remoteTalkers = NormalizeVoiceIndicatorPlayers(snapshot.TalkingRemotePlayers);
+        var remoteTalkers = snapshot.IsValid
+            ? NormalizeVoiceIndicatorPlayers(snapshot.TalkingRemotePlayers)
+            : Array.Empty<int>();
         var talkerNames = new List<string>(remoteTalkers.Count + 1);
         if (voiceUiStatus.State == PartyVoiceUiState.Speaking)
             talkerNames.Add(ResolveLocalPlayerName());
 
         foreach (var remotePlayerNumber in remoteTalkers)
-            talkerNames.Add(ResolveRemotePlayerName(remotePlayerNumber));
+            talkerNames.Add(ResolveRemotePlayerName(
+                remotePlayerNumber,
+                remotePlayerNumber + 1));
 
         return talkerNames.Count == 0
             ? Array.Empty<string>()
@@ -1188,6 +1192,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
             var language = CurrentLanguage;
             var memberName = ResolveMemberTransitionName(transition);
+            if (transition.Kind == PartyMemberTransitionKind.Baseline)
+                continue;
+
             _session.History.Add(
                 UiLocalization.Select(language, "系统", "System"),
                 FormatMemberTransitionNotice(transition, memberName, language),
@@ -1201,29 +1208,52 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         var entityId = NormalizeEntityId(transition.EntityId);
         if (transition.Kind == PartyMemberTransitionKind.Left &&
             entityId is not null &&
-            _memberNamesByEntityId.Remove(entityId, out var cachedName) &&
-            !string.IsNullOrWhiteSpace(cachedName))
+            TryTakeCachedMemberName(entityId, out var cachedName))
         {
             return cachedName;
         }
 
-        var memberName = ResolveMemberNameByOrdinal(transition.RemotePlayerOrdinal);
-        if (transition.Kind == PartyMemberTransitionKind.Joined && entityId is not null)
-            _memberNamesByEntityId[entityId] = memberName;
+        var memberName = ResolveMemberNameByOrdinal(
+            transition.RemotePlayerOrdinal,
+            out var resolvedActualName);
+        if (transition.Kind is PartyMemberTransitionKind.Baseline or PartyMemberTransitionKind.Joined &&
+            entityId is not null &&
+            resolvedActualName)
+        {
+            lock (_memberNameSync)
+                _memberNamesByEntityId[entityId] = memberName;
+        }
         return memberName;
     }
 
-    private string ResolveMemberNameByOrdinal(int remotePlayerOrdinal)
+    private string ResolveMemberNameByOrdinal(
+        int remotePlayerOrdinal,
+        out bool resolvedActualName)
     {
+        resolvedActualName = false;
+        if (remotePlayerOrdinal is < 1 or > 3)
+            return T("未知玩家", "Unknown player");
+
         var fallbackPlayerNumber = remotePlayerOrdinal + 1;
         var fallbackLabel = T($"玩家 {fallbackPlayerNumber}", $"Player {fallbackPlayerNumber}");
-        if (remotePlayerOrdinal is < 1 or > 3)
-            return fallbackLabel;
 
-        return ResolveRemotePlayerName(
-            remotePlayerOrdinal,
-            fallbackPlayerNumber,
-            fallbackLabel);
+        try
+        {
+            var playerName = _getRemotePlayerName(remotePlayerOrdinal)?.Trim();
+            if (!string.IsNullOrWhiteSpace(playerName))
+            {
+                resolvedActualName = true;
+                return playerName;
+            }
+        }
+        catch (Exception exception)
+        {
+            LogSafely(
+                $"Remote member {remotePlayerOrdinal} name lookup failed; the stable slot label was kept: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+        }
+
+        return fallbackLabel;
     }
 
     private static string? NormalizeEntityId(string? entityId)
@@ -1232,7 +1262,20 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
     }
 
-    private void ClearMemberNameCache() => _memberNamesByEntityId.Clear();
+    private bool TryTakeCachedMemberName(string entityId, out string memberName)
+    {
+        lock (_memberNameSync)
+        {
+            return _memberNamesByEntityId.Remove(entityId, out memberName!) &&
+                   !string.IsNullOrWhiteSpace(memberName);
+        }
+    }
+
+    private void ClearMemberNameCache()
+    {
+        lock (_memberNameSync)
+            _memberNamesByEntityId.Clear();
+    }
 
     internal static string FormatMemberTransitionNotice(
         PartyMemberTransition transition,
@@ -1240,6 +1283,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         UiLanguage language) =>
         transition.Kind switch
         {
+            PartyMemberTransitionKind.Baseline => string.Empty,
             PartyMemberTransitionKind.Joined => UiLocalization.Select(
                 language,
                 $"{memberName} 加入了房间。",

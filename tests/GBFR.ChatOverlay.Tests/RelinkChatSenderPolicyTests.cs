@@ -94,10 +94,13 @@ public sealed class RelinkChatSenderPolicyTests
 
         Assert.Equal("Djeeta", identity.Sender);
         Assert.Equal(1, identity.PlayerNumber);
+        Assert.True(cache.TryReadVerifiedName(out var verifiedName));
+        Assert.Equal("Djeeta", verifiedName);
 
         cache.Clear();
         Assert.Equal("Local", cache.Read().Sender);
         Assert.Equal(1, cache.Read().PlayerNumber);
+        Assert.False(cache.TryReadVerifiedName(out _));
     }
 
     [Fact]

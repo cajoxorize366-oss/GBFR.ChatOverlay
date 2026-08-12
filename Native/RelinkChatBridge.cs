@@ -322,18 +322,23 @@ public sealed unsafe class RelinkChatBridge :
 
     internal LocalChatIdentity GetLocalIdentity()
     {
-        if (TryResolveLocalSlot(out var localMemberSlot))
-        {
-            string? resolvedName = null;
-            if (_playerNameResolver?.TryResolveName(localMemberSlot, 0, out var playerName) == true &&
-                !string.IsNullOrWhiteSpace(playerName))
-                resolvedName = playerName.Trim();
+        TryGetLocalPlayerName(out _);
+        return _localIdentityCache.Read();
+    }
 
-            if (!string.IsNullOrWhiteSpace(resolvedName))
-                _localIdentityCache.UpdateName(resolvedName);
+    internal bool TryGetLocalPlayerName(out string playerName)
+    {
+        playerName = string.Empty;
+        if (TryResolveLocalSlot(out var localMemberSlot) &&
+            _playerNameResolver?.TryResolveName(localMemberSlot, 0, out var resolvedName) == true &&
+            !string.IsNullOrWhiteSpace(resolvedName))
+        {
+            playerName = resolvedName.Trim();
+            _localIdentityCache.UpdateName(playerName);
+            return true;
         }
 
-        return _localIdentityCache.Read();
+        return _localIdentityCache.TryReadVerifiedName(out playerName);
     }
 
     internal bool TryResolveLocalSlot(out int localMemberSlot)

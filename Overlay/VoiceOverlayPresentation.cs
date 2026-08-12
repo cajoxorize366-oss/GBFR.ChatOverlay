@@ -22,8 +22,8 @@ internal static class VoiceOverlayPresenter
                 true,
                 T(
                     language,
-                    $"[语音] {names} 正在说话",
-                    $"[Voice] {names} speaking"));
+                    $"[语音] {names} 正在使用语音",
+                    $"[Voice] {names} using voice"));
         }
 
         return status.State switch

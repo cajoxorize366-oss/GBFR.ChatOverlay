@@ -347,7 +347,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             talkers);
 
         Assert.Equal(["Remote 1", "Remote 2", "Remote 3"], talkers);
-        Assert.Equal("[语音] Remote 1、Remote 2、Remote 3 正在说话", presentation.Text);
+        Assert.Equal("[语音] Remote 1、Remote 2、Remote 3 正在使用语音", presentation.Text);
     }
 
     [Fact]
@@ -392,7 +392,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             talkers);
 
         Assert.Equal(["You", "Remote 2"], talkers);
-        Assert.Equal("[Voice] You, Remote 2 speaking", presentation.Text);
+        Assert.Equal("[Voice] You, Remote 2 using voice", presentation.Text);
     }
 
     [Fact]
@@ -409,6 +409,22 @@ public sealed class ChatOverlayPeerHotkeyTests
             new PartyVoiceIndicatorSnapshot(true, [], [], []));
 
         Assert.Equal(["你"], talkers);
+    }
+
+    [Fact]
+    public void VoiceTalkers_RemoteNameFailureUsesUiPlayerNumberFallback()
+    {
+        using var peer = CreatePeer(
+            new Config { InterfaceLanguage = UiLanguage.SimplifiedChinese },
+            new RecordingTransport(),
+            getRemotePlayerName: _ => null);
+
+        var talkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            new PartyVoiceIndicatorSnapshot(true, [], [], [1, 3]));
+
+        Assert.Equal(["玩家 2", "玩家 4"], talkers);
     }
 
     [Fact]
@@ -431,6 +447,22 @@ public sealed class ChatOverlayPeerHotkeyTests
 
         Assert.Empty(nonReadyTalkers);
         Assert.Empty(invalidTalkers);
+    }
+
+    [Fact]
+    public void VoiceTalkers_LocalSpeakingSurvivesUnavailableRemoteSnapshot()
+    {
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getLocalPlayerName: () => "Kuro");
+
+        var talkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            PartyVoiceIndicatorSnapshot.Unavailable);
+
+        Assert.Equal(["Kuro"], talkers);
     }
 
     [Fact]
@@ -1631,6 +1663,44 @@ public sealed class ChatOverlayPeerHotkeyTests
             history.Snapshot().Select(message => message.Text));
     }
 
+    [Fact]
+    public void Tick_BaselineCachesNameWithoutHistoryAndUsesItForLaterLeft()
+    {
+        var resolverAvailable = true;
+        var transitions = new Queue<PartyMemberTransition>([
+            new(PartyMemberTransitionKind.Baseline, 1, "host-entity"),
+        ]);
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            history: history,
+            getRemotePlayerName: _ =>
+            {
+                if (!resolverAvailable)
+                    throw new InvalidOperationException("name table unavailable");
+                return "Room Host";
+            },
+            readMemberTransition: () => transitions.Count == 0 ? null : transitions.Dequeue());
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        Assert.Empty(history.Snapshot());
+
+        resolverAvailable = false;
+        transitions.Enqueue(new PartyMemberTransition(
+            PartyMemberTransitionKind.Left,
+            1,
+            "host-entity",
+            PartyMemberLeaveReason.Disconnected));
+        peer.Tick();
+
+        var message = Assert.Single(history.Snapshot());
+        Assert.Equal(ChatMessageKind.System, message.Kind);
+        Assert.Equal("Room Host 离开了房间，原因：连接中断。", message.Text);
+    }
+
     [Theory]
     [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.Unknown, "原因未知")]
     [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.Requested, "主动离开")]
@@ -1714,8 +1784,8 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Theory]
-    [InlineData((int)PartyMemberTransitionKind.Joined, 99, null, "玩家 100 加入了房间。")]
-    [InlineData((int)PartyMemberTransitionKind.Left, 0, "", "玩家 1 离开了房间，原因：原因未知。")]
+    [InlineData((int)PartyMemberTransitionKind.Joined, 99, null, "未知玩家 加入了房间。")]
+    [InlineData((int)PartyMemberTransitionKind.Left, 0, "", "未知玩家 离开了房间，原因：原因未知。")]
     public void Tick_InvalidMemberTransitionDataFailsSafeWithLocalizedFallback(
         int kindValue,
         int remotePlayerOrdinal,

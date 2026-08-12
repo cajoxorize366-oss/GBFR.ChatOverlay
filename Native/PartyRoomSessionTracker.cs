@@ -17,6 +17,7 @@ internal sealed class PartyRoomSessionTracker
     private nint _localEndpoint;
     private bool _authenticated;
     private bool _leaveQueued;
+    private bool _activateMemberTrackingAfterBatch;
     private PartyRoomExitReason? _pendingExitReason;
     private string? _pendingExitRoomName;
     private int _active;
@@ -60,6 +61,8 @@ internal sealed class PartyRoomSessionTracker
             _memberTracker = endpointApi is null
                 ? null
                 : new PartyRoomMemberTracker(endpointApi, identitySnapshotReader);
+            _activateMemberTrackingAfterBatch = endpointApi is not null &&
+                                                Volatile.Read(ref _active) != 0;
         }
     }
 
@@ -81,19 +84,37 @@ internal sealed class PartyRoomSessionTracker
     internal void CancelStateChangeBatch(nint manager)
     {
         lock (_sync)
+        {
             _memberTracker?.CancelStateChangeBatch(manager);
+            if (_memberTracker is null)
+                return;
+
+            _memberTracker.Reset();
+            _activateMemberTrackingAfterBatch = Volatile.Read(ref _active) != 0;
+        }
     }
 
     internal void OnBatchFinished(nint manager)
     {
         lock (_sync)
+        {
             _memberTracker?.OnBatchFinished(manager);
+            if (_activateMemberTrackingAfterBatch && Volatile.Read(ref _active) != 0)
+            {
+                _memberTracker?.ActivateRoom();
+                _activateMemberTrackingAfterBatch = false;
+            }
+        }
     }
 
     internal void ResetMemberTransitions()
     {
         lock (_sync)
+        {
             _memberTracker?.Reset();
+            _activateMemberTrackingAfterBatch = _memberTracker is not null &&
+                                                Volatile.Read(ref _active) != 0;
+        }
     }
 
     internal bool TryReadTransition(out PartyRoomTransition transition)
@@ -128,8 +149,6 @@ internal sealed class PartyRoomSessionTracker
                     break;
                 case PartyStateChangeType.CreateEndpointCompleted:
                     ObserveEndpointCreationLocked(snapshot);
-                    if (Volatile.Read(ref _active) != 0)
-                        _memberTracker?.ActivateRoom();
                     break;
                 case PartyStateChangeType.DestroyEndpointCompleted:
                     if (!_leaveQueued &&
@@ -260,6 +279,7 @@ internal sealed class PartyRoomSessionTracker
                 _ => PartyRoomExitReason.NetworkInterrupted,
             };
             _memberTracker?.Reset();
+            _activateMemberTrackingAfterBatch = false;
             _leaveQueued = true;
             _pendingExitReason = reason;
             _pendingExitRoomName = identity?.RoomName;
@@ -473,6 +493,7 @@ internal sealed class PartyRoomSessionTracker
 
         _localEndpoint = snapshot.Endpoint;
         Volatile.Write(ref _active, 1);
+        _activateMemberTrackingAfterBatch = true;
         EnqueueEnteredLocked();
     }
 
@@ -507,6 +528,7 @@ internal sealed class PartyRoomSessionTracker
         _localUser = nint.Zero;
         _localEndpoint = nint.Zero;
         _authenticated = false;
+        _activateMemberTrackingAfterBatch = false;
         _networkRole = PartyNetworkLocalRole.Unknown;
         _createdLocalUsers.Clear();
         _connectedNetworks.Clear();

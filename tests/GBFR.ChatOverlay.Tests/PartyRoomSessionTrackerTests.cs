@@ -7,6 +7,7 @@ public sealed class PartyRoomSessionTrackerTests
     private static readonly nint Network = (nint)0x1000;
     private static readonly nint LocalUser = (nint)0x2000;
     private static readonly nint Endpoint = (nint)0x3000;
+    private static readonly nint StateManager = (nint)0x4000;
 
     [Fact]
     public void AuthenticationAloneDoesNotOpenTheRoomGate()
@@ -24,6 +25,137 @@ public sealed class PartyRoomSessionTrackerTests
         var tracker = CreateActiveTracker();
 
         Assert.True(tracker.IsActive);
+    }
+
+    [Fact]
+    public void FirstActiveBatchTreatsExistingRemoteEndpointsAsBaseline()
+    {
+        var existingEndpoint = (nint)0x5000;
+        var joiningEndpoint = (nint)0x6000;
+        var api = new FakeEndpointApi();
+        api.EntityIds[existingEndpoint] = "existing-player";
+        api.EntityIds[joiningEndpoint] = "joining-player";
+        var identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["existing-player", "", "local-player", ""],
+            LocalMemberSlot: 2);
+        var tracker = new PartyRoomSessionTracker();
+        tracker.ConfigureMemberTracking(api, () => identitySnapshot);
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+        tracker.Observe(RemoteEndpointCreated(existingEndpoint));
+        tracker.OnBatchFinished(StateManager);
+
+        Assert.True(tracker.IsActive);
+        Assert.True(tracker.TryReadMemberTransition(out var baseline));
+        Assert.Equal(PartyMemberTransitionKind.Baseline, baseline.Kind);
+        Assert.Equal(1, baseline.RemotePlayerOrdinal);
+        Assert.Equal("existing-player", baseline.EntityId);
+        Assert.False(tracker.TryReadMemberTransition(out _));
+
+        identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["existing-player", "joining-player", "local-player", ""],
+            LocalMemberSlot: 2);
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.Observe(RemoteEndpointCreated(joiningEndpoint));
+        tracker.OnBatchFinished(StateManager);
+
+        Assert.True(tracker.TryReadMemberTransition(out var joined));
+        Assert.Equal(PartyMemberTransitionKind.Joined, joined.Kind);
+        Assert.Equal(2, joined.RemotePlayerOrdinal);
+        Assert.Equal("joining-player", joined.EntityId);
+        Assert.False(tracker.TryReadMemberTransition(out _));
+    }
+
+    [Fact]
+    public void ResetMemberTransitions_RearmsActiveRoomOnNextFinishedBatch()
+    {
+        var api = new FakeEndpointApi();
+        var identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["existing-player", "", "local-player", ""],
+            LocalMemberSlot: 2);
+        var tracker = new PartyRoomSessionTracker();
+        tracker.ConfigureMemberTracking(api, () => identitySnapshot);
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+        tracker.OnBatchFinished(StateManager);
+
+        Assert.Equal(
+            PartyMemberTransitionKind.Baseline,
+            ReadSingleMemberTransition(tracker).Kind);
+
+        tracker.ResetMemberTransitions();
+        Assert.False(tracker.TryReadMemberTransition(out _));
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.OnBatchFinished(StateManager);
+
+        var baseline = ReadSingleMemberTransition(tracker);
+        Assert.Equal(PartyMemberTransitionKind.Baseline, baseline.Kind);
+        Assert.Equal(1, baseline.RemotePlayerOrdinal);
+        Assert.Equal("existing-player", baseline.EntityId);
+    }
+
+    [Fact]
+    public void CancelStateChangeBatch_RearmsActiveRoomOnNextFinishedBatch()
+    {
+        var api = new FakeEndpointApi();
+        var identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["existing-player", "", "local-player", ""],
+            LocalMemberSlot: 2);
+        var tracker = new PartyRoomSessionTracker();
+        tracker.ConfigureMemberTracking(api, () => identitySnapshot);
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.Observe(Authentication());
+        tracker.Observe(EndpointCreation());
+        tracker.OnBatchFinished(StateManager);
+        ReadSingleMemberTransition(tracker);
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.CancelStateChangeBatch(StateManager);
+        Assert.False(tracker.TryReadMemberTransition(out _));
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.OnBatchFinished(StateManager);
+
+        var baseline = ReadSingleMemberTransition(tracker);
+        Assert.Equal(PartyMemberTransitionKind.Baseline, baseline.Kind);
+        Assert.Equal("existing-player", baseline.EntityId);
+    }
+
+    [Fact]
+    public void CancelStateChangeBatch_WhileInactive_DiscardsObservedEndpointBeforeActivation()
+    {
+        var staleEndpoint = (nint)0x5000;
+        var api = new FakeEndpointApi();
+        api.EntityIds[staleEndpoint] = "stale-player";
+        var identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["stale-player", "", "local-player", ""],
+            LocalMemberSlot: 2);
+        var tracker = new PartyRoomSessionTracker();
+        tracker.ConfigureMemberTracking(api, () => identitySnapshot);
+
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.Observe(Authentication());
+        tracker.Observe(RemoteEndpointCreated(staleEndpoint));
+        tracker.CancelStateChangeBatch(StateManager);
+
+        identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["", "", "local-player", ""],
+            LocalMemberSlot: 2);
+        tracker.BeginStateChangeBatch(StateManager);
+        tracker.Observe(EndpointCreation());
+        tracker.OnBatchFinished(StateManager);
+
+        identitySnapshot = new RelinkPartyMemberIdentitySnapshot(
+            ["stale-player", "", "local-player", ""],
+            LocalMemberSlot: 2);
+
+        Assert.False(tracker.TryReadMemberTransition(out _));
     }
 
     [Theory]
@@ -732,6 +864,13 @@ public sealed class PartyRoomSessionTrackerTests
         Assert.Equal(PartyRoomTransitionKind.Entered, entered.Kind);
     }
 
+    private static PartyMemberTransition ReadSingleMemberTransition(PartyRoomSessionTracker tracker)
+    {
+        Assert.True(tracker.TryReadMemberTransition(out var transition));
+        Assert.False(tracker.TryReadMemberTransition(out _));
+        return transition;
+    }
+
     private static PartyRoomSessionTracker CreateCreatedHostTracker()
     {
         var tracker = new PartyRoomSessionTracker();
@@ -792,12 +931,42 @@ public sealed class PartyRoomSessionTrackerTests
             LocalUser = LocalUser,
         };
 
+    private static PartyStateChangeSnapshot RemoteEndpointCreated(nint endpoint) =>
+        new((uint)PartyStateChangeType.EndpointCreated)
+        {
+            Network = Network,
+            Endpoint = endpoint,
+        };
+
     private static PartyStateChangeSnapshot LeaveCompleted() =>
         new((uint)PartyStateChangeType.LeaveNetworkCompleted)
         {
             Result = 0,
             Network = Network,
         };
+
+    private sealed class FakeEndpointApi : IPartyEndpointApi
+    {
+        internal Dictionary<nint, string> EntityIds { get; } = [];
+
+        public uint IsEndpointLocal(nint endpoint, out bool isLocal)
+        {
+            isLocal = false;
+            return 0;
+        }
+
+        public uint GetEndpointEntityId(nint endpoint, out string? entityId)
+        {
+            if (EntityIds.TryGetValue(endpoint, out var value))
+            {
+                entityId = value;
+                return 0;
+            }
+
+            entityId = null;
+            return 0x80000003;
+        }
+    }
 
     private static PartyStateChangeSnapshot Teardown(PartyStateChangeType type) =>
         new((uint)type)

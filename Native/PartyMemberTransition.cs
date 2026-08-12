@@ -2,6 +2,7 @@ namespace GBFR.ChatOverlay.Native;
 
 internal enum PartyMemberTransitionKind
 {
+    Baseline,
     Joined,
     Left,
 }

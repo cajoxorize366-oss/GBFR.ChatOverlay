@@ -66,8 +66,8 @@ public sealed class VoiceOverlayPresenterTests
             UiLanguage.English,
             talkers);
 
-        Assert.Equal("[语音] Narmaya、Vaseraga 正在说话", chinese.Text);
-        Assert.Equal("[Voice] Narmaya, Vaseraga speaking", english.Text);
+        Assert.Equal("[语音] Narmaya、Vaseraga 正在使用语音", chinese.Text);
+        Assert.Equal("[Voice] Narmaya, Vaseraga using voice", english.Text);
     }
 
     [Fact]
@@ -78,7 +78,7 @@ public sealed class VoiceOverlayPresenterTests
             UiLanguage.SimplifiedChinese,
             ["Kuro", "Narmaya"]);
 
-        Assert.Equal("[语音] Kuro、Narmaya 正在说话", presentation.Text);
+        Assert.Equal("[语音] Kuro、Narmaya 正在使用语音", presentation.Text);
     }
 
     [Fact]

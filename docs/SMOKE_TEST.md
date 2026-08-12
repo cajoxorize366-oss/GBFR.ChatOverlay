@@ -85,7 +85,7 @@ Use two clients with deliberately different online names, for example client A `
 
 ## 0.5.0-preview.24 host identification regression
 
-Install the same preview.24 ZIP on two clients and restart both processes so no earlier in-memory Party role or lobby-owner binding survives.
+Install the same preview.25 ZIP on two clients and restart both processes so no earlier in-memory Party role or lobby-owner binding survives.
 
 1. Client A creates the online room and client B joins. In A's log, the host diagnostic must settle on `local_role=Created, host_ui_player=1`; in B's log it must settle on `local_role=Connected` and the remote UI player that represents A.
 2. Send ordinary text, a Mod Custom Text action, the automatic All-Potion sentence and a victory communication from both clients. Both overlays must mark only A's lines with `[房主]`; B's local lines must never receive the label. Names and colors must remain those verified by the independent sender-attribution path.
@@ -93,6 +93,19 @@ Install the same preview.24 ZIP on two clients and restart both processes so no 
 4. On the joining client, a captured owner candidate equal to its own EntityId must be ignored. If no unique remote candidate is available yet, `host_ui_player=0` and no line is marked until the remote owner can be proven.
 5. If two distinct remote candidates match active members, the Party role is unknown, or the member snapshot is malformed or changes mid-read, the label must disappear rather than selecting the first candidate.
 6. Leave and recreate the room once more. The previous role, owner candidate, room name and cached host slot must not leak into the new session.
+
+## 0.5.0-preview.25 room-member and voice-header regression
+
+Use two clients with different online names and keep both complete Reloaded-II logs. Test once with A hosting and once with B hosting.
+
+1. Enter the room before the second client joins. Existing baseline members must not produce a synthetic `joined the room` line when the Overlay becomes active.
+2. Have the second client join after the first client is already active. The first client's chat history must add exactly one localized system line naming that player. A member represented by multiple Party endpoints must still produce only one join line.
+3. When the local side has a Party-confirmed unmuted input or a remote side reports `ChatIndicator.Talking`, the first row of the chat box must change from `[语音] 已就绪` to `[语音] <name> 正在使用语音`. Simultaneous local and remote users must both be listed once using their actual online names. Releasing `U` or returning every remote indicator to non-talking must restore the normal ready row.
+4. Destroy and recreate the same remote endpoint while the member remains in the coherent four-slot identity snapshot. No leave or duplicate join line may appear.
+5. Leave normally. The remaining client must add exactly one line naming the departed player with `主动离开`; the name must come from the EntityId-bound cache even though the live member-name slot has already disappeared.
+6. Repeat with a network interruption and a kick where practical. The remaining client must report `连接中断` or `被踢出房间` from the official Party destroy reason. Authentication loss, endpoint creation failure and unknown values must use their explicit localized fallbacks instead of guessing another reason.
+7. While the identity snapshot is unavailable or still contains the member after `EndpointDestroyed`, no leave line may be shown. It may appear only after the game's original `PartyFinishProcessingStateChanges` has completed and a coherent snapshot confirms absence.
+8. Leave/disband the room and create another one. Member-name cache, pending endpoint events and speaker names from the previous room must not leak into the new room.
 
 ## Push-to-talk and controller hotkeys
 
@@ -114,7 +127,7 @@ Install the same preview.24 ZIP on two clients and restart both processes so no 
 
 The normal path now combines exact Relink party-slot EntityIds with permissioned Party ChatControls before drawing. `Voice Indicator Debug: Show All Slots` remains a diagnostics-only position preview: it intentionally draws every active CPU/player HUD row and is not proof that the formal channel loop is active or that those rows use this Mod.
 
-1. Install the same preview.24 ZIP on clients A and B, join one online room and wait for both overlays to reach `Ready`. With debug show-all disabled, A and B must each show a muted 70%-opacity microphone only on the local row and the exact remote member row whose permissioned ChatControl supplied the matching EntityId. CPU, empty and unresolved rows must remain blank. This is an identity/channel assertion, not authenticated Mod capability negotiation.
+1. Install the same preview.25 ZIP on clients A and B, join one online room and wait for both overlays to reach `Ready`. With debug show-all disabled, A and B must each show a muted 70%-opacity microphone only on the local row and the exact remote member row whose permissioned ChatControl supplied the matching EntityId. CPU, empty and unresolved rows must remain blank. This is an identity/channel assertion, not authenticated Mod capability negotiation.
 2. Test the two-person case with CPU or empty party slots. The Mod member icon must stay attached to that member's stable remote ordinal; the unused rows must not receive an inferred icon. If the live HUD row cardinality cannot be reconciled with the exact party snapshot, the formal path must hide rather than guess.
 3. Have A hold `U` and speak continuously. A's local icon and B's matching remote icon must become bright at 100% opacity only when Party reports `Talking`; release must return both to the muted established state. Repeat from B to A.
 4. In town, confirm the tracker reports `layout=OnlineLobby`; enter a quest and confirm `layout=Battle`. The same identities must follow the compact town rows and the battle HP rows without swapping. Repeat once with the main chat overlay disabled or Compact Mode closed; voice icons must continue rendering independently.
@@ -149,7 +162,7 @@ This preview replaces the stock Reloaded DX11 implementation with the Present-on
 - If sending closes the input but the second client receives nothing, record whether the current state is an online lobby, town, quest or results screen; the original native function retains Relink's own state validation.
 - If an incoming line still uses `Player XXXXXXXX`, preserve the one-time member-key/player-name resolver failure and the capped `Relink chat attribution #...` line. Record the opaque `member_key`, resolved `member_index` if any, displayed in-game name and current lobby/quest transition state. The fallback is intentional and must not crash or drop the message.
 - Trigger messages whose native sender label is `vo_CMM_chance`, `vo_CMM_win_3` and `vo_CMM_thanks`. Each line must retain the actual player name and slot color while adding the localized `连携攻击`, `胜利` or `感谢` cue. No `vo_CMM_*` key may appear as the displayed sender or overwrite the cached local identity.
-- Restart the game with `0.5.0-preview.24`. On both clients trigger ordinary text, automatic All-Potion, `vo_CMM_chance`, `vo_CMM_win_3` and `vo_CMM_thanks`. Every line must retain its actual sender even when the local member index is nonzero; neither identity nor any room name may contain a presentation key or the other client's name. Only the actual Party creator may carry `[房主]`. A process that already loaded an older DLL must be restarted because its in-memory identity and lobby binding may already be stale.
+- Restart the game with `0.5.0-preview.25`. On both clients trigger ordinary text, automatic All-Potion, `vo_CMM_chance`, `vo_CMM_win_3` and `vo_CMM_thanks`. Every line must retain its actual sender even when the local member index is nonzero; neither identity nor any room name may contain a presentation key or the other client's name. Only the actual Party creator may carry `[房主]`. A process that already loaded an older DLL must be restarted because its in-memory identity and lobby binding may already be stale.
 - Hashed quick-chat/stamp records are intentionally ignored by the incoming bridge until their text resolver is hooked.
 
 ## Party lifecycle foundation

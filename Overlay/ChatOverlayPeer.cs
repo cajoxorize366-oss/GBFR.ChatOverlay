@@ -67,6 +67,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly Func<string?> _getLocalPlayerName;
     private readonly Func<PartyVoiceIndicatorSnapshot> _getVoiceIndicatorSnapshot;
     private readonly Func<PartyRoomTransition?> _readRoomTransition;
+    private readonly Func<PartyMemberTransition?> _readMemberTransition;
     private readonly Func<int> _getEstablishedVoiceParticipantCount;
     private readonly Func<DateTimeOffset> _getCurrentTime;
     private readonly XInputControllerPoller _controllerInputPoller = new();
@@ -79,6 +80,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly byte[] _quickActionTextBuffer = new byte[InputBufferSize];
     private readonly Dictionary<string, int> _quickActionKeyDown = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingQuickActions = new();
+    private readonly Dictionary<string, string> _memberNamesByEntityId = new(StringComparer.Ordinal);
     private int _voicePushToTalkKeyDown;
     private int _windowVoicePushToTalkPhysicalDown;
     private int _globalMuteKeyDown;
@@ -185,7 +187,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Func<DateTimeOffset>? getCurrentTime = null,
         Func<Action<bool>, VoicePushToTalkSafetyGate>? createWindowVoicePushToTalkGate = null,
         Func<int, bool>? isWindowKeyDown = null,
-        Func<string?>? getLocalPlayerName = null)
+        Func<string?>? getLocalPlayerName = null,
+        Func<PartyMemberTransition?>? readMemberTransition = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -218,6 +221,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _getVoiceIndicatorSnapshot = getVoiceIndicatorSnapshot ??
             (() => PartyVoiceIndicatorSnapshot.Unavailable);
         _readRoomTransition = readRoomTransition ?? (() => null);
+        _readMemberTransition = readMemberTransition ?? (() => null);
         _getEstablishedVoiceParticipantCount = getEstablishedVoiceParticipantCount ?? (() => 0);
         _getCurrentTime = getCurrentTime ?? (() => DateTimeOffset.UtcNow);
         _isWindowKeyDown = isWindowKeyDown ?? (virtualKey =>
@@ -1074,13 +1078,16 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         RefreshWindowVoicePushToTalkHeartbeat();
         PollManagedControllerInput();
         var configuration = _getConfiguration();
-        DrainRoomTransitions();
+        DrainMemberTransitions();
+        var roomTransitionExited = DrainRoomTransitions();
         if (!configuration.EnableImeCandidateFallback)
             ClearImeCandidateSnapshot();
         var onlineRoomActive = IsOnlineRoomActive();
         var previousOnlineRoomInactive = Interlocked.Exchange(
             ref _onlineRoomWasInactive,
             onlineRoomActive ? 0 : 1);
+        if (roomTransitionExited || (!onlineRoomActive && previousOnlineRoomInactive == 0))
+            ClearMemberNameCache();
         if (!onlineRoomActive && previousOnlineRoomInactive == 0)
         {
             _chatBlacklist.Clear();
@@ -1117,8 +1124,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
     }
 
-    private void DrainRoomTransitions()
+    private bool DrainRoomTransitions()
     {
+        var hasExitedTransition = false;
         while (true)
         {
             PartyRoomTransition? pending;
@@ -1131,11 +1139,11 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 LogSafely(
                     $"Room transition reader failed; remaining transitions were deferred: " +
                     $"{exception.GetType().Name}: {exception.Message}.");
-                return;
+                return hasExitedTransition;
             }
 
             if (pending is not { } transition)
-                return;
+                return hasExitedTransition;
 
             var language = CurrentLanguage;
             var establishedVoiceParticipantCount = transition.Kind == PartyRoomTransitionKind.Entered
@@ -1153,8 +1161,115 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 now);
             _transientNoticeText = notice;
             _transientNoticeExpiresAt = now + RoomTransitionNoticeDuration;
+            if (transition.Kind == PartyRoomTransitionKind.Exited)
+                hasExitedTransition = true;
         }
     }
+
+    private void DrainMemberTransitions()
+    {
+        while (true)
+        {
+            PartyMemberTransition? pending;
+            try
+            {
+                pending = _readMemberTransition();
+            }
+            catch (Exception exception)
+            {
+                LogSafely(
+                    $"Member transition reader failed; remaining transitions were deferred: " +
+                    $"{exception.GetType().Name}: {exception.Message}.");
+                return;
+            }
+
+            if (pending is not { } transition)
+                return;
+
+            var language = CurrentLanguage;
+            var memberName = ResolveMemberTransitionName(transition);
+            _session.History.Add(
+                UiLocalization.Select(language, "系统", "System"),
+                FormatMemberTransitionNotice(transition, memberName, language),
+                ChatMessageKind.System,
+                ReadCurrentTime());
+        }
+    }
+
+    private string ResolveMemberTransitionName(PartyMemberTransition transition)
+    {
+        var entityId = NormalizeEntityId(transition.EntityId);
+        if (transition.Kind == PartyMemberTransitionKind.Left &&
+            entityId is not null &&
+            _memberNamesByEntityId.Remove(entityId, out var cachedName) &&
+            !string.IsNullOrWhiteSpace(cachedName))
+        {
+            return cachedName;
+        }
+
+        var memberName = ResolveMemberNameByOrdinal(transition.RemotePlayerOrdinal);
+        if (transition.Kind == PartyMemberTransitionKind.Joined && entityId is not null)
+            _memberNamesByEntityId[entityId] = memberName;
+        return memberName;
+    }
+
+    private string ResolveMemberNameByOrdinal(int remotePlayerOrdinal)
+    {
+        var fallbackPlayerNumber = remotePlayerOrdinal + 1;
+        var fallbackLabel = T($"玩家 {fallbackPlayerNumber}", $"Player {fallbackPlayerNumber}");
+        if (remotePlayerOrdinal is < 1 or > 3)
+            return fallbackLabel;
+
+        return ResolveRemotePlayerName(
+            remotePlayerOrdinal,
+            fallbackPlayerNumber,
+            fallbackLabel);
+    }
+
+    private static string? NormalizeEntityId(string? entityId)
+    {
+        var normalized = entityId?.Trim();
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
+
+    private void ClearMemberNameCache() => _memberNamesByEntityId.Clear();
+
+    internal static string FormatMemberTransitionNotice(
+        PartyMemberTransition transition,
+        string memberName,
+        UiLanguage language) =>
+        transition.Kind switch
+        {
+            PartyMemberTransitionKind.Joined => UiLocalization.Select(
+                language,
+                $"{memberName} 加入了房间。",
+                $"{memberName} joined the room."),
+            PartyMemberTransitionKind.Left => UiLocalization.Select(
+                language,
+                $"{memberName} 离开了房间，原因：{FormatMemberLeaveReason(transition.LeaveReason, language)}。",
+                $"{memberName} left the room. Reason: {FormatMemberLeaveReason(transition.LeaveReason, language)}."),
+            _ => UiLocalization.Select(language, "房间成员状态已更新。", "Room member status updated."),
+        };
+
+    internal static string FormatMemberLeaveReason(
+        PartyMemberLeaveReason reason,
+        UiLanguage language) =>
+        reason switch
+        {
+            PartyMemberLeaveReason.Unknown => UiLocalization.Select(language, "原因未知", "Unknown"),
+            PartyMemberLeaveReason.Requested => UiLocalization.Select(language, "主动离开", "Left voluntarily"),
+            PartyMemberLeaveReason.Disconnected => UiLocalization.Select(language, "连接中断", "Connection lost"),
+            PartyMemberLeaveReason.Kicked => UiLocalization.Select(language, "被踢出房间", "Kicked"),
+            PartyMemberLeaveReason.DeviceLostAuthentication => UiLocalization.Select(
+                language,
+                "认证失效",
+                "Authentication lost"),
+            PartyMemberLeaveReason.CreationFailed => UiLocalization.Select(
+                language,
+                "联机端点创建失败",
+                "Online endpoint creation failed"),
+            _ => UiLocalization.Select(language, "原因未知", "Unknown"),
+        };
 
     private int ReadEstablishedVoiceParticipantCount()
     {
@@ -1272,6 +1387,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     public void Suspend()
     {
         Interlocked.Exchange(ref _suspended, 1);
+        ClearMemberNameCache();
         _windowVoicePushToTalkGate.Suspend();
         SetSettingsMenuOpen(false);
         _session.Composer.Cancel();
@@ -4173,6 +4289,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     public void OnHostUnavailable(string reason)
     {
         Volatile.Write(ref _initialized, false);
+        ClearMemberNameCache();
         ForceReleaseVoicePushToTalkSources();
         ResetInteractionState();
         NotifyOnlineRoomUnavailable();

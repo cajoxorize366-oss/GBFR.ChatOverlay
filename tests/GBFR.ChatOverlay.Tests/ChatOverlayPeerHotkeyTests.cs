@@ -1528,6 +1528,262 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.Empty(transitions);
     }
 
+    [Theory]
+    [InlineData(
+        UiLanguage.SimplifiedChinese,
+        "Lyria 加入了房间。|Narmaya 加入了房间。|Lyria 离开了房间，原因：主动离开。|Narmaya 离开了房间，原因：认证失效。")]
+    [InlineData(
+        UiLanguage.English,
+        "Lyria joined the room.|Narmaya joined the room.|Lyria left the room. Reason: Left voluntarily.|Narmaya left the room. Reason: Authentication lost.")]
+    public void Tick_DrainsAllMemberTransitionsInOrder_WritesBilingualSystemHistory(
+        UiLanguage language,
+        string expectedText)
+    {
+        var transitions = new Queue<PartyMemberTransition>([
+            new(PartyMemberTransitionKind.Joined, 1, "entity-1"),
+            new(PartyMemberTransitionKind.Joined, 2, "entity-2"),
+            new(
+                PartyMemberTransitionKind.Left,
+                1,
+                "entity-1",
+                PartyMemberLeaveReason.Requested),
+            new(
+                PartyMemberTransitionKind.Left,
+                2,
+                "entity-2",
+                PartyMemberLeaveReason.DeviceLostAuthentication),
+        ]);
+        var requestedOrdinals = new List<int>();
+        var configuration = new Config { InterfaceLanguage = language };
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            history: history,
+            getRemotePlayerName: remotePlayerOrdinal =>
+            {
+                requestedOrdinals.Add(remotePlayerOrdinal);
+                return remotePlayerOrdinal switch
+                {
+                    1 => "Lyria",
+                    2 => "Narmaya",
+                    _ => null,
+                };
+            },
+            readMemberTransition: () => transitions.Count == 0 ? null : transitions.Dequeue());
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        var snapshot = history.Snapshot();
+        Assert.Equal(expectedText.Split('|'), snapshot.Select(message => message.Text).ToArray());
+        Assert.All(snapshot, message =>
+        {
+            Assert.Equal(ChatMessageKind.System, message.Kind);
+            Assert.Equal(language == UiLanguage.English ? "System" : "系统", message.Sender);
+        });
+        Assert.Empty(transitions);
+        Assert.Equal([1, 2], requestedOrdinals);
+    }
+
+    [Fact]
+    public void Tick_UsesCachedJoinedNameWhenLeftResolverIsUnavailable()
+    {
+        var resolverCalls = 0;
+        var resolverAvailable = true;
+        var transitions = new Queue<PartyMemberTransition>([
+            new(PartyMemberTransitionKind.Joined, 1, "entity-1"),
+            new(
+                PartyMemberTransitionKind.Left,
+                1,
+                "entity-1",
+                PartyMemberLeaveReason.Disconnected),
+        ]);
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            history: history,
+            getRemotePlayerName: _ =>
+            {
+                resolverCalls++;
+                if (!resolverAvailable)
+                    throw new InvalidOperationException("name table unavailable");
+                return "Cached Name";
+            },
+            readMemberTransition: () =>
+            {
+                var transition = transitions.Count == 0 ? (PartyMemberTransition?)null : transitions.Dequeue();
+                if (resolverCalls == 1)
+                    resolverAvailable = false;
+                return transition;
+            });
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        Assert.Equal(1, resolverCalls);
+        Assert.Equal(
+            [
+                "Cached Name 加入了房间。",
+                "Cached Name 离开了房间，原因：连接中断。",
+            ],
+            history.Snapshot().Select(message => message.Text));
+    }
+
+    [Theory]
+    [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.Unknown, "原因未知")]
+    [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.Requested, "主动离开")]
+    [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.Disconnected, "连接中断")]
+    [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.Kicked, "被踢出房间")]
+    [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.DeviceLostAuthentication, "认证失效")]
+    [InlineData(UiLanguage.SimplifiedChinese, (int)PartyMemberLeaveReason.CreationFailed, "联机端点创建失败")]
+    [InlineData(UiLanguage.English, (int)PartyMemberLeaveReason.Unknown, "Unknown")]
+    [InlineData(UiLanguage.English, (int)PartyMemberLeaveReason.Requested, "Left voluntarily")]
+    [InlineData(UiLanguage.English, (int)PartyMemberLeaveReason.Disconnected, "Connection lost")]
+    [InlineData(UiLanguage.English, (int)PartyMemberLeaveReason.Kicked, "Kicked")]
+    [InlineData(UiLanguage.English, (int)PartyMemberLeaveReason.DeviceLostAuthentication, "Authentication lost")]
+    [InlineData(UiLanguage.English, (int)PartyMemberLeaveReason.CreationFailed, "Online endpoint creation failed")]
+    public void Tick_WritesEveryMemberLeaveReasonToHistory(
+        UiLanguage language,
+        int reasonValue,
+        string expectedReason)
+    {
+        var reason = (PartyMemberLeaveReason)reasonValue;
+        var transitions = new Queue<PartyMemberTransition>([
+            new(PartyMemberTransitionKind.Joined, 2, "entity-reason"),
+            new(PartyMemberTransitionKind.Left, 2, "entity-reason", reason),
+        ]);
+        var configuration = new Config { InterfaceLanguage = language };
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            history: history,
+            getRemotePlayerName: remotePlayerOrdinal =>
+                remotePlayerOrdinal == 2 ? "Narmaya" : null,
+            readMemberTransition: () => transitions.Count == 0 ? null : transitions.Dequeue());
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        var snapshot = history.Snapshot();
+        Assert.Equal(2, snapshot.Count);
+        Assert.All(snapshot, message => Assert.Equal(ChatMessageKind.System, message.Kind));
+        Assert.Equal(
+            language == UiLanguage.English
+                ? "Narmaya joined the room."
+                : "Narmaya 加入了房间。",
+            snapshot[0].Text);
+        Assert.Equal(
+            language == UiLanguage.English
+                ? $"Narmaya left the room. Reason: {expectedReason}."
+                : $"Narmaya 离开了房间，原因：{expectedReason}。",
+            snapshot[1].Text);
+    }
+
+    [Fact]
+    public void Tick_ConsumesEachMemberTransitionOnlyOnceWithDuplicateReaderPattern()
+    {
+        var transition = new PartyMemberTransition(PartyMemberTransitionKind.Joined, 1, "entity-1");
+        var pending = transition;
+        var returnedTransitionCount = 0;
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            history: history,
+            getRemotePlayerName: _ => "Lyria",
+            readMemberTransition: () =>
+            {
+                var current = pending;
+                pending = default;
+                if (current != default)
+                    returnedTransitionCount++;
+                return current == default ? null : current;
+            });
+        SetInitialized(peer);
+
+        peer.Tick();
+        peer.Tick();
+
+        Assert.Equal(1, returnedTransitionCount);
+        var message = Assert.Single(history.Snapshot());
+        Assert.Equal(ChatMessageKind.System, message.Kind);
+        Assert.Equal("Lyria 加入了房间。", message.Text);
+    }
+
+    [Theory]
+    [InlineData((int)PartyMemberTransitionKind.Joined, 99, null, "玩家 100 加入了房间。")]
+    [InlineData((int)PartyMemberTransitionKind.Left, 0, "", "玩家 1 离开了房间，原因：原因未知。")]
+    public void Tick_InvalidMemberTransitionDataFailsSafeWithLocalizedFallback(
+        int kindValue,
+        int remotePlayerOrdinal,
+        string? entityId,
+        string expectedText)
+    {
+        var kind = (PartyMemberTransitionKind)kindValue;
+        var transitions = new Queue<PartyMemberTransition>([
+            new(kind, remotePlayerOrdinal, entityId),
+        ]);
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            history: history,
+            getRemotePlayerName: _ => throw new InvalidOperationException("invalid input must not escape"),
+            readMemberTransition: () => transitions.Count == 0 ? null : transitions.Dequeue());
+        SetInitialized(peer);
+
+        var exception = Record.Exception(peer.Tick);
+
+        Assert.Null(exception);
+        var message = Assert.Single(history.Snapshot());
+        Assert.Equal(ChatMessageKind.System, message.Kind);
+        Assert.Equal(expectedText, message.Text);
+    }
+
+    [Fact]
+    public void Tick_ClearsMemberNameCacheWhenRoomBecomesInactive_AndDoesNotLeakAcrossRooms()
+    {
+        var onlineRoomActive = true;
+        var currentName = "Room A Name";
+        var memberTransitions = new Queue<PartyMemberTransition>([
+            new(PartyMemberTransitionKind.Joined, 1, "entity-1"),
+        ]);
+        var roomTransitions = new Queue<PartyRoomTransition>([
+            new(PartyRoomTransitionKind.Exited, PartyRoomExitReason.SelfLeft, "Room A"),
+        ]);
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            isOnlineRoomActive: () => onlineRoomActive,
+            history: history,
+            getRemotePlayerName: _ => currentName,
+            readMemberTransition: () => memberTransitions.Count == 0 ? null : memberTransitions.Dequeue(),
+            readRoomTransition: () => roomTransitions.Count == 0 ? null : roomTransitions.Dequeue());
+        SetInitialized(peer);
+
+        peer.Tick();
+        onlineRoomActive = false;
+        peer.Tick();
+        currentName = "Room B Name";
+        onlineRoomActive = true;
+        memberTransitions.Enqueue(
+            new(
+                PartyMemberTransitionKind.Left,
+                1,
+                "entity-1",
+                PartyMemberLeaveReason.Unknown));
+        peer.Tick();
+
+        var messages = history.Snapshot().Select(message => message.Text).ToArray();
+        Assert.Contains("Room A Name 加入了房间。", messages);
+        Assert.Contains("Room B Name 离开了房间，原因：原因未知。", messages);
+        Assert.DoesNotContain("Room A Name 离开了房间，原因：原因未知。", messages);
+    }
+
     [Fact]
     public void Tick_ProcessesTheSameRoomTransitionOnlyOnce()
     {
@@ -1665,6 +1921,7 @@ public sealed class ChatOverlayPeerHotkeyTests
         Func<PartyVoiceIndicatorSnapshot>? getVoiceIndicatorSnapshot = null,
         Func<PartyVoiceUiStatus>? getVoiceUiStatus = null,
         Func<string?>? getLocalPlayerName = null,
+        Func<PartyMemberTransition?>? readMemberTransition = null,
         Func<PartyRoomTransition?>? readRoomTransition = null,
         Func<int>? getEstablishedVoiceParticipantCount = null,
         Func<DateTimeOffset>? getCurrentTime = null,
@@ -1692,6 +1949,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             chatBlacklist: chatBlacklist,
             getRemotePlayerName: getRemotePlayerName,
             getVoiceIndicatorSnapshot: getVoiceIndicatorSnapshot,
+            readMemberTransition: readMemberTransition,
             readRoomTransition: readRoomTransition,
             getEstablishedVoiceParticipantCount: getEstablishedVoiceParticipantCount,
             getCurrentTime: getCurrentTime,

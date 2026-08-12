@@ -301,6 +301,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             },
             getRemotePlayerName: playerNumber => $"Remote {playerNumber}");
         SetInitialized(peer);
+        SetPrivateField(peer, "_statusText", "existing bottom status");
 
         peer.Tick();
 
@@ -315,7 +316,121 @@ public sealed class ChatOverlayPeerHotkeyTests
         var startedTalkers = Assert.IsType<HashSet<int>>(
             GetPrivateField<HashSet<int>>(peer, "_talkingRemotePlayers"));
         Assert.Equal([3], startedTalkers);
-        Assert.Contains("Remote 3", GetPrivateField<string>(peer, "_statusText"));
+        Assert.Equal("existing bottom status", GetPrivateField<string>(peer, "_statusText"));
+    }
+
+    [Fact]
+    public void VoiceTalkers_NormalizeRemoteNamesInOrderAndDeduplicate()
+    {
+        using var peer = CreatePeer(
+            new Config { InterfaceLanguage = UiLanguage.SimplifiedChinese },
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            getVoiceUiStatus: () => new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            getVoiceIndicatorSnapshot: () => new PartyVoiceIndicatorSnapshot(
+                true,
+                [],
+                [],
+                [3, 1, 3, 0, 4, 2]),
+            getRemotePlayerName: playerNumber => $"Remote {playerNumber}");
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        var talkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            GetPrivateField<PartyVoiceIndicatorSnapshot>(peer, "_voiceIndicatorSnapshot")!);
+        var presentation = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            UiLanguage.SimplifiedChinese,
+            talkers);
+
+        Assert.Equal(["Remote 1", "Remote 2", "Remote 3"], talkers);
+        Assert.Equal("[语音] Remote 1、Remote 2、Remote 3 正在说话", presentation.Text);
+    }
+
+    [Fact]
+    public void VoiceTalkers_AddLocalOnlyWhenNativeStateIsSpeaking()
+    {
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getLocalPlayerName: () => "Kuro");
+        var snapshot = new PartyVoiceIndicatorSnapshot(true, [], [], []);
+
+        var readyTalkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            snapshot);
+        var speakingTalkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            snapshot);
+
+        Assert.Empty(readyTalkers);
+        Assert.Equal(["Kuro"], speakingTalkers);
+    }
+
+    [Fact]
+    public void VoiceTalkers_PutLocalBeforeRemoteAndFallbackWhenLocalNameFails()
+    {
+        using var peer = CreatePeer(
+            new Config { InterfaceLanguage = UiLanguage.English },
+            new RecordingTransport(),
+            getLocalPlayerName: () => throw new InvalidOperationException("local name failure"),
+            getRemotePlayerName: playerNumber => $"Remote {playerNumber}");
+        var snapshot = new PartyVoiceIndicatorSnapshot(true, [], [], [2]);
+
+        var talkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            snapshot);
+        var presentation = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            UiLanguage.English,
+            talkers);
+
+        Assert.Equal(["You", "Remote 2"], talkers);
+        Assert.Equal("[Voice] You, Remote 2 speaking", presentation.Text);
+    }
+
+    [Fact]
+    public void VoiceTalkers_EmptyLocalNameFallsBackToChineseSelfLabel()
+    {
+        using var peer = CreatePeer(
+            new Config { InterfaceLanguage = UiLanguage.SimplifiedChinese },
+            new RecordingTransport(),
+            getLocalPlayerName: () => " ");
+
+        var talkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            new PartyVoiceIndicatorSnapshot(true, [], [], []));
+
+        Assert.Equal(["你"], talkers);
+    }
+
+    [Fact]
+    public void VoiceTalkers_DoNotConsumeInvalidOrNonReadySnapshotTalkers()
+    {
+        using var peer = CreatePeer(
+            new Config(),
+            new RecordingTransport(),
+            getRemotePlayerName: playerNumber => $"Remote {playerNumber}");
+        var validSnapshot = new PartyVoiceIndicatorSnapshot(true, [], [], [1]);
+
+        var nonReadyTalkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.WaitingForPeer),
+            validSnapshot);
+        var invalidTalkers = ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            PartyVoiceIndicatorSnapshot.Unavailable);
+
+        Assert.Empty(nonReadyTalkers);
+        Assert.Empty(invalidTalkers);
     }
 
     [Fact]
@@ -355,6 +470,10 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.False(cachedSnapshot!.IsValid);
         Assert.Empty(Assert.IsType<HashSet<int>>(
             GetPrivateField<HashSet<int>>(peer, "_talkingRemotePlayers")));
+        Assert.Empty(ResolveVoiceTalkerNames(
+            peer,
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            cachedSnapshot));
         Assert.Single(logs, line =>
             line.Contains(
                 "Voice indicator membership snapshot lookup failed",
@@ -1544,6 +1663,8 @@ public sealed class ChatOverlayPeerHotkeyTests
         ChatHistory? history = null,
         Func<int, string?>? getRemotePlayerName = null,
         Func<PartyVoiceIndicatorSnapshot>? getVoiceIndicatorSnapshot = null,
+        Func<PartyVoiceUiStatus>? getVoiceUiStatus = null,
+        Func<string?>? getLocalPlayerName = null,
         Func<PartyRoomTransition?>? readRoomTransition = null,
         Func<int>? getEstablishedVoiceParticipantCount = null,
         Func<DateTimeOffset>? getCurrentTime = null,
@@ -1555,7 +1676,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             () => configuration,
             isOnlineRoomActive ?? (() => false),
             () => { },
-            () => PartyVoiceUiStatus.Unavailable,
+            getVoiceUiStatus ?? (() => PartyVoiceUiStatus.Unavailable),
             (_, _, _, _) => Array.Empty<PartyHudAnchor>(),
             getPlayerMuteSlots ?? (() => Array.Empty<PartyPlayerMuteSlotStatus>()),
             setPlayerMuted ?? ((_, _) => new PartyPlayerMuteOperationResult(false, string.Empty)),
@@ -1575,7 +1696,8 @@ public sealed class ChatOverlayPeerHotkeyTests
             getEstablishedVoiceParticipantCount: getEstablishedVoiceParticipantCount,
             getCurrentTime: getCurrentTime,
             createWindowVoicePushToTalkGate: createWindowVoicePushToTalkGate,
-            isWindowKeyDown: isWindowKeyDown);
+            isWindowKeyDown: isWindowKeyDown,
+            getLocalPlayerName: getLocalPlayerName);
 
     private static void SetInitialized(ChatOverlayPeer peer) =>
         typeof(ChatOverlayPeer)
@@ -1586,6 +1708,19 @@ public sealed class ChatOverlayPeerHotkeyTests
         (T?)typeof(ChatOverlayPeer)
             .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(peer);
+
+    private static void SetPrivateField<T>(ChatOverlayPeer peer, string name, T value) =>
+        typeof(ChatOverlayPeer)
+            .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(peer, value);
+
+    private static IReadOnlyList<string> ResolveVoiceTalkerNames(
+        ChatOverlayPeer peer,
+        PartyVoiceUiStatus status,
+        PartyVoiceIndicatorSnapshot snapshot) =>
+        (IReadOnlyList<string>)typeof(ChatOverlayPeer)
+            .GetMethod("ResolveVoiceTalkerNames", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(peer, [status, snapshot])!;
 
     private static void PressAndRelease(ChatOverlayPeer peer, char key)
     {

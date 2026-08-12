@@ -40,4 +40,55 @@ public sealed class VoiceOverlayPresenterTests
 
         Assert.Equal("[Voice] Ready", presentation.Text);
     }
+
+    [Fact]
+    public void Create_ReadyWithoutTalkersKeepsReadyText()
+    {
+        var presentation = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            UiLanguage.SimplifiedChinese,
+            []);
+
+        Assert.Equal("[语音] 已就绪", presentation.Text);
+    }
+
+    [Fact]
+    public void Create_FormatsRemoteTalkersInSelectedLanguage()
+    {
+        var talkers = new[] { "Narmaya", "Vaseraga" };
+
+        var chinese = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            UiLanguage.SimplifiedChinese,
+            talkers);
+        var english = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Ready),
+            UiLanguage.English,
+            talkers);
+
+        Assert.Equal("[语音] Narmaya、Vaseraga 正在说话", chinese.Text);
+        Assert.Equal("[Voice] Narmaya, Vaseraga speaking", english.Text);
+    }
+
+    [Fact]
+    public void Create_FormatsLocalAndRemoteTalkersWithLocalFirst()
+    {
+        var presentation = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            UiLanguage.SimplifiedChinese,
+            ["Kuro", "Narmaya"]);
+
+        Assert.Equal("[语音] Kuro、Narmaya 正在说话", presentation.Text);
+    }
+
+    [Fact]
+    public void Create_SpeakingWithoutTalkersKeepsTransmittingText()
+    {
+        var presentation = VoiceOverlayPresenter.Create(
+            new PartyVoiceUiStatus(PartyVoiceUiState.Speaking),
+            UiLanguage.English,
+            []);
+
+        Assert.Equal("[Voice] Transmitting", presentation.Text);
+    }
 }

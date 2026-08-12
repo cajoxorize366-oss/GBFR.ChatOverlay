@@ -64,6 +64,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly ChatBlacklist _chatBlacklist;
     private readonly Func<int?> _getHostPlayerNumber;
     private readonly Func<int, string?> _getRemotePlayerName;
+    private readonly Func<string?> _getLocalPlayerName;
     private readonly Func<PartyVoiceIndicatorSnapshot> _getVoiceIndicatorSnapshot;
     private readonly Func<PartyRoomTransition?> _readRoomTransition;
     private readonly Func<int> _getEstablishedVoiceParticipantCount;
@@ -183,7 +184,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Func<int>? getEstablishedVoiceParticipantCount = null,
         Func<DateTimeOffset>? getCurrentTime = null,
         Func<Action<bool>, VoicePushToTalkSafetyGate>? createWindowVoicePushToTalkGate = null,
-        Func<int, bool>? isWindowKeyDown = null)
+        Func<int, bool>? isWindowKeyDown = null,
+        Func<string?>? getLocalPlayerName = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -212,6 +214,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
         _getHostPlayerNumber = getHostPlayerNumber ?? (() => null);
         _getRemotePlayerName = getRemotePlayerName ?? (_ => null);
+        _getLocalPlayerName = getLocalPlayerName ?? (() => null);
         _getVoiceIndicatorSnapshot = getVoiceIndicatorSnapshot ??
             (() => PartyVoiceIndicatorSnapshot.Unavailable);
         _readRoomTransition = readRoomTransition ?? (() => null);
@@ -449,26 +452,49 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             .Where(static playerNumber => playerNumber is >= 1 and <= 3)
             .Distinct()
             .ToHashSet();
-        var started = current
-            .Where(playerNumber => !_talkingRemotePlayers.Contains(playerNumber))
-            .OrderBy(static playerNumber => playerNumber)
-            .ToArray();
         _talkingRemotePlayers.Clear();
         _talkingRemotePlayers.UnionWith(current);
-        if (started.Length == 0)
-            return;
-
-        _statusText = string.Join(
-            Environment.NewLine,
-            started.Select(FormatRemotePlayerSpeaking));
     }
 
-    private string FormatRemotePlayerSpeaking(int remotePlayerNumber)
+    private string ResolveLocalPlayerName()
     {
-        var playerName = ResolveRemotePlayerName(remotePlayerNumber);
-        return T(
-            $"玩家 {remotePlayerNumber}：{playerName} 正在开语音。",
-            $"Player {remotePlayerNumber}: {playerName} is speaking.");
+        try
+        {
+            var playerName = _getLocalPlayerName()?.Trim();
+            if (!string.IsNullOrWhiteSpace(playerName))
+                return playerName;
+        }
+        catch (Exception exception)
+        {
+            LogSafely(
+                $"Local player name lookup failed; using the localized self label: " +
+                $"{exception.GetType().Name}: {exception.Message}.");
+        }
+
+        return T("你", "You");
+    }
+
+    private IReadOnlyList<string> ResolveVoiceTalkerNames(
+        PartyVoiceUiStatus voiceUiStatus,
+        PartyVoiceIndicatorSnapshot snapshot)
+    {
+        if (!snapshot.IsValid ||
+            voiceUiStatus.State is not (PartyVoiceUiState.Ready or PartyVoiceUiState.Speaking))
+        {
+            return Array.Empty<string>();
+        }
+
+        var remoteTalkers = NormalizeVoiceIndicatorPlayers(snapshot.TalkingRemotePlayers);
+        var talkerNames = new List<string>(remoteTalkers.Count + 1);
+        if (voiceUiStatus.State == PartyVoiceUiState.Speaking)
+            talkerNames.Add(ResolveLocalPlayerName());
+
+        foreach (var remotePlayerNumber in remoteTalkers)
+            talkerNames.Add(ResolveRemotePlayerName(remotePlayerNumber));
+
+        return talkerNames.Count == 0
+            ? Array.Empty<string>()
+            : Array.AsReadOnly(talkerNames.ToArray());
     }
 
     internal void ObserveNativeInputSnapshot(DirectInputBrokerSnapshot snapshot)
@@ -1301,6 +1327,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             var onlineRoomActive = IsOnlineRoomActive();
             var voiceUiStatus = _getVoiceUiStatus();
             var voiceIndicatorSnapshot = Volatile.Read(ref _voiceIndicatorSnapshot);
+            var voiceTalkerNames = ResolveVoiceTalkerNames(voiceUiStatus, voiceIndicatorSnapshot);
             if (configuration.EnableOverlay)
                 DrawTransientRoomNotice(configuration);
             if (configuration.EnableVoiceIndicators &&
@@ -1365,14 +1392,24 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             {
                 ResetChatInteractionState();
                 if (settingsOpen)
-                    DrawChatWindow(configuration, openedThisFrame: false, voiceUiStatus, editMode: true);
+                    DrawChatWindow(
+                        configuration,
+                        openedThisFrame: false,
+                        voiceUiStatus,
+                        voiceTalkerNames,
+                        editMode: true);
                 return;
             }
 
             if (settingsOpen)
             {
                 ResetChatInteractionState();
-                DrawChatWindow(configuration, openedThisFrame: false, voiceUiStatus, editMode: true);
+                DrawChatWindow(
+                    configuration,
+                    openedThisFrame: false,
+                    voiceUiStatus,
+                    voiceTalkerNames,
+                    editMode: true);
                 return;
             }
 
@@ -1406,7 +1443,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 _composerStatusText = null;
             }
 
-            DrawChatWindow(configuration, openedThisFrame, voiceUiStatus, editMode: false);
+            DrawChatWindow(
+                configuration,
+                openedThisFrame,
+                voiceUiStatus,
+                voiceTalkerNames,
+                editMode: false);
         }
         catch (Exception exception)
         {
@@ -1462,6 +1504,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Config configuration,
         bool openedThisFrame,
         PartyVoiceUiStatus voiceUiStatus,
+        IReadOnlyList<string> voiceTalkerNames,
         bool editMode)
     {
         var viewport = ImGui.GetMainViewport();
@@ -1483,7 +1526,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (presentation == ChatOverlayPresentationMode.Hidden)
             return;
 
-        var voicePresentation = VoiceOverlayPresenter.Create(voiceUiStatus, CurrentLanguage);
+        var voicePresentation = VoiceOverlayPresenter.Create(
+            voiceUiStatus,
+            CurrentLanguage,
+            voiceTalkerNames);
         var voiceText = voicePresentation.IsVisible ? voicePresentation.Text : null;
         var imeCandidateText = composerOpen
             ? GetImeCandidateFallbackText(configuration.EnableImeCandidateFallback)
@@ -1541,7 +1587,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ImGui.SetWindowFontScale(fontScale);
             if (presentation == ChatOverlayPresentationMode.Full)
             {
-                DrawVoiceStatus(voiceUiStatus);
+                DrawVoiceStatus(voiceUiStatus, voiceTalkerNames);
                 DrawHistory(configuration, composerOpen, imeCandidateText);
                 if (composerOpen)
                     DrawComposer(
@@ -1556,7 +1602,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             else
             {
                 if (voicePresentation.IsVisible)
-                    DrawVoiceStatus(voiceUiStatus);
+                    DrawVoiceStatus(voiceUiStatus, voiceTalkerNames);
                 DrawComposer(
                     openedThisFrame,
                     imeCandidateText,
@@ -3030,9 +3076,14 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         return (uint)red | ((uint)green << 8) | ((uint)blue << 16) | (a << 24);
     }
 
-    private void DrawVoiceStatus(PartyVoiceUiStatus voiceUiStatus)
+    private void DrawVoiceStatus(
+        PartyVoiceUiStatus voiceUiStatus,
+        IReadOnlyList<string> voiceTalkerNames)
     {
-        var presentation = VoiceOverlayPresenter.Create(voiceUiStatus, CurrentLanguage);
+        var presentation = VoiceOverlayPresenter.Create(
+            voiceUiStatus,
+            CurrentLanguage,
+            voiceTalkerNames);
         if (!presentation.IsVisible)
             return;
 

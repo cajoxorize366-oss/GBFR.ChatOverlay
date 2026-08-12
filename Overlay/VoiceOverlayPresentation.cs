@@ -9,8 +9,24 @@ internal static class VoiceOverlayPresenter
 {
     public static VoiceOverlayPresentation Create(
         PartyVoiceUiStatus status,
-        UiLanguage language = UiLanguage.SimplifiedChinese) =>
-        status.State switch
+        UiLanguage language = UiLanguage.SimplifiedChinese,
+        IReadOnlyList<string>? talkerNames = null)
+    {
+        if (status.State is (PartyVoiceUiState.Ready or PartyVoiceUiState.Speaking) &&
+            talkerNames is { Count: > 0 })
+        {
+            var names = string.Join(
+                language == UiLanguage.SimplifiedChinese ? "、" : ", ",
+                talkerNames);
+            return new(
+                true,
+                T(
+                    language,
+                    $"[语音] {names} 正在说话",
+                    $"[Voice] {names} speaking"));
+        }
+
+        return status.State switch
         {
             PartyVoiceUiState.Disabled => new(false, string.Empty),
             PartyVoiceUiState.Unavailable =>
@@ -37,6 +53,7 @@ internal static class VoiceOverlayPresenter
                 new(true, T(language, "[语音] 已静音", "[Voice] Muted")),
             _ => new(true, T(language, "[语音] 状态未知", "[Voice] Unknown state")),
         };
+    }
 
     private static string T(UiLanguage language, string chinese, string english) =>
         UiLocalization.Select(language, chinese, english);

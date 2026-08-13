@@ -32,7 +32,6 @@ public sealed class QuickActionConfigurationTests
             OpenChatKeyboardBinding = string.Empty,
             SettingsMenuKeyboardBinding = string.Empty,
             PushToTalkKeyboardBinding = string.Empty,
-            QuickActionsKeyboardBinding = string.Empty,
         };
 
         var snapshot = HotkeyConfigurationSnapshot.Create(configuration);

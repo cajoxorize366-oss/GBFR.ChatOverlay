@@ -20,8 +20,6 @@ internal sealed class HotkeyConfigurationSnapshot
         ControllerBinding settingsController,
         KeyboardBinding pushToTalkKeyboard,
         ControllerBinding pushToTalkController,
-        KeyboardBinding quickActionsKeyboard,
-        ControllerBinding quickActionsController,
         KeyboardBinding globalMuteKeyboard,
         ControllerBinding globalMuteController,
         IReadOnlyList<ConfiguredRemotePlayerChatMute> remotePlayerChatMutes,
@@ -35,8 +33,6 @@ internal sealed class HotkeyConfigurationSnapshot
         SettingsController = settingsController;
         PushToTalkKeyboard = pushToTalkKeyboard;
         PushToTalkController = pushToTalkController;
-        QuickActionsKeyboard = quickActionsKeyboard;
-        QuickActionsController = quickActionsController;
         GlobalMuteKeyboard = globalMuteKeyboard;
         GlobalMuteController = globalMuteController;
         RemotePlayerChatMutes = remotePlayerChatMutes;
@@ -51,8 +47,6 @@ internal sealed class HotkeyConfigurationSnapshot
     internal ControllerBinding SettingsController { get; }
     internal KeyboardBinding PushToTalkKeyboard { get; }
     internal ControllerBinding PushToTalkController { get; }
-    internal KeyboardBinding QuickActionsKeyboard { get; }
-    internal ControllerBinding QuickActionsController { get; }
     internal KeyboardBinding GlobalMuteKeyboard { get; }
     internal ControllerBinding GlobalMuteController { get; }
     internal IReadOnlyList<ConfiguredRemotePlayerChatMute> RemotePlayerChatMutes { get; }
@@ -68,8 +62,6 @@ internal sealed class HotkeyConfigurationSnapshot
         var settingsController = ParseController(configuration.SettingsMenuControllerBinding);
         var pushToTalkKeyboard = ParseKeyboard(configuration.PushToTalkKeyboardBinding);
         var pushToTalkController = ParseController(configuration.PushToTalkControllerBinding);
-        var quickActionsKeyboard = ParseKeyboard(configuration.QuickActionsKeyboardBinding);
-        var quickActionsController = ParseController(configuration.QuickActionsControllerBinding);
         var globalMuteKeyboard = ParseKeyboard(configuration.GlobalMuteKeyboardBinding);
         var globalMuteController = ParseController(configuration.GlobalMuteControllerBinding);
         ConfiguredRemotePlayerChatMute[] remotePlayerChatMutes =
@@ -91,12 +83,11 @@ internal sealed class HotkeyConfigurationSnapshot
             .DistinctBy(action => action.Id, StringComparer.Ordinal)
             .ToArray();
 
-        var nativeBindings = new List<DirectInputHotkeyBinding>(9 + quickActions.Length);
+        var nativeBindings = new List<DirectInputHotkeyBinding>(8 + quickActions.Length);
         AddNativeBinding(nativeBindings, openChatKeyboard, ActivationPolicy);
         AddNativeBinding(nativeBindings, settingsKeyboard, SettingsPolicy);
         AddNativeBinding(nativeBindings, EmergencySettingsKeyboard, SettingsPolicy);
         AddNativeBinding(nativeBindings, pushToTalkKeyboard, PushToTalkPolicy);
-        AddNativeBinding(nativeBindings, quickActionsKeyboard, QuickActionsPolicy);
         AddNativeBinding(nativeBindings, globalMuteKeyboard, QuickActionsPolicy);
         foreach (var remotePlayerChatMute in remotePlayerChatMutes)
             AddNativeBinding(nativeBindings, remotePlayerChatMute.Keyboard, QuickActionsPolicy);
@@ -114,8 +105,6 @@ internal sealed class HotkeyConfigurationSnapshot
             configuration.SettingsMenuControllerBinding,
             configuration.PushToTalkKeyboardBinding,
             configuration.PushToTalkControllerBinding,
-            configuration.QuickActionsKeyboardBinding,
-            configuration.QuickActionsControllerBinding,
             configuration.GlobalMuteKeyboardBinding,
             configuration.GlobalMuteControllerBinding,
             configuration.RemotePlayer1ChatMuteKeyboardBinding,
@@ -134,8 +123,6 @@ internal sealed class HotkeyConfigurationSnapshot
             settingsController,
             pushToTalkKeyboard,
             pushToTalkController,
-            quickActionsKeyboard,
-            quickActionsController,
             globalMuteKeyboard,
             globalMuteController,
             remotePlayerChatMutes,

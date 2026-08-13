@@ -163,6 +163,46 @@ public sealed class DirectInputBrokerTests
             DirectInputBrokerPolicy.SuppressQuickActions,
             backend.PolicyRequests.Select(policy => policy & DirectInputBrokerPolicy.SuppressQuickActions));
         Assert.Contains(("stamp-thanks", true), reports);
+
+        backend.Snapshot = CreateSnapshot(sequence: 2);
+        hook.Poll();
+
+        Assert.Equal([("stamp-thanks", true), ("stamp-thanks", false)], reports);
+    }
+
+    [Fact]
+    public void Poll_WithoutConfiguredQuickActionsDoesNotEnableQuickActionSuppression()
+    {
+        var backend = new FakeDirectInputBrokerBackend();
+        var reports = new List<(string Id, bool Pressed)>();
+        var configuration = new Config
+        {
+            EnableOverlay = true,
+        };
+        using var hook = CreateHook(
+            backend,
+            canActivate: () => true,
+            settingsAvailable: () => true,
+            getConfiguration: () => configuration,
+            reportQuickAction: (id, pressed) => reports.Add((id, pressed)));
+
+        hook.Initialize();
+        hook.Poll();
+        backend.Snapshot = CreateSnapshot(sequence: 1, 0x19); // DIK_P
+        hook.Poll();
+
+        Assert.DoesNotContain(
+            backend.PolicyRequests,
+            policy => (policy & DirectInputBrokerPolicy.SuppressQuickActions) != 0);
+        Assert.Empty(reports);
+    }
+
+    [Fact]
+    public void Hook_NoLongerModelsQuickActionsPanelCallback()
+    {
+        Assert.Null(typeof(DirectInputKeyboardHook).GetField(
+            "_reportQuickActionsMenuKey",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance));
     }
 
     [Fact]

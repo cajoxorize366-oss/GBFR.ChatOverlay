@@ -21,7 +21,6 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private readonly Func<Config> _getConfiguration;
     private readonly Func<long> _getConfigurationRevision;
     private readonly Action<DirectInputBrokerSnapshot> _observeInputSnapshot;
-    private readonly Action<bool> _reportQuickActionsMenuKey;
     private readonly Action<string, bool> _reportQuickActionKey;
     private readonly Action<bool> _reportGlobalMuteKey;
     private readonly Action<int, bool> _reportRemotePlayerChatMuteKey;
@@ -39,7 +38,6 @@ public sealed class DirectInputKeyboardHook : IDisposable
     private HotkeyConfigurationSnapshot? _hotkeys;
     private bool _activationWasDown;
     private bool _settingsWasDown;
-    private bool _quickActionsWasDown;
     private bool _bindingReleasePending = true;
     private readonly Dictionary<string, bool> _quickActionWasDown = new(StringComparer.Ordinal);
     private bool _globalMuteWasDown;
@@ -93,7 +91,6 @@ public sealed class DirectInputKeyboardHook : IDisposable
         Func<Config>? getConfiguration = null,
         Func<long>? getConfigurationRevision = null,
         Action<DirectInputBrokerSnapshot>? observeInputSnapshot = null,
-        Action<bool>? reportQuickActionsMenuKey = null,
         Action<string, bool>? reportQuickActionKey = null,
         Action<bool>? reportGlobalMuteKey = null,
         Action<int, bool>? reportRemotePlayerChatMuteKey = null)
@@ -113,7 +110,6 @@ public sealed class DirectInputKeyboardHook : IDisposable
         _getConfiguration = getConfiguration ?? (() => new Config());
         _getConfigurationRevision = getConfigurationRevision ?? (() => 0L);
         _observeInputSnapshot = observeInputSnapshot ?? (_ => { });
-        _reportQuickActionsMenuKey = reportQuickActionsMenuKey ?? (_ => { });
         _reportQuickActionKey = reportQuickActionKey ?? ((_, _) => { });
         _reportGlobalMuteKey = reportGlobalMuteKey ?? (_ => { });
         _reportRemotePlayerChatMuteKey = reportRemotePlayerChatMuteKey ?? ((_, _) => { });
@@ -210,17 +206,13 @@ public sealed class DirectInputKeyboardHook : IDisposable
 
                 var officialActionsAvailable = settingsAvailable && configuration.EnableOverlay;
                 var customActionsAvailable = officialActionsAvailable;
-                var quickActionsPanelAvailable = officialActionsAvailable || customActionsAvailable;
-                var quickActionsAvailable =
-                    (quickActionsPanelAvailable &&
-                     (hotkeys.QuickActionsKeyboard.IsBound || hotkeys.QuickActionsController.IsBound)) ||
-                    hotkeys.QuickActions.Any(action =>
-                        action.Enabled &&
-                        action.IsConfigured &&
-                        (action.Kind == QuickActionKind.CustomText
-                            ? customActionsAvailable
-                            : officialActionsAvailable) &&
-                        action.Keyboard.IsBound);
+                var quickActionsAvailable = hotkeys.QuickActions.Any(action =>
+                    action.Enabled &&
+                    action.IsConfigured &&
+                    (action.Kind == QuickActionKind.CustomText
+                        ? customActionsAvailable
+                        : officialActionsAvailable) &&
+                    action.Keyboard.IsBound);
                 var globalMuteAvailable = canActivate &&
                     (hotkeys.GlobalMuteKeyboard.IsBound || hotkeys.GlobalMuteController.IsBound);
                 var remotePlayerChatMuteAvailable = canActivate &&
@@ -304,16 +296,6 @@ public sealed class DirectInputKeyboardHook : IDisposable
                 if (activationDown && !_activationWasDown)
                     _tryActivate();
                 _activationWasDown = activationDown;
-
-                var quickActionsDown = quickActionsPanelAvailable &&
-                    !captureKeyboard &&
-                    HotkeyConfigurationSnapshot.IsPressed(
-                        keyboardSnapshot,
-                        hotkeys.QuickActionsKeyboard,
-                        hotkeys.QuickActionsController);
-                if (quickActionsDown != _quickActionsWasDown)
-                    _reportQuickActionsMenuKey(quickActionsDown);
-                _quickActionsWasDown = quickActionsDown;
 
                 ProcessQuickActionBindings(
                     keyboardSnapshot,
@@ -501,11 +483,8 @@ public sealed class DirectInputKeyboardHook : IDisposable
     {
         if (_settingsWasDown)
             _reportSettingsMenuKey(false);
-        if (_quickActionsWasDown)
-            _reportQuickActionsMenuKey(false);
         _activationWasDown = false;
         _settingsWasDown = false;
-        _quickActionsWasDown = false;
         foreach (var pressedAction in _quickActionWasDown.Where(item => item.Value))
             _reportQuickActionKey(pressedAction.Key, false);
         _quickActionWasDown.Clear();

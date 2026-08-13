@@ -371,7 +371,6 @@ public sealed class Mod : IDisposable
                 () => Volatile.Read(ref _configuration),
                 () => Volatile.Read(ref _configurationRevision),
                 _overlay.ObserveNativeInputSnapshot,
-                _overlay.ObserveQuickActionsMenuKey,
                 _overlay.ObserveQuickActionKey,
                 _overlay.ObserveGlobalMuteKey,
                 _overlay.ObserveRemotePlayerChatMuteKey);

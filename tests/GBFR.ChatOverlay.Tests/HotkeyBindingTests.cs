@@ -112,7 +112,6 @@ public sealed class HotkeyBindingTests
             OpenChatKeyboardBinding = "X",
             SettingsMenuKeyboardBinding = "Ctrl+F10",
             PushToTalkKeyboardBinding = "U",
-            QuickActionsKeyboardBinding = "Q",
             GlobalMuteKeyboardBinding = "M",
             GlobalMuteControllerBinding = "LB+X",
             QuickActions =
@@ -128,7 +127,13 @@ public sealed class HotkeyBindingTests
 
         var snapshot = HotkeyConfigurationSnapshot.Create(configuration);
 
-        Assert.Equal(6, snapshot.NativeBindings.Length);
+        Assert.NotEmpty(snapshot.NativeBindings);
+        Assert.Null(typeof(HotkeyConfigurationSnapshot).GetProperty(
+            "QuickActionsKeyboard",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance));
+        Assert.Null(typeof(HotkeyConfigurationSnapshot).GetProperty(
+            "QuickActionsController",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance));
         Assert.Single(snapshot.QuickActions);
         Assert.Equal("Alt+1", snapshot.QuickActions[0].Keyboard.Format());
         Assert.Equal("M", snapshot.GlobalMuteKeyboard.Format());

@@ -17,7 +17,7 @@ internal sealed class ChatModerationService : IChatModerationService
     private Dictionary<string, PlayerState> _players = new(StringComparer.Ordinal);
     private Dictionary<string, int> _ruleHitCounts = new(StringComparer.Ordinal);
     private OfficialTextFilterStatus _officialFilterStatus;
-    private ChatModerationEvent? _pendingEvent;
+    private readonly Queue<ChatModerationEvent> _pendingEvents = new();
     private int _sessionFilteredMessageCount;
 
     internal ChatModerationService(
@@ -35,10 +35,21 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
+            var previousPersistentBlocked = _persistentBlocked;
             _configuration = CloneConfiguration(configuration);
             _persistentBlocked = new HashSet<string>(
                 _configuration.BlockedPlayers.Select(static player => player.Identity),
                 StringComparer.Ordinal);
+
+            foreach (var entityId in previousPersistentBlocked)
+            {
+                if (_persistentBlocked.Contains(entityId))
+                    continue;
+
+                var removedKey = "entity:" + entityId;
+                _roomBlockedKeys.Remove(removedKey);
+                _autoBlockedKeys.Remove(removedKey);
+            }
         }
     }
 
@@ -63,11 +74,18 @@ internal sealed class ChatModerationService : IChatModerationService
 
             if (_configuration.UseSteamTextFilter && _officialFilter is not null)
             {
-                var officialResult = _officialFilter.Filter(customMaskedText);
-                if (officialResult.Succeeded)
+                try
                 {
-                    officialText = officialResult.Text;
-                    officialMatched = officialResult.Matched;
+                    var officialResult = _officialFilter.Filter(customMaskedText);
+                    if (officialResult.Succeeded)
+                    {
+                        officialText = officialResult.Text;
+                        officialMatched = officialResult.Matched;
+                    }
+                }
+                catch (Exception)
+                {
+                    officialMatched = false;
                 }
             }
 
@@ -110,6 +128,17 @@ internal sealed class ChatModerationService : IChatModerationService
         lock (_sync)
         {
             ObserveParticipantCore(participant);
+        }
+    }
+
+    public void ForgetParticipant(in ChatModerationParticipant participant)
+    {
+        lock (_sync)
+        {
+            if (!TryGetStableIdentityKey(participant, out var key))
+                return;
+
+            _players.Remove(key);
         }
     }
 
@@ -182,14 +211,13 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
-            if (_pendingEvent is null)
+            if (_pendingEvents.Count == 0)
             {
                 moderationEvent = default;
                 return false;
             }
 
-            moderationEvent = _pendingEvent.Value;
-            _pendingEvent = null;
+            moderationEvent = _pendingEvents.Dequeue();
             return true;
         }
     }
@@ -209,7 +237,7 @@ internal sealed class ChatModerationService : IChatModerationService
             var players = _players.Values
                 .Select(state => new ChatModerationPlayerStatus(
                     state.Participant,
-                    state.WindowHitCount,
+                    state.WindowHits.Count,
                     state.LastHitAt,
                     IsRoomBlockedCore(state.Participant),
                     IsPersistentlyBlockedCore(state.Participant)))
@@ -229,8 +257,23 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
-            _officialFilterStatus = _officialFilter?.Refresh()
-                ?? OfficialTextFilterStatus.Unavailable("No official text filter configured.");
+            if (_officialFilter is null)
+            {
+                _officialFilterStatus =
+                    OfficialTextFilterStatus.Unavailable("No official text filter configured.");
+                return _officialFilterStatus;
+            }
+
+            try
+            {
+                _officialFilterStatus = _officialFilter.Refresh();
+            }
+            catch (Exception exception)
+            {
+                _officialFilterStatus = OfficialTextFilterStatus.Unavailable(
+                    $"Official text filter refresh failed: {exception.Message}");
+            }
+
             return _officialFilterStatus;
         }
     }
@@ -255,11 +298,18 @@ internal sealed class ChatModerationService : IChatModerationService
 
             if (_configuration.UseSteamTextFilter && _officialFilter is not null)
             {
-                var officialResult = _officialFilter.Filter(customMaskedText);
-                if (officialResult.Succeeded)
+                try
                 {
-                    officialText = officialResult.Text;
-                    officialMatched = officialResult.Matched;
+                    var officialResult = _officialFilter.Filter(customMaskedText);
+                    if (officialResult.Succeeded)
+                    {
+                        officialText = officialResult.Text;
+                        officialMatched = officialResult.Matched;
+                    }
+                }
+                catch (Exception)
+                {
+                    officialMatched = false;
                 }
             }
 
@@ -292,7 +342,7 @@ internal sealed class ChatModerationService : IChatModerationService
             _players.Clear();
             _roomBlockedKeys.Clear();
             _autoBlockedKeys.Clear();
-            _pendingEvent = null;
+            _pendingEvents.Clear();
             _ruleHitCounts.Clear();
             _sessionFilteredMessageCount = 0;
         }
@@ -347,7 +397,9 @@ internal sealed class ChatModerationService : IChatModerationService
 
     private void ObserveParticipantCore(ChatModerationParticipant participant)
     {
-        var key = GetIdentityKey(participant);
+        if (!TryGetStableIdentityKey(participant, out var key))
+            return;
+
         if (_players.TryGetValue(key, out var existing))
         {
             existing.Participant = participant;
@@ -418,12 +470,12 @@ internal sealed class ChatModerationService : IChatModerationService
         }
 
         var window = TimeSpan.FromMinutes(_configuration.AutoBlockWindowMinutes);
-        var hitCount = state.LastHitAt is { } lastHit &&
-                       receivedAt - lastHit <= window
-            ? state.WindowHitCount + 1
-            : 1;
-        state.WindowHitCount = hitCount;
+        while (state.WindowHits.Count > 0 && receivedAt - state.WindowHits.Peek() > window)
+            state.WindowHits.Dequeue();
+
+        state.WindowHits.Enqueue(receivedAt);
         state.LastHitAt = receivedAt;
+        var hitCount = state.WindowHits.Count;
 
         if (hitCount < _configuration.AutoBlockThreshold)
             return false;
@@ -433,16 +485,13 @@ internal sealed class ChatModerationService : IChatModerationService
 
         _roomBlockedKeys.Add(key);
         _autoBlockedKeys.Add(key);
-        if (_pendingEvent is null)
-        {
-            _pendingEvent = new ChatModerationEvent(
-                participant,
-                hitCount,
-                _configuration.AutoBlockThreshold,
-                receivedAt,
-                participant.HasPersistentIdentity);
-            eventQueued = true;
-        }
+        _pendingEvents.Enqueue(new ChatModerationEvent(
+            participant,
+            hitCount,
+            _configuration.AutoBlockThreshold,
+            receivedAt,
+            participant.HasPersistentIdentity));
+        eventQueued = true;
 
         return true;
     }
@@ -496,7 +545,7 @@ internal sealed class ChatModerationService : IChatModerationService
 
                 ranges.Add((index, index + normalizedTerm.Length));
                 ruleMatched = true;
-                searchStart = index + normalizedTerm.Length;
+                searchStart = index + 1;
             }
 
             if (ruleMatched)
@@ -606,14 +655,6 @@ internal sealed class ChatModerationService : IChatModerationService
         return count;
     }
 
-    private static string GetIdentityKey(ChatModerationParticipant participant)
-    {
-        if (TryGetStableIdentityKey(participant, out var stableKey))
-            return stableKey;
-
-        return "display:" + (participant.DisplayName ?? string.Empty);
-    }
-
     private static bool TryGetStableIdentityKey(
         ChatModerationParticipant participant,
         out string key)
@@ -643,7 +684,7 @@ internal sealed class ChatModerationService : IChatModerationService
     private sealed class PlayerState
     {
         public ChatModerationParticipant Participant;
-        public int WindowHitCount;
+        public Queue<DateTimeOffset> WindowHits { get; } = new();
         public DateTimeOffset? LastHitAt;
     }
 }

@@ -67,6 +67,20 @@ public sealed class ChatModerationServiceTests
     }
 
     [Fact]
+    public void Evaluate_SameRuleOverlappingOccurrencesAllMasked()
+    {
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "r1", Term = "aa" }));
+
+        var decision = Evaluate(service, Remote("remote"), "aaa");
+
+        Assert.Equal("***", decision.Text);
+        Assert.Equal(["r1"], decision.MatchedRuleIds);
+        Assert.Equal(1, service.GetSnapshot().SessionFilteredMessageCount);
+    }
+
+    [Fact]
     public void Evaluate_HideEntireMessageReturnsBlock()
     {
         var configuration = CreateConfiguration(
@@ -120,6 +134,47 @@ public sealed class ChatModerationServiceTests
     }
 
     [Fact]
+    public void OfficialFilter_FilterExceptionFailsOpenWithoutLosingCustomMasking()
+    {
+        var official = new ThrowingOfficialFilter(throwOnFilter: true);
+        var service = new ChatModerationService(official);
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.UseSteamTextFilter = true;
+        service.ApplyConfiguration(configuration);
+
+        var matched = Evaluate(service, Remote("remote"), "bad");
+
+        Assert.Equal(ChatModerationDisposition.Mask, matched.Disposition);
+        Assert.Equal("***", matched.Text);
+        Assert.True(matched.Matched);
+        Assert.False(matched.OfficialFilterMatched);
+        Assert.Equal(1, service.GetSnapshot().SessionFilteredMessageCount);
+
+        var clean = Evaluate(service, Remote("remote"), "clean");
+
+        Assert.Equal(ChatModerationDisposition.Allow, clean.Disposition);
+        Assert.Equal("clean", clean.Text);
+        Assert.False(clean.Matched);
+        Assert.False(clean.OfficialFilterMatched);
+        Assert.Equal(1, service.GetSnapshot().SessionFilteredMessageCount);
+    }
+
+    [Fact]
+    public void OfficialFilter_RefreshExceptionReturnsUnavailableAndStoresStatus()
+    {
+        var official = new ThrowingOfficialFilter(throwOnRefresh: true);
+        var service = new ChatModerationService(official);
+
+        var status = service.RefreshOfficialFilter();
+
+        Assert.Equal(OfficialTextFilterState.Unavailable, status.State);
+        Assert.Equal(
+            OfficialTextFilterState.Unavailable,
+            service.GetSnapshot().OfficialFilter.State);
+    }
+
+    [Fact]
     public void Evaluate_CountsMessageAndRulesOncePerMessage()
     {
         var configuration = CreateConfiguration(
@@ -164,6 +219,33 @@ public sealed class ChatModerationServiceTests
     }
 
     [Fact]
+    public void AutoBlock_UsesSlidingWindowInsteadOfLastHitCount()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 3;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+
+        Evaluate(service, Remote("remote"), "bad", Start);
+        Evaluate(service, Remote("remote"), "bad", Start.AddMinutes(9));
+        var nearThreshold = Evaluate(service, Remote("remote"), "bad", Start.AddMinutes(18));
+
+        Assert.False(nearThreshold.AutoBlocked);
+        Assert.False(service.IsBlocked(Remote("remote")));
+        Assert.False(service.TryReadEvent(out _));
+
+        var threshold = Evaluate(service, Remote("remote"), "bad", Start.AddMinutes(19));
+
+        Assert.True(threshold.AutoBlocked);
+        Assert.True(service.IsBlocked(Remote("remote")));
+        Assert.True(service.TryReadEvent(out var moderationEvent));
+        Assert.Equal(3, moderationEvent.HitCount);
+    }
+
+    [Fact]
     public void AutoBlock_ThresholdBlocksOnceAndQueuesSingleEvent()
     {
         var configuration = CreateConfiguration(
@@ -186,6 +268,56 @@ public sealed class ChatModerationServiceTests
         Assert.False(service.TryReadEvent(out _));
         Assert.Equal(ChatModerationDisposition.Block, after.Disposition);
         Assert.True(service.IsBlocked(Remote("remote")));
+    }
+
+    [Fact]
+    public void AutoBlock_QueuesFifoEventsForDistinctParticipants()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var first = Remote("entity-first");
+        var second = Remote("entity-second");
+
+        Evaluate(service, first, "bad", Start);
+        Evaluate(service, first, "bad", Start.AddMinutes(1));
+        Evaluate(service, second, "bad", Start.AddMinutes(2));
+        Evaluate(service, second, "bad", Start.AddMinutes(3));
+
+        Assert.True(service.TryReadEvent(out var firstEvent));
+        Assert.Equal("entity-first", firstEvent.Participant.EntityId);
+        Assert.True(service.TryReadEvent(out var secondEvent));
+        Assert.Equal("entity-second", secondEvent.Participant.EntityId);
+        Assert.False(service.TryReadEvent(out _));
+        Assert.True(service.IsBlocked(first));
+        Assert.True(service.IsBlocked(second));
+    }
+
+    [Fact]
+    public void ClearRoom_DiscardsUnreadEvents()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var first = Remote("entity-first");
+        var second = Remote("entity-second");
+
+        Evaluate(service, first, "bad", Start);
+        Evaluate(service, first, "bad", Start.AddMinutes(1));
+        Evaluate(service, second, "bad", Start.AddMinutes(2));
+        Evaluate(service, second, "bad", Start.AddMinutes(3));
+
+        service.ClearRoom();
+
+        Assert.False(service.TryReadEvent(out _));
     }
 
     [Fact]
@@ -246,6 +378,62 @@ public sealed class ChatModerationServiceTests
     }
 
     [Fact]
+    public void ObserveParticipant_DoesNotStoreOrCoalesceByNameWithoutStableIdentity()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var anonymous = new ChatModerationParticipant(0, "Ghost", EntityId: null, SenderId: 0);
+
+        service.ObserveParticipant(anonymous);
+
+        Assert.Empty(service.GetSnapshot().Players);
+
+        var first = Evaluate(service, anonymous, "bad", Start);
+        var second = Evaluate(service, anonymous, "bad", Start.AddMinutes(1));
+
+        Assert.False(first.AutoBlocked);
+        Assert.False(second.AutoBlocked);
+        Assert.False(service.IsBlocked(anonymous));
+        Assert.Empty(service.GetSnapshot().Players);
+        Assert.False(service.TryReadEvent(out _));
+    }
+
+    [Fact]
+    public void ForgetParticipant_RemovesOnlyThatPlayerAndKeepsPersistentBlockAndPendingEvents()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var forgotten = Remote("entity-forgotten");
+        var retained = Remote("entity-retained");
+
+        Evaluate(service, forgotten, "bad", Start);
+        Evaluate(service, forgotten, "bad", Start.AddMinutes(1));
+        Evaluate(service, retained, "bad", Start.AddMinutes(2));
+
+        Assert.True(service.SetBlocked(forgotten, true, persistent: true));
+        service.ForgetParticipant(forgotten);
+
+        var players = service.GetSnapshot().Players;
+        Assert.DoesNotContain(
+            "entity-forgotten",
+            players.Select(player => player.Participant.EntityId));
+        Assert.Single(players, player => player.Participant.EntityId == "entity-retained");
+        Assert.True(service.IsBlocked(forgotten));
+        Assert.True(service.TryReadEvent(out var moderationEvent));
+        Assert.Equal("entity-forgotten", moderationEvent.Participant.EntityId);
+    }
+
+    [Fact]
     public void ApplyConfiguration_DeepCopiesAndAppliesBlockedPlayersImmediately()
     {
         var service = new ChatModerationService();
@@ -262,6 +450,43 @@ public sealed class ChatModerationServiceTests
 
         service.ApplyConfiguration(new ChatFilterConfiguration { Enabled = false });
         Assert.False(service.IsBlocked(Remote("entity-1")));
+    }
+
+    [Fact]
+    public void ApplyConfiguration_RemovingPersistentEntityRemovesRoomAndAutoBlock()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+
+        Evaluate(service, Remote("entity-1"), "bad", Start);
+        var threshold = Evaluate(service, Remote("entity-1"), "bad", Start.AddMinutes(1));
+
+        Assert.True(threshold.AutoBlocked);
+        Assert.True(service.IsBlocked(Remote("entity-1")));
+
+        var persisted = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        persisted.AutoBlockEnabled = true;
+        persisted.AutoBlockThreshold = 2;
+        persisted.AutoBlockWindowMinutes = 10;
+        persisted.BlockedPlayers.Add(Blocked("entity-1"));
+        service.ApplyConfiguration(persisted);
+        Assert.True(service.IsBlocked(Remote("entity-1")));
+
+        service.ApplyConfiguration(CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" }));
+
+        Assert.False(service.IsBlocked(Remote("entity-1")));
+        var player = Assert.Single(
+            service.GetSnapshot().Players,
+            status => status.Participant.EntityId == "entity-1");
+        Assert.False(player.IsRoomBlocked);
+        Assert.False(player.IsPersistentlyBlocked);
     }
 
     [Fact]
@@ -391,6 +616,39 @@ public sealed class ChatModerationServiceTests
         {
             Inputs.Add(text);
             return _result;
+        }
+    }
+
+    private sealed class ThrowingOfficialFilter : IOfficialTextFilter
+    {
+        private readonly bool _throwOnFilter;
+        private readonly bool _throwOnRefresh;
+
+        public ThrowingOfficialFilter(
+            bool throwOnFilter = false,
+            bool throwOnRefresh = false)
+        {
+            _throwOnFilter = throwOnFilter;
+            _throwOnRefresh = throwOnRefresh;
+        }
+
+        public OfficialTextFilterStatus Status =>
+            new(OfficialTextFilterState.Ready, "ready");
+
+        public OfficialTextFilterStatus Refresh()
+        {
+            if (_throwOnRefresh)
+                throw new InvalidOperationException("refresh failed");
+
+            return Status;
+        }
+
+        public OfficialTextFilterResult Filter(string text)
+        {
+            if (_throwOnFilter)
+                throw new InvalidOperationException("filter failed");
+
+            return new OfficialTextFilterResult(text, 0, true);
         }
     }
 }

@@ -168,6 +168,48 @@ public sealed class RelinkChatPacketDecoderTests
         Assert.False(RelinkChatPacketDecoder.TryDecode(packet, DateTimeOffset.UtcNow, out _));
     }
 
+    [Fact]
+    public void TryWriteRawText_RewritesOnlyTheMessageBuffer()
+    {
+        var packet = CreatePacket("original", "Djeeta", 0x1234, 7, 9);
+        var beforePrefix = packet.AsSpan(0, 0x1C).ToArray();
+        var beforeSuffix = packet.AsSpan(0x17C).ToArray();
+
+        Assert.True(RelinkChatPacketDecoder.TryWriteRawText(packet, "中***文"));
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var decoded));
+        Assert.Equal("中***文", decoded.Text);
+        Assert.Equal(beforePrefix, packet.AsSpan(0, 0x1C).ToArray());
+        Assert.Equal(beforeSuffix, packet.AsSpan(0x17C).ToArray());
+        var rewrittenByteCount = Encoding.UTF8.GetByteCount("中***文");
+        Assert.All(packet.AsSpan(0x1C + rewrittenByteCount, 0x160 - rewrittenByteCount).ToArray(),
+            value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public void TryWriteRawText_RejectsNonRawOversizedAndInvalidUtf16WithoutMutation()
+    {
+        var nonRaw = CreatePacket("original", "Djeeta", 1, 0, 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(nonRaw.AsSpan(0x17C, 4), 0x12345678);
+        var nonRawBefore = nonRaw.ToArray();
+        Assert.False(RelinkChatPacketDecoder.TryWriteRawText(nonRaw, "masked"));
+        Assert.Equal(nonRawBefore, nonRaw);
+
+        var oversized = CreatePacket("original", "Djeeta", 1, 0, 0);
+        var oversizedBefore = oversized.ToArray();
+        Assert.False(RelinkChatPacketDecoder.TryWriteRawText(
+            oversized,
+            new string('a', RelinkChatPacketDecoder.MaximumMessageBytes + 1)));
+        Assert.Equal(oversizedBefore, oversized);
+
+        var invalidUtf16 = CreatePacket("original", "Djeeta", 1, 0, 0);
+        var invalidBefore = invalidUtf16.ToArray();
+        Assert.False(RelinkChatPacketDecoder.TryWriteRawText(invalidUtf16, "\uD800"));
+        Assert.Equal(invalidBefore, invalidUtf16);
+    }
+
     private static byte[] CreatePacket(
         string text,
         string sender,

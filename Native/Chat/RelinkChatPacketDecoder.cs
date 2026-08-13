@@ -30,6 +30,44 @@ public static class RelinkChatPacketDecoder
         return true;
     }
 
+    internal static bool TryWriteRawText(Span<byte> packet, string? text)
+    {
+        if (packet.Length < PacketBytesToCopy ||
+            string.IsNullOrWhiteSpace(text) ||
+            text.IndexOf('\0') >= 0 ||
+            BinaryPrimitives.ReadUInt32LittleEndian(
+                packet.Slice(MessageHashOffset, sizeof(uint))) != RawTextHash)
+        {
+            return false;
+        }
+
+        int byteCount;
+        try
+        {
+            byteCount = StrictUtf8.GetByteCount(text);
+        }
+        catch (EncoderFallbackException)
+        {
+            return false;
+        }
+
+        if (byteCount > MaximumMessageBytes)
+            return false;
+
+        var messageBuffer = packet.Slice(MessageOffset, MessageBufferSize);
+        messageBuffer.Clear();
+        try
+        {
+            var written = StrictUtf8.GetBytes(text, messageBuffer);
+            return written == byteCount;
+        }
+        catch (EncoderFallbackException)
+        {
+            messageBuffer.Clear();
+            return false;
+        }
+    }
+
     internal static bool TryDecodeOutgoingText(ReadOnlySpan<byte> encoded, out string text)
     {
         text = string.Empty;

@@ -106,6 +106,8 @@ internal interface IChatModerationService
 
     ChatModerationDecision Evaluate(in ChatModerationInput input);
 
+    void ObserveParticipant(in ChatModerationParticipant participant);
+
     bool SetBlocked(in ChatModerationParticipant participant, bool blocked, bool persistent);
 
     bool IsBlocked(in ChatModerationParticipant participant);

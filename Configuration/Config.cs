@@ -276,6 +276,9 @@ public class Config : Configurable<Config>
     public List<QuickActionConfiguration> QuickActions { get; set; } = [];
 
     [Browsable(false)]
+    public ChatFilterConfiguration ChatFilter { get; set; } = new();
+
+    [Browsable(false)]
     [DefaultValue(-1.0)]
     public double OverlayPositionXRatio { get; set; } = -1.0;
 

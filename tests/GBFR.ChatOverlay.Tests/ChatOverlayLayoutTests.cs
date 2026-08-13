@@ -181,6 +181,41 @@ public sealed class ChatOverlayLayoutTests
     }
 
     [Fact]
+    public void ResolveResizeHandleHitRect_AnchorsLargeTargetToBottomRight()
+    {
+        var rect = new ChatOverlayRect(100, 200, 560, 260);
+
+        var hitRect = ChatOverlayLayout.ResolveResizeHandleHitRect(
+            rect,
+            ChatOverlayLayout.ResizeHandleHitSize,
+            ChatOverlayLayout.ResizeHandleTopClearance);
+
+        Assert.Equal(604.0f, hitRect.X);
+        Assert.Equal(404.0f, hitRect.Y);
+        Assert.Equal(56.0f, hitRect.Width);
+        Assert.Equal(56.0f, hitRect.Height);
+        Assert.Equal(rect.X + rect.Width, hitRect.X + hitRect.Width);
+        Assert.Equal(rect.Y + rect.Height, hitRect.Y + hitRect.Height);
+    }
+
+    [Fact]
+    public void ResolveResizeHandleHitRect_PreservesTopMoveAreaInCompactMode()
+    {
+        var rect = new ChatOverlayRect(100, 200, 560, 58);
+
+        var hitRect = ChatOverlayLayout.ResolveResizeHandleHitRect(
+            rect,
+            ChatOverlayLayout.ResizeHandleHitSize,
+            ChatOverlayLayout.ResizeHandleTopClearance);
+
+        Assert.Equal(604.0f, hitRect.X);
+        Assert.Equal(228.0f, hitRect.Y);
+        Assert.Equal(56.0f, hitRect.Width);
+        Assert.Equal(30.0f, hitRect.Height);
+        Assert.Equal(rect.Y + ChatOverlayLayout.ResizeHandleTopClearance, hitRect.Y);
+    }
+
+    [Fact]
     public void ToRatios_RoundTripsEditedPosition()
     {
         var rect = new ChatOverlayRect(420, 310, 500, 250);

@@ -3151,6 +3151,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         float workHeight,
         bool compactPresentation)
     {
+        var resizeHovered = false;
+        var resizeActive = false;
         ImGui.BeginDisabled(!_mouseInteractionGate.IsArmed);
         try
         {
@@ -3173,13 +3175,28 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 ImGui.ResetMouseDragDelta(0);
             }
 
+            var resizeInteractionRect = ChatOverlayLayout.ResolveResizeHandleHitRect(
+                rect,
+                OverlayUiScale.Scale(ChatOverlayLayout.ResizeHandleHitSize),
+                OverlayUiScale.Scale(ChatOverlayLayout.ResizeHandleTopClearance));
             using var resizePosition = CreateVector2(
-                rect.X + rect.Width - 30.0f,
-                rect.Y + rect.Height - 30.0f);
-            using var resizeSize = CreateVector2(30.0f, 30.0f);
+                resizeInteractionRect.X,
+                resizeInteractionRect.Y);
+            using var resizeSize = CreateVector2(
+                resizeInteractionRect.Width,
+                resizeInteractionRect.Height);
             ImGui.SetCursorScreenPos(resizePosition);
             _ = ImGui.InvisibleButton("##GBFRResizeChat", resizeSize, 0);
-            if (ImGui.IsItemActive() && ImGui.IsMouseDragging(0, 0.0f))
+            resizeHovered = _mouseInteractionGate.IsArmed && ImGui.IsItemHovered(0);
+            resizeActive = _mouseInteractionGate.IsArmed && ImGui.IsItemActive();
+            if (resizeHovered || resizeActive)
+            {
+                ImGui.SetMouseCursor((int)(compactPresentation
+                    ? ImGuiMouseCursor.ResizeEW
+                    : ImGuiMouseCursor.ResizeNWSE));
+            }
+
+            if (resizeActive && ImGui.IsMouseDragging(0, 0.0f))
             {
                 using var delta = CreateVector2(0.0f, 0.0f);
                 ImGui.GetMouseDragDelta(delta, 0, 0.0f);
@@ -3209,15 +3226,52 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         using var topLeft = CreateVector2(rect.X + 5.0f, rect.Y + 4.0f);
         using var topRight = CreateVector2(rect.X + rect.Width - 34.0f, rect.Y + 4.0f);
         ImGui.ImDrawListAddLine(drawList, topLeft, topRight, PackColor(105, 224, 255, 0.75f), 2.0f);
-        using var triangleTop = CreateVector2(rect.X + rect.Width - 5.0f, rect.Y + rect.Height - 25.0f);
-        using var triangleCorner = CreateVector2(rect.X + rect.Width - 5.0f, rect.Y + rect.Height - 5.0f);
-        using var triangleLeft = CreateVector2(rect.X + rect.Width - 25.0f, rect.Y + rect.Height - 5.0f);
+
+        var resizeVisualHitRect = ChatOverlayLayout.ResolveResizeHandleHitRect(
+            rect,
+            OverlayUiScale.Scale(ChatOverlayLayout.ResizeHandleHitSize),
+            OverlayUiScale.Scale(ChatOverlayLayout.ResizeHandleTopClearance));
+        var gripInset = OverlayUiScale.Scale(ChatOverlayLayout.ResizeHandleInset);
+        var gripSize = Math.Max(
+            1.0f,
+            Math.Min(
+                OverlayUiScale.Scale(ChatOverlayLayout.ResizeHandleGripSize),
+                Math.Min(resizeVisualHitRect.Width, resizeVisualHitRect.Height) - gripInset));
+        var gripCornerX = rect.X + rect.Width - gripInset;
+        var gripCornerY = rect.Y + rect.Height - gripInset;
+        var gripAlpha = resizeActive ? 1.0f : resizeHovered ? 0.95f : 0.78f;
+        var fillAlpha = resizeActive ? 0.30f : resizeHovered ? 0.18f : 0.07f;
+        using var triangleTop = CreateVector2(gripCornerX, gripCornerY - gripSize);
+        using var triangleCorner = CreateVector2(gripCornerX, gripCornerY);
+        using var triangleLeft = CreateVector2(gripCornerX - gripSize, gripCornerY);
         ImGui.ImDrawListAddTriangleFilled(
             drawList,
             triangleTop,
             triangleCorner,
             triangleLeft,
-            PackColor(105, 224, 255, 0.92f));
+            PackColor(105, 224, 255, fillAlpha));
+
+        var gripColor = PackColor(105, 224, 255, gripAlpha);
+        var gripThickness = OverlayUiScale.Scale(resizeActive ? 3.0f : 2.0f);
+        for (var index = 0; index < 3; index++)
+        {
+            var length = OverlayUiScale.Scale(9.0f + index * 7.0f);
+            using var diagonalStart = CreateVector2(gripCornerX - length, gripCornerY);
+            using var diagonalEnd = CreateVector2(gripCornerX, gripCornerY - length);
+            ImGui.ImDrawListAddLine(drawList, diagonalStart, diagonalEnd, gripColor, gripThickness);
+        }
+
+        if (resizeHovered || resizeActive)
+        {
+            var edgeInset = OverlayUiScale.Scale(2.0f);
+            var highlightColor = PackColor(105, 224, 255, resizeActive ? 0.95f : 0.72f);
+            using var bottomStart = CreateVector2(resizeVisualHitRect.X, rect.Y + rect.Height - edgeInset);
+            using var bottomEnd = CreateVector2(rect.X + rect.Width - edgeInset, rect.Y + rect.Height - edgeInset);
+            using var rightStart = CreateVector2(rect.X + rect.Width - edgeInset, resizeVisualHitRect.Y);
+            using var rightEnd = CreateVector2(rect.X + rect.Width - edgeInset, rect.Y + rect.Height - edgeInset);
+            ImGui.ImDrawListAddLine(drawList, bottomStart, bottomEnd, highlightColor, gripThickness);
+            ImGui.ImDrawListAddLine(drawList, rightStart, rightEnd, highlightColor, gripThickness);
+        }
     }
 
     private string DescribeSelfTest(LocalMicrophoneMonitorState state) => state switch

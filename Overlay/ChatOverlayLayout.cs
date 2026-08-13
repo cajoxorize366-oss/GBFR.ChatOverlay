@@ -17,6 +17,10 @@ internal static class ChatOverlayLayout
     internal const float MinimumHeight = 160.0f;
     internal const float DefaultInset = 24.0f;
     internal const float ComposerReservedHeight = 58.0f;
+    internal const float ResizeHandleHitSize = 56.0f;
+    internal const float ResizeHandleGripSize = 28.0f;
+    internal const float ResizeHandleInset = 6.0f;
+    internal const float ResizeHandleTopClearance = 28.0f;
 
     internal static ChatOverlayPresentationMode ResolvePresentation(
         bool compactMode,
@@ -192,6 +196,21 @@ internal static class ChatOverlayLayout
             Math.Min(MinimumWidth, maximumWidth),
             Math.Min(1_200.0f, maximumWidth));
         return rect with { Width = width };
+    }
+
+    internal static ChatOverlayRect ResolveResizeHandleHitRect(
+        ChatOverlayRect rect,
+        float hitSize,
+        float topClearance)
+    {
+        var width = Math.Min(Math.Max(1.0f, hitSize), Math.Max(1.0f, rect.Width));
+        var availableHeight = Math.Max(1.0f, rect.Height - Math.Max(0.0f, topClearance));
+        var height = Math.Min(Math.Max(1.0f, hitSize), availableHeight);
+        return new ChatOverlayRect(
+            rect.X + rect.Width - width,
+            rect.Y + rect.Height - height,
+            width,
+            height);
     }
 
     internal static (double XRatio, double YRatio) ToRatios(

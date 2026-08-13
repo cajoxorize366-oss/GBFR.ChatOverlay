@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using GBFR.ChatOverlay.Core;
 
@@ -9,6 +9,8 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
     private const int ChatFilterContext = 2;
     private const ulong SourceSteamId = 0;
     private const uint FilterOptions = 0;
+    private const int MaxInputUtf8Bytes = 2_048;
+    private const int MaxOutputUtf8Bytes = checked((MaxInputUtf8Bytes * 3) + 1);
 
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
@@ -97,6 +99,11 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
             return new OfficialTextFilterResult(string.Empty, 0, false);
         }
 
+        if (text.Length > MaxInputUtf8Bytes)
+        {
+            return FailOpen(text);
+        }
+
         lock (_sync)
         {
             if (_exports is null)
@@ -114,7 +121,7 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
                 return FailOpen(text);
             }
 
-            if (inputBytes.Length == int.MaxValue)
+            if (inputBytes.Length > MaxInputUtf8Bytes)
             {
                 return FailOpen(text);
             }
@@ -124,14 +131,18 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
                 return FailOpen(text);
             }
 
-            var outputCapacity = inputBytes.Length + 1;
+            var outputCapacity = checked((inputBytes.Length * 3) + 1);
+            if (outputCapacity > MaxOutputUtf8Bytes)
+            {
+                return FailOpen(text);
+            }
+
             var inputPointer = IntPtr.Zero;
             var outputPointer = IntPtr.Zero;
 
             try
             {
-                inputPointer = Marshal.AllocHGlobal(
-                    inputBytes.Length == 0 ? 1 : inputBytes.Length);
+                inputPointer = Marshal.AllocHGlobal(inputBytes.Length + 1);
                 Marshal.Copy(inputBytes, 0, inputPointer, inputBytes.Length);
                 Marshal.WriteByte(inputPointer, inputBytes.Length, 0);
 
@@ -217,11 +228,15 @@ internal static class SteamOfficialTextFilterBindings
     private static readonly string[] LibraryNames = ["steam_api64.dll", "steam_api.dll"];
     private static readonly object NativeSync = new();
     private static SteamOfficialTextFilterExports? _cachedExports;
+    // Keep exactly one successful Steam API library load alive for the process;
+    // the cached delegates point into it.
+    private static nint _retainedLibraryHandle;
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate nint GetSteamUtilsDelegate();
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
     private delegate bool InitFilterTextDelegate(nint utils, uint filterOptions);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -238,14 +253,14 @@ internal static class SteamOfficialTextFilterBindings
 
     internal static SteamOfficialTextFilterExports? ResolveNative()
     {
-        if (_cachedExports is not null)
+        if (_cachedExports is not null || _retainedLibraryHandle != IntPtr.Zero)
         {
             return _cachedExports;
         }
 
         lock (NativeSync)
         {
-            if (_cachedExports is not null)
+            if (_cachedExports is not null || _retainedLibraryHandle != IntPtr.Zero)
             {
                 return _cachedExports;
             }
@@ -281,6 +296,7 @@ internal static class SteamOfficialTextFilterBindings
                     SteamUtilsV010Export);
                 if (getUtilsAddress == IntPtr.Zero)
                 {
+                    NativeLibrary.Free(libraryHandle);
                     continue;
                 }
 
@@ -290,6 +306,7 @@ internal static class SteamOfficialTextFilterBindings
                 var utils = getUtils();
                 if (utils == IntPtr.Zero)
                 {
+                    NativeLibrary.Free(libraryHandle);
                     continue;
                 }
 
@@ -301,6 +318,7 @@ internal static class SteamOfficialTextFilterBindings
                     FilterTextExport);
                 if (initAddress == IntPtr.Zero || filterAddress == IntPtr.Zero)
                 {
+                    NativeLibrary.Free(libraryHandle);
                     continue;
                 }
 
@@ -311,6 +329,7 @@ internal static class SteamOfficialTextFilterBindings
                     Marshal.GetDelegateForFunctionPointer<FilterTextDelegate>(
                         filterAddress);
 
+                _retainedLibraryHandle = libraryHandle;
                 return new SteamOfficialTextFilterExports(
                     options => init(utils, options),
                     (context, source, input, output, capacity) =>
@@ -318,7 +337,7 @@ internal static class SteamOfficialTextFilterBindings
             }
             catch
             {
-                continue;
+                NativeLibrary.Free(libraryHandle);
             }
         }
 

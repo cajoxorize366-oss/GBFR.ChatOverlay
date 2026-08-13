@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Native;
@@ -35,7 +35,29 @@ public sealed class SteamOfficialTextFilterTests
         var call = Assert.Single(calls);
         Assert.Equal(2, call.Context);
         Assert.Equal(0UL, call.Source);
-        Assert.Equal(Encoding.UTF8.GetByteCount("hello") + 1, call.Capacity);
+        Assert.Equal(Encoding.UTF8.GetByteCount("hello") * 3 + 1, call.Capacity);
+    }
+
+    [Fact]
+    public void Filter_EmptyStringReturnsPassthrough()
+    {
+        var filter = CreateFilter(new SteamOfficialTextFilterExports(
+            _ => true,
+            (_, _, input, output, capacity) =>
+            {
+                Assert.Equal(1, (int)capacity);
+                Assert.Equal(string.Empty, ReadCString(input, 1));
+                WriteCString(output, string.Empty, 1);
+                return 0;
+            }));
+        filter.Refresh();
+
+        var result = filter.Filter(string.Empty);
+
+        Assert.True(result.Succeeded);
+        Assert.False(result.Matched);
+        Assert.Equal(string.Empty, result.Text);
+        Assert.Equal(0, result.FilteredCharacterCount);
     }
 
     [Fact]
@@ -124,6 +146,64 @@ public sealed class SteamOfficialTextFilterTests
         Assert.False(result.Matched);
         Assert.Equal(input, result.Text);
         Assert.Equal(0, result.FilteredCharacterCount);
+    }
+
+    [Fact]
+    public void Filter_AsciiInputCanExpandToSameCountThreeByteUtf8Replacement()
+    {
+        var expected = ChineseText(Ni, Hao);
+        var filter = CreateFilter(new SteamOfficialTextFilterExports(
+            _ => true,
+            (_, _, input, output, capacity) =>
+            {
+                Assert.Equal("ab", ReadCString(input, (int)capacity));
+                WriteCString(output, expected, (int)capacity);
+                return expected.Length;
+            }));
+        filter.Refresh();
+
+        var result = filter.Filter("ab");
+
+        Assert.True(result.Succeeded);
+        Assert.True(result.Matched);
+        Assert.Equal(expected, result.Text);
+        Assert.Equal(expected.Length, result.FilteredCharacterCount);
+    }
+
+    [Fact]
+    public void Filter_RepeatedCallsReadExactNulTerminatedInput()
+    {
+        const string expectedInput = "repeated";
+        var expectedInputByteCount = Encoding.UTF8.GetByteCount(expectedInput) + 1;
+        var observedInputs = new List<string>();
+        var filter = CreateFilter(new SteamOfficialTextFilterExports(
+            _ => true,
+            (_, _, input, output, capacity) =>
+            {
+                var inputBytes = new byte[expectedInputByteCount];
+                Marshal.Copy(input, inputBytes, 0, expectedInputByteCount);
+                var observedInput = new UTF8Encoding(false, true).GetString(
+                    inputBytes,
+                    0,
+                    expectedInputByteCount - 1);
+                Assert.Equal(expectedInput, observedInput);
+                Assert.Equal((byte)0, inputBytes[expectedInputByteCount - 1]);
+                observedInputs.Add(observedInput);
+                CopyCString(input, output, (int)capacity);
+                return 0;
+            }));
+        filter.Refresh();
+
+        for (var i = 0; i < 1000; i++)
+        {
+            var result = filter.Filter(expectedInput);
+            Assert.True(result.Succeeded);
+            Assert.False(result.Matched);
+            Assert.Equal(expectedInput, result.Text);
+        }
+
+        Assert.Equal(1000, observedInputs.Count);
+        Assert.All(observedInputs, input => Assert.Equal(expectedInput, input));
     }
 
     [Fact]
@@ -244,6 +324,30 @@ public sealed class SteamOfficialTextFilterTests
 
         Assert.False(result.Succeeded);
         Assert.Equal(inputWithNul, result.Text);
+    }
+
+    [Fact]
+    public void Filter_InputOverFixedMaximum_FailsOpenWithoutNativeCall()
+    {
+        var nativeCalls = 0;
+        var filter = CreateFilter(new SteamOfficialTextFilterExports(
+            _ => true,
+            (_, _, input, output, capacity) =>
+            {
+                nativeCalls++;
+                CopyCString(input, output, (int)capacity);
+                return 0;
+            }));
+        filter.Refresh();
+
+        var oversized = new string('a', 2048 + 1);
+        var result = filter.Filter(oversized);
+
+        Assert.False(result.Succeeded);
+        Assert.False(result.Matched);
+        Assert.Equal(oversized, result.Text);
+        Assert.Equal(0, result.FilteredCharacterCount);
+        Assert.Equal(0, nativeCalls);
     }
 
     [Fact]

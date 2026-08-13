@@ -18,6 +18,7 @@ internal static class ChatCommunicationCueClassifier
         if (!normalized.StartsWith(MachineCuePrefix.AsSpan(), StringComparison.OrdinalIgnoreCase))
             return false;
 
+        communicationCue = ChatCommunicationCue.Official;
         if (normalized.Equals("vo_CMM_chance".AsSpan(), StringComparison.OrdinalIgnoreCase))
             communicationCue = ChatCommunicationCue.LinkAttack;
         else if (normalized.Equals("vo_CMM_thanks".AsSpan(), StringComparison.OrdinalIgnoreCase))

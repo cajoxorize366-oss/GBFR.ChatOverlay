@@ -8,6 +8,13 @@ internal static class ChatModerationSettingsPresentation
 {
     internal const int IdentityDisplayLength = 12;
 
+    internal static void EnsureMutableCollections(ChatFilterConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        configuration.Rules ??= [];
+        configuration.BlockedPlayers ??= [];
+    }
+
     internal static string FormatNotification(
         string? template,
         string? playerName,
@@ -27,10 +34,11 @@ internal static class ChatModerationSettingsPresentation
         if (string.IsNullOrWhiteSpace(selectedTemplate))
             selectedTemplate = ChatFilterConfiguration.DefaultNotificationTemplate;
 
-        var formatted = selectedTemplate
-            .Replace("{player}", player, StringComparison.Ordinal)
-            .Replace("{count}", Math.Max(0, count).ToString(), StringComparison.Ordinal)
-            .Replace("{threshold}", Math.Max(0, threshold).ToString(), StringComparison.Ordinal);
+        var formatted = ExpandTemplate(
+            selectedTemplate,
+            player,
+            Math.Max(0, count).ToString(),
+            Math.Max(0, threshold).ToString());
         return SanitizeSingleLine(formatted, normalizedLength).Trim();
     }
 
@@ -70,20 +78,20 @@ internal static class ChatModerationSettingsPresentation
         var source = value ?? string.Empty;
         var builder = new StringBuilder(Math.Min(source.Length, normalizedLength));
         var previousWasCarriageReturn = false;
-        var runeCount = 0;
+        var utf8ByteCount = 0;
 
         foreach (var rune in source.EnumerateRunes())
         {
             if (rune.Value == 0)
                 continue;
-            if (runeCount >= normalizedLength)
-                break;
 
             if (rune.Value == '\r')
             {
+                if (utf8ByteCount >= normalizedLength)
+                    break;
                 builder.Append(' ');
                 previousWasCarriageReturn = true;
-                runeCount++;
+                utf8ByteCount++;
                 continue;
             }
 
@@ -91,16 +99,54 @@ internal static class ChatModerationSettingsPresentation
             {
                 if (!previousWasCarriageReturn)
                 {
+                    if (utf8ByteCount >= normalizedLength)
+                        break;
                     builder.Append(' ');
-                    runeCount++;
+                    utf8ByteCount++;
                 }
                 previousWasCarriageReturn = false;
                 continue;
             }
 
+            if (utf8ByteCount + rune.Utf8SequenceLength > normalizedLength)
+                break;
             builder.Append(rune.ToString());
             previousWasCarriageReturn = false;
-            runeCount++;
+            utf8ByteCount += rune.Utf8SequenceLength;
+        }
+
+        return builder.ToString();
+    }
+
+    private static string ExpandTemplate(
+        string template,
+        string player,
+        string count,
+        string threshold)
+    {
+        var builder = new StringBuilder(template.Length + player.Length);
+        for (var index = 0; index < template.Length;)
+        {
+            if (template.AsSpan(index).StartsWith("{player}"))
+            {
+                builder.Append(player);
+                index += "{player}".Length;
+            }
+            else if (template.AsSpan(index).StartsWith("{count}"))
+            {
+                builder.Append(count);
+                index += "{count}".Length;
+            }
+            else if (template.AsSpan(index).StartsWith("{threshold}"))
+            {
+                builder.Append(threshold);
+                index += "{threshold}".Length;
+            }
+            else
+            {
+                builder.Append(template[index]);
+                index++;
+            }
         }
 
         return builder.ToString();

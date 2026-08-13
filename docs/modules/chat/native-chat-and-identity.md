@@ -10,6 +10,7 @@ Primary sources:
 - `Native/Chat/RelinkChatBridge.cs`
 - `Native/Chat/RelinkChatPacketDecoder.cs`
 - `Native/Chat/RelinkChatMessageAttribution.cs`
+- `Native/Chat/RelinkIncomingChatModerationPolicy.cs`
 - `Native/Identity/RelinkPartyMemberSlotResolver.cs`
 - `Native/Identity/RelinkPlayerNameResolver.cs`
 - `Native/Identity/RelinkPartyMemberIdentityResolver.cs`
@@ -23,19 +24,24 @@ Primary sources:
 
 ```text
 Relink rpcMessage
-  -> copy the fixed 0x1A0-byte packet while the native pointer is valid
-  -> decode message/category/metadata and opaque sender key
-  -> resolve sender key to an actual four-member slot
-  -> read the slot's verified lobby profile name
+  -> view the bounded 0x1A0-byte packet while the native pointer is valid
+  -> read the opaque sender key and resolve it to an actual four-member slot
+  -> read the slot's verified lobby profile name and PlayFab EntityId
   -> compare the actual slot with the coherent local slot
+  -> decode the bounded message/category/metadata fields
   -> classify self, party member, automatic communication, or unknown
-  -> enqueue an immutable IncomingChatMessage
+  -> apply persistent/room blocks before Relink accepts the packet
+  -> apply normal-text filtering and copy the packet only when rewriting its raw-text field
+  -> call Relink's original handler with the original or rewritten packet
+  -> enqueue the same final text as an immutable IncomingChatMessage
   -> ChatSession drains it into ChatHistory on the overlay tick
 ```
 
 The packet's sender label is presentation evidence only. Sender ownership comes from the sender-key resolver and the current member tables. If the slot, local key, active bank, or profile cannot be read coherently, attribution fails closed rather than assigning the line to the host or to the local player.
 
-The same attribution path is used for ordinary text, Relink automatic communication lines, and victory lines. This prevents automatic potion, link-attack, SBA, and victory messages from changing the ownership of later user text.
+The same attribution path is used for ordinary text, Relink automatic communication lines, and victory lines. All protocol labels with the `vo_CMM_` prefix are communication cues. Known cues retain their victory, link-attack, or thanks label; unknown cues use the generic official label. They are displayed with the resolved player identity but never enter word filtering, hit counters, or automatic blocking. This prevents automatic potion, link-attack, SBA, and victory messages from changing the ownership or moderation state of later user text.
+
+Only decoded raw-text packets enter the word-filter pipeline. A player block is broader: it is checked before decoding and suppresses that participant's raw text, stamps, and fixed phrases in the same authoritative receive gate.
 
 ## Outgoing message flow
 
@@ -76,5 +82,8 @@ Native detours copy only bounded data and call the original function in the expe
 - Unsupported executable: native chat remains unavailable.
 - Chat manager not ready: sends return `Unavailable`; no address fallback is attempted.
 - Sender identity ambiguous: the line is retained without inventing host/local ownership.
+- Moderation attribution ambiguous: the original packet is passed through and no player is counted or blocked.
+- Steamworks text filter unavailable or throws: custom rules continue and Steam filtering fails open.
+- A confirmed filtered replacement cannot be encoded into Relink's bounded packet: that message is dropped instead of exposing the original matched text.
 - Invalid UTF-8 length or NUL: the send is rejected before entering native code.
 - Lobby-owner tracking unavailable: chat continues, but host labels and room-owner naming fail closed.

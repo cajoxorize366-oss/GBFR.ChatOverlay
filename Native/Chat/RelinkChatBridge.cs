@@ -21,6 +21,7 @@ public sealed unsafe class RelinkChatBridge :
     private readonly Action<string> _log;
     private readonly RelinkGameContextProbe? _configuredGameContext;
     private readonly ChatBlacklist _chatBlacklist;
+    private readonly IChatModerationService? _chatModeration;
     private readonly Func<PartyNetworkLocalRole> _getLocalNetworkRole;
     private readonly ConcurrentQueue<IncomingChatMessage> _incoming = new();
     private readonly RecentEchoSuppressor _echoSuppressor = new();
@@ -45,6 +46,8 @@ public sealed unsafe class RelinkChatBridge :
     private int _decodeFailureLogged;
     private int _localFallbackLogged;
     private int _attributionDiagnosticsLogged;
+    private int _moderationFailureLogged;
+    private int _moderationRewriteFailureLogged;
 
     public RelinkChatBridge(
         ReloadedHooksApi hooks,
@@ -60,12 +63,14 @@ public sealed unsafe class RelinkChatBridge :
         Action<string> log,
         RelinkGameContextProbe? gameContext,
         ChatBlacklist? chatBlacklist,
-        Func<PartyNetworkLocalRole>? getLocalNetworkRole)
+        Func<PartyNetworkLocalRole>? getLocalNetworkRole,
+        IChatModerationService? chatModeration = null)
     {
         _hooks = hooks ?? throw new ArgumentNullException(nameof(hooks));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _configuredGameContext = gameContext;
         _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
+        _chatModeration = chatModeration;
         _getLocalNetworkRole = getLocalNetworkRole ?? (() => PartyNetworkLocalRole.Unknown);
     }
 
@@ -505,6 +510,10 @@ public sealed unsafe class RelinkChatBridge :
         var hasRawSenderKey = false;
         var remoteMemberSlot = -1;
         var localMemberSlot = -1;
+        var remoteResolved = false;
+        var isLocal = false;
+        var useRewrittenPacket = false;
+        Span<byte> rewrittenPacket = stackalloc byte[RelinkChatPacketDecoder.PacketBytesToCopy];
         try
         {
             if (chat != nint.Zero)
@@ -527,10 +536,91 @@ public sealed unsafe class RelinkChatBridge :
                         }
                     }
                 }
+
+                if (!PartyMemberSlotMap.IsValidSlot(localMemberSlot))
+                    TryResolveLocalSlot(out localMemberSlot);
+
+                remoteResolved = hasRawSenderKey &&
+                                 PartyMemberSlotMap.IsValidSlot(remoteMemberSlot);
+                var attributionProven = remoteResolved &&
+                                        RelinkChatSenderPolicy.CanApplyModeration(
+                                            remoteMemberSlot,
+                                            localMemberSlot);
+                isLocal = attributionProven &&
+                          RelinkChatSenderPolicy.IsLocalRpc(remoteMemberSlot, localMemberSlot);
+                var participant = default(ChatModerationParticipant);
+                if (attributionProven)
+                {
+                    participant = ResolveModerationParticipant(
+                        rawSenderKey,
+                        remoteMemberSlot,
+                        localMemberSlot,
+                        isLocal);
+                    if (ShouldBlockModeratedParticipant(participant))
+                        return;
+                }
+
                 decoded = RelinkChatPacketDecoder.TryDecode(
                     packet,
                     DateTimeOffset.UtcNow,
                     out pending);
+                if (decoded)
+                {
+                    if (attributionProven)
+                    {
+                        pending = isLocal
+                            ? pending with
+                            {
+                                Sender = participant.DisplayName,
+                                PlayerNumber = 1,
+                                IsLocal = true,
+                            }
+                            : RelinkChatMessageAttribution.ApplyRemoteIdentity(
+                                pending,
+                                localMemberSlot,
+                                remoteMemberSlot,
+                                participant.DisplayName);
+                        participant = participant with
+                        {
+                            DisplayName = string.IsNullOrWhiteSpace(participant.DisplayName)
+                                ? string.Empty
+                                : pending.Sender,
+                            PlayerNumber = pending.PlayerNumber,
+                            SenderId = pending.SenderId,
+                        };
+                    }
+
+                    LogAttributionDecision(
+                        hasRawSenderKey,
+                        rawSenderKey,
+                        remoteResolved,
+                        remoteMemberSlot,
+                        localMemberSlot,
+                        isLocal,
+                        pending);
+
+                    var moderation = attributionProven
+                        ? EvaluateModeration(participant, pending)
+                        : ChatModerationDecision.Allow(pending.Text);
+                    var moderationResult = RelinkIncomingChatModerationPolicy.Apply(
+                        packet,
+                        rewrittenPacket,
+                        pending,
+                        moderation);
+                    if (moderationResult.Action == RelinkIncomingChatAction.Block)
+                    {
+                        if (moderation.Disposition != ChatModerationDisposition.Block &&
+                            Interlocked.Exchange(ref _moderationRewriteFailureLogged, 1) == 0)
+                        {
+                            SafeLog(
+                                "Incoming chat moderation matched a message but could not safely encode " +
+                                "the filtered replacement into Relink's raw-text packet; the message was blocked.");
+                        }
+                        return;
+                    }
+                    pending = moderationResult.Message;
+                    useRewrittenPacket = moderationResult.Action == RelinkIncomingChatAction.PassRewritten;
+                }
             }
         }
         catch (Exception exception)
@@ -541,7 +631,15 @@ public sealed unsafe class RelinkChatBridge :
 
         try
         {
-            _rpcHook!.OriginalFunction(chat);
+            if (useRewrittenPacket)
+            {
+                fixed (byte* rewritten = rewrittenPacket)
+                    _rpcHook!.OriginalFunction((nint)rewritten);
+            }
+            else
+            {
+                _rpcHook!.OriginalFunction(chat);
+            }
         }
         catch (Exception exception)
         {
@@ -551,23 +649,6 @@ public sealed unsafe class RelinkChatBridge :
 
         if (!decoded)
             return;
-
-        if (!PartyMemberSlotMap.IsValidSlot(localMemberSlot))
-            TryResolveLocalSlot(out localMemberSlot);
-
-        var remoteResolved = hasRawSenderKey &&
-                             PartyMemberSlotMap.IsValidSlot(remoteMemberSlot);
-        var isLocal = PartyMemberSlotMap.IsValidSlot(localMemberSlot) &&
-                      remoteResolved &&
-                      RelinkChatSenderPolicy.IsLocalRpc(remoteMemberSlot, localMemberSlot);
-        LogAttributionDecision(
-            hasRawSenderKey,
-            rawSenderKey,
-            remoteResolved,
-            remoteMemberSlot,
-            localMemberSlot,
-            isLocal,
-            pending);
         var publishAuthoritativeEcho = RelinkChatSenderPolicy.TryConsumeAuthoritativeLocalEcho(
             _echoSuppressor,
             isLocal,
@@ -604,23 +685,103 @@ public sealed unsafe class RelinkChatBridge :
             return;
         }
 
-        string? resolvedPlayerName = null;
-        if (remoteResolved &&
-            _playerNameResolver?.TryResolveName(
-                remoteMemberSlot,
-                pending.SenderId,
-                out var playerName) == true)
+        EnqueueIncoming(pending);
+    }
+
+    private ChatModerationParticipant ResolveModerationParticipant(
+        uint senderId,
+        int memberSlot,
+        int localMemberSlot,
+        bool isLocal)
+    {
+        var playerNumber = 0;
+        string? playerName = null;
+        string? entityId = null;
+
+        if (PartyMemberSlotMap.IsValidSlot(memberSlot))
         {
-            resolvedPlayerName = playerName;
+            if (_playerNameResolver?.TryResolveName(memberSlot, senderId, out var resolvedName) == true &&
+                !string.IsNullOrWhiteSpace(resolvedName))
+            {
+                playerName = resolvedName.Trim();
+            }
+
+            if (_partyMemberIdentityResolver?.TryResolveSlot(memberSlot, out var resolvedEntityId) == true &&
+                !string.IsNullOrWhiteSpace(resolvedEntityId))
+            {
+                entityId = resolvedEntityId.Trim();
+            }
         }
 
-        pending = RelinkChatMessageAttribution.ApplyRemoteIdentity(
-            pending,
-            localMemberSlot,
-            remoteResolved ? remoteMemberSlot : -1,
-            resolvedPlayerName);
+        if (isLocal)
+        {
+            var identity = ResolveLocalRpcIdentity(memberSlot, senderId);
+            playerName = identity.Sender;
+            playerNumber = 1;
+        }
+        else
+        {
+            _ = PartyMemberSlotMap.TryGetPlayerNumber(
+                localMemberSlot,
+                memberSlot,
+                out playerNumber);
+        }
 
-        EnqueueIncoming(pending);
+        return new ChatModerationParticipant(
+            playerNumber,
+            playerName ?? string.Empty,
+            entityId,
+            senderId,
+            isLocal);
+    }
+
+    private bool ShouldBlockModeratedParticipant(in ChatModerationParticipant participant)
+    {
+        if (_chatModeration is null)
+            return false;
+
+        try
+        {
+            _chatModeration.ObserveParticipant(participant);
+            return _chatModeration.IsBlocked(participant);
+        }
+        catch (Exception exception)
+        {
+            LogModerationFailure(exception);
+            return false;
+        }
+    }
+
+    private ChatModerationDecision EvaluateModeration(
+        in ChatModerationParticipant participant,
+        in IncomingChatMessage message)
+    {
+        if (_chatModeration is null)
+            return ChatModerationDecision.Allow(message.Text);
+
+        try
+        {
+            return _chatModeration.Evaluate(new ChatModerationInput(
+                participant,
+                message.Text,
+                message.ReceivedAt,
+                message.CommunicationCue));
+        }
+        catch (Exception exception)
+        {
+            LogModerationFailure(exception);
+            return ChatModerationDecision.Allow(message.Text);
+        }
+    }
+
+    private void LogModerationFailure(Exception exception)
+    {
+        if (Interlocked.Exchange(ref _moderationFailureLogged, 1) != 0)
+            return;
+
+        SafeLog(
+            $"Incoming chat moderation failed open; further failures are suppressed: " +
+            $"{exception.GetType().Name}: {exception.Message}");
     }
 
     private void CompleteLocalSend(

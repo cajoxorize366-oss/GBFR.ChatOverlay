@@ -1,6 +1,6 @@
 # Documentation
 
-The documentation follows the same hierarchy as the codebase: architecture first, production modules second, fixed-build and operational references last. It describes the current 0.6.0 design rather than the sequence of development fixes that produced it.
+The documentation follows the same hierarchy as the codebase: architecture first, production modules second, fixed-build and operational references last. It describes the current design rather than the sequence of development fixes that produced it.
 
 ## Architecture
 
@@ -12,6 +12,7 @@ The documentation follows the same hierarchy as the codebase: architecture first
 | Large module | Mid-level module | Primary source paths | Documentation |
 | --- | --- | --- | --- |
 | Communication | Native text and identity | `Core/`, `Native/Chat/`, `Native/Identity/` | [Native chat and identity](modules/chat/native-chat-and-identity.md) |
+| Communication | Filtering and block management | `Configuration/ChatFilterConfiguration.cs`, `Core/ChatModeration*`, `Native/Chat/SteamOfficialTextFilter.cs` | [Chat filtering and blocks](modules/chat/chat-filtering-and-blocks.md) |
 | Voice | Party ChatControl transport | `Native/Party/PartyVoiceSession.cs`, `Native/Party/PartyNativeApi.cs` | [Party voice](modules/voice/party-voice.md) |
 | Online room | Room and membership lifecycle | `Native/Party/PartyLifecycleProbe.cs`, `Native/Party/PartyRoom*` | [Room and membership](modules/party/room-and-membership.md) |
 | Graphics | Shared OverlayHub and Present | `GBFR.OverlayHub.Contracts/`, `OverlayBroker/`, `NativeBridge/dxgi_present_bridge.cpp` | [OverlayHub and Present](modules/graphics/overlay-hub-and-present.md) |

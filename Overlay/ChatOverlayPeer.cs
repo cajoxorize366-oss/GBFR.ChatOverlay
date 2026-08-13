@@ -79,9 +79,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private readonly byte[] _quickActionNameBuffer = new byte[256];
     private readonly byte[] _quickActionTextBuffer = new byte[InputBufferSize];
-    private readonly byte[] _chatModerationRuleBuffer = new byte[512];
     private readonly byte[] _chatModerationPreviewBuffer = new byte[InputBufferSize];
     private readonly byte[] _chatModerationTemplateBuffer = new byte[InputBufferSize];
+    private readonly Dictionary<string, byte[]> _chatModerationRuleBuffers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _chatModerationRuleBufferValues = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _quickActionKeyDown = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingQuickActions = new();
     private readonly object _memberNameSync = new();
@@ -160,8 +161,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private string? _voiceMuteStatusText;
     private string? _lastVoiceIndicatorSnapshotFingerprint;
     private int _voiceIndicatorSnapshotFailureLogged;
-    private string? _chatModerationRuleEditId;
-    private string? _chatModerationRuleBufferValue;
     private string? _chatModerationPreviewBufferValue;
     private string? _chatModerationTemplateBufferValue;
 
@@ -1055,20 +1054,23 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         RefreshWindowVoicePushToTalkHeartbeat();
         PollManagedControllerInput();
         var configuration = _getConfiguration();
-        DrainMemberTransitions();
         var roomTransitionExited = DrainRoomTransitions();
-        DrainChatModerationEvents();
         if (!configuration.EnableImeCandidateFallback)
             ClearImeCandidateSnapshot();
         var onlineRoomActive = IsOnlineRoomActive();
         var previousOnlineRoomInactive = Interlocked.Exchange(
             ref _onlineRoomWasInactive,
             onlineRoomActive ? 0 : 1);
-        if (roomTransitionExited || (!onlineRoomActive && previousOnlineRoomInactive == 0))
+        var roomBecameInactive = !onlineRoomActive && previousOnlineRoomInactive == 0;
+        if (roomTransitionExited || roomBecameInactive)
+            DrainChatModerationEvents();
+        if (roomTransitionExited || roomBecameInactive)
+            _chatModeration?.ClearRoom();
+        DrainMemberTransitions();
+        if (roomTransitionExited || roomBecameInactive)
             ClearMemberNameCache();
         if (!onlineRoomActive && previousOnlineRoomInactive == 0)
         {
-            _chatModeration?.ClearRoom();
             _chatBlacklist.Clear();
             _session.Composer.Cancel(clearDraft: true);
             _session.InputHistory.ResetNavigation();
@@ -1081,7 +1083,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
         else if (onlineRoomActive && previousOnlineRoomInactive != 0)
         {
-            _chatModeration?.ClearRoom();
             _chatBlacklist.Clear();
             _session.Composer.Cancel(clearDraft: true);
             _session.InputHistory.ResetNavigation();
@@ -1097,6 +1098,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         {
             RefreshVoiceIndicatorSnapshot();
             _session.DrainIncoming();
+            DrainChatModerationEvents();
         }
         else
         {
@@ -1167,12 +1169,17 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 return;
 
             var language = CurrentLanguage;
-            var memberName = ResolveMemberTransitionName(transition);
+            var memberName = ResolveMemberTransitionName(
+                transition,
+                out var resolvedActualName);
             var participant = new ChatModerationParticipant(
                 transition.RemotePlayerOrdinal + 1,
-                memberName,
+                resolvedActualName ? memberName : string.Empty,
                 NormalizeEntityId(transition.EntityId));
-            _chatModeration?.ObserveParticipant(participant);
+            if (transition.Kind == PartyMemberTransitionKind.Left)
+                _chatModeration?.ForgetParticipant(participant);
+            else
+                _chatModeration?.ObserveParticipant(participant);
             if (transition.Kind == PartyMemberTransitionKind.Baseline)
                 continue;
 
@@ -1184,19 +1191,23 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
     }
 
-    private string ResolveMemberTransitionName(PartyMemberTransition transition)
+    private string ResolveMemberTransitionName(
+        PartyMemberTransition transition,
+        out bool resolvedActualName)
     {
+        resolvedActualName = false;
         var entityId = NormalizeEntityId(transition.EntityId);
         if (transition.Kind == PartyMemberTransitionKind.Left &&
             entityId is not null &&
             TryTakeCachedMemberName(entityId, out var cachedName))
         {
+            resolvedActualName = true;
             return cachedName;
         }
 
         var memberName = ResolveMemberNameByOrdinal(
             transition.RemotePlayerOrdinal,
-            out var resolvedActualName);
+            out resolvedActualName);
         if (transition.Kind is PartyMemberTransitionKind.Baseline or PartyMemberTransitionKind.Joined &&
             entityId is not null &&
             resolvedActualName)
@@ -3184,7 +3195,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 participant.PlayerNumber,
                 moderationEvent.HitCount,
                 moderationEvent.Threshold,
-                _session.Composer.MaximumDraftLength,
+                Math.Min(
+                    _session.Composer.MaximumDraftLength,
+                    RelinkChatPacketDecoder.MaximumMessageBytes),
                 language);
             var reason = ChatModerationSettingsPresentation.FormatThresholdReason(
                 moderationEvent.HitCount,
@@ -3193,10 +3206,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
             if (moderationEvent.PersistIdentity && !string.IsNullOrWhiteSpace(participant.EntityId))
             {
+                _chatModeration.SetBlocked(participant, blocked: true, persistent: true);
                 var entityId = participant.EntityId.Trim();
                 UpdateConfigurationSafely(value =>
                 {
                     value.ChatFilter ??= new ChatFilterConfiguration();
+                    ChatModerationSettingsPresentation.EnsureMutableCollections(value.ChatFilter);
                     var existing = value.ChatFilter.BlockedPlayers.FirstOrDefault(blocked =>
                         blocked.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
                         string.Equals(blocked.Identity, entityId, StringComparison.Ordinal));
@@ -3304,9 +3319,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
             ImGui.Separator();
             ImGui.Text(T("自定义词汇", "Custom rules"));
-            ImGui.TextWrapped(T(
-                "空规则不会生效。规则 Id 会保持稳定，支持中文、Backspace 和实时编辑。",
-                "Empty rules are ignored. Rule IDs stay stable; Chinese UTF-8 editing and Backspace are supported."));
             using var addRuleSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
             if (ImGui.Button($"{T("＋ 新增规则", "＋ Add Rule")}##ChatFilterAddRule", addRuleSize))
                 AddChatFilterRule();
@@ -3430,16 +3442,15 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     UpdateChatFilter(configurationValue => configurationValue.NotificationTemplate = template);
                 }
             }
-            ImGui.TextWrapped(T(
-                "支持 {player}、{count}、{threshold}；空模板会回退默认文本。",
-                "Supports {player}, {count}, and {threshold}; an empty template falls back to the default."));
             var templatePreview = ChatModerationSettingsPresentation.FormatNotification(
                 _chatModerationTemplateBufferValue,
                 T("示例玩家", "Example Player"),
                 2,
                 Math.Max(1, filter.AutoBlockThreshold),
                 filter.AutoBlockThreshold,
-                _session.Composer.MaximumDraftLength,
+                Math.Min(
+                    _session.Composer.MaximumDraftLength,
+                    RelinkChatPacketDecoder.MaximumMessageBytes),
                 CurrentLanguage);
             ImGui.TextWrapped($"{T("预览", "Preview")}: {templatePreview}");
         }
@@ -3534,10 +3545,18 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ? T("解除房间屏蔽", "Unblock Room")
             : T("屏蔽本房间", "Block Room");
         var moderation = _chatModeration;
-        if (moderation is not null &&
-            ImGui.Button($"{roomLabel}##RoomBlock{participant.EntityId}{participant.PlayerNumber}", roomSize))
+        ImGui.BeginDisabled(player.IsPersistentlyBlocked);
+        try
         {
-            moderation.SetBlocked(participant, !player.IsRoomBlocked, persistent: false);
+            if (moderation is not null &&
+                ImGui.Button($"{roomLabel}##RoomBlock{participant.EntityId}{participant.PlayerNumber}", roomSize))
+            {
+                moderation.SetBlocked(participant, !player.IsRoomBlocked, persistent: false);
+            }
+        }
+        finally
+        {
+            ImGui.EndDisabled();
         }
 
         ImGui.SameLine(0.0f, OverlayUiScale.Scale(8.0f));
@@ -3572,22 +3591,22 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     target.Enabled = enabled;
             });
         ImGui.SameLine(0.0f, OverlayUiScale.Scale(6.0f));
-        EnsureRuleBuffer(rule);
+        var ruleBuffer = EnsureRuleBuffer(rule);
         ImGui.SetNextItemWidth(-OverlayUiScale.Scale(104.0f));
         unsafe
         {
-            fixed (byte* buffer = _chatModerationRuleBuffer)
+            fixed (byte* buffer = ruleBuffer)
             {
                 if (ImGui.InputText(
                         $"##ChatFilterRuleTerm{rule.Id}",
                         (sbyte*)buffer,
-                        (nint)_chatModerationRuleBuffer.Length,
+                        (nint)ruleBuffer.Length,
                         0,
                         null!,
                         nint.Zero))
                 {
-                    var term = ReadUtf8Buffer(_chatModerationRuleBuffer);
-                    _chatModerationRuleBufferValue = term;
+                    var term = ReadUtf8Buffer(ruleBuffer);
+                    _chatModerationRuleBufferValues[rule.Id] = term;
                     UpdateChatFilter(configurationValue =>
                     {
                         var target = configurationValue.Rules.FirstOrDefault(candidate => candidate.Id == rule.Id);
@@ -3602,11 +3621,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (ImGui.Button($"{T("删除", "Delete")}##ChatFilterRuleDelete{rule.Id}", deleteSize))
         {
             UpdateChatFilter(configurationValue => configurationValue.Rules.RemoveAll(candidate => candidate.Id == rule.Id));
-            if (string.Equals(_chatModerationRuleEditId, rule.Id, StringComparison.Ordinal))
-            {
-                _chatModerationRuleEditId = null;
-                _chatModerationRuleBufferValue = null;
-            }
+            _chatModerationRuleBuffers.Remove(rule.Id);
+            _chatModerationRuleBufferValues.Remove(rule.Id);
         }
     }
 
@@ -3675,9 +3691,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     {
         var rule = new ChatFilterRuleConfiguration();
         UpdateChatFilter(configurationValue => configurationValue.Rules.Add(rule));
-        _chatModerationRuleEditId = rule.Id;
-        _chatModerationRuleBufferValue = rule.Term;
-        WriteUtf8Buffer(_chatModerationRuleBuffer, rule.Term);
+        var buffer = new byte[512];
+        WriteUtf8Buffer(buffer, rule.Term);
+        _chatModerationRuleBuffers[rule.Id] = buffer;
+        _chatModerationRuleBufferValues[rule.Id] = rule.Term;
     }
 
     private void RemovePersistedBlockedPlayer(string identity)
@@ -3697,6 +3714,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         UpdateConfigurationSafely(configuration =>
         {
             configuration.ChatFilter ??= new ChatFilterConfiguration();
+            ChatModerationSettingsPresentation.EnsureMutableCollections(configuration.ChatFilter);
             configuration.ChatFilter.BlockedPlayers.RemoveAll(player =>
                 player.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
                 string.Equals(player.Identity, identity, StringComparison.Ordinal));
@@ -3714,6 +3732,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         UpdateConfigurationSafely(configuration =>
         {
             configuration.ChatFilter ??= new ChatFilterConfiguration();
+            ChatModerationSettingsPresentation.EnsureMutableCollections(configuration.ChatFilter);
             if (!blocked)
             {
                 configuration.ChatFilter.BlockedPlayers.RemoveAll(player =>
@@ -3749,20 +3768,28 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         UpdateConfigurationSafely(configuration =>
         {
             configuration.ChatFilter ??= new ChatFilterConfiguration();
+            ChatModerationSettingsPresentation.EnsureMutableCollections(configuration.ChatFilter);
             update(configuration.ChatFilter);
         });
     }
 
-    private void EnsureRuleBuffer(ChatFilterRuleConfiguration rule)
+    private byte[] EnsureRuleBuffer(ChatFilterRuleConfiguration rule)
     {
-        if (string.Equals(_chatModerationRuleEditId, rule.Id, StringComparison.Ordinal) &&
-            string.Equals(_chatModerationRuleBufferValue, rule.Term, StringComparison.Ordinal))
+        var configuredTerm = rule.Term ?? string.Empty;
+        if (!_chatModerationRuleBuffers.TryGetValue(rule.Id, out var buffer))
         {
-            return;
+            buffer = new byte[512];
+            _chatModerationRuleBuffers[rule.Id] = buffer;
         }
-        _chatModerationRuleEditId = rule.Id;
-        _chatModerationRuleBufferValue = rule.Term;
-        WriteUtf8Buffer(_chatModerationRuleBuffer, rule.Term);
+
+        if (!_chatModerationRuleBufferValues.TryGetValue(rule.Id, out var bufferedTerm) ||
+            !string.Equals(bufferedTerm, configuredTerm, StringComparison.Ordinal))
+        {
+            WriteUtf8Buffer(buffer, configuredTerm);
+            _chatModerationRuleBufferValues[rule.Id] = configuredTerm;
+        }
+
+        return buffer;
     }
 
     private void EnsurePreviewBuffer(ChatFilterConfiguration configuration)
@@ -3783,16 +3810,16 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     private string DescribeOfficialFilterStatus(OfficialTextFilterStatus status) => status.State switch
     {
-        OfficialTextFilterState.Ready => T("Ready", "Ready"),
-        OfficialTextFilterState.Passthrough => T("Passthrough", "Passthrough"),
-        _ => T("Unavailable", "Unavailable"),
+        OfficialTextFilterState.Ready => T("可用", "Ready"),
+        OfficialTextFilterState.Passthrough => T("直通", "Passthrough"),
+        _ => T("不可用", "Unavailable"),
     };
 
     private string DescribeChatDisposition(ChatModerationDisposition disposition) => disposition switch
     {
-        ChatModerationDisposition.Mask => T("Mask", "Mask"),
-        ChatModerationDisposition.Block => T("Block", "Block"),
-        _ => T("Allow", "Allow"),
+        ChatModerationDisposition.Mask => T("屏蔽词汇", "Mask"),
+        ChatModerationDisposition.Block => T("隐藏整条", "Block"),
+        _ => T("允许", "Allow"),
     };
 
     private string YesNo(bool value) => value ? T("是", "Yes") : T("否", "No");
@@ -3968,6 +3995,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ChatCommunicationCue.Victory => UiLocalization.Select(language, "胜利", "Victory"),
             ChatCommunicationCue.LinkAttack => UiLocalization.Select(language, "连携攻击", "Link Attack"),
             ChatCommunicationCue.Thanks => UiLocalization.Select(language, "感谢", "Thanks"),
+            ChatCommunicationCue.Official => UiLocalization.Select(language, "官方提示", "Official"),
             _ => string.Empty,
         };
 

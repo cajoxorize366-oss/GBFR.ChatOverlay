@@ -58,6 +58,25 @@ There is no separate quick-action panel hotkey. Individual quick actions run dir
 
 Each action has a stable GUID-like `Id`, `Enabled`, user-facing `Name`, `Kind`, `OfficialId`, `Text`, and keyboard binding. An official action is configured only if its ID exists in `CommunicationCatalog`.
 
+## Chat filtering defaults
+
+Chat filtering is configured in in-game pages `04 Chat Filter` and `05 Block Management`. The Reloaded property grid hides the nested fields, but they are persisted in `ChatFilter` inside `Config.json`.
+
+| Setting | Default | Runtime behavior |
+| --- | --- | --- |
+| filtering | disabled | opt-in; existing chat behavior is unchanged |
+| Steam official filter | enabled | used only while filtering is enabled; unavailable status fails open |
+| action | mask matched words | hide-entire-message is selectable |
+| automatic block | disabled | opt-in |
+| hit threshold | `3` | one hit per matched message |
+| sliding window | `10` minutes | timestamps older than the window are discarded |
+| notification | local only | Party chat and none are selectable |
+| template | `已将 {player} 屏蔽，原因：触发过滤条件次数过多` | supports `{player}`, `{count}`, and `{threshold}` |
+| custom rules | empty | each rule has a stable `Id`, `Enabled`, and `Term` |
+| blocked players | empty | only PlayFab EntityId entries persist |
+
+Saved block entries contain `IdentityKind`, `Identity`, `LastKnownName`, `Source`, `Reason`, and `BlockedAtUtc`. Display names are never used as block keys. Sender-key and player-number fallbacks exist only for the active room and are not written to disk.
+
 ## Voice defaults
 
 | Setting | Default | Runtime behavior |

@@ -9,6 +9,10 @@ internal static class RelinkChatSenderPolicy
         partyMemberSlot is >= 0 and <= 3 &&
         partyMemberSlot == localMemberSlot;
 
+    internal static bool CanApplyModeration(int partyMemberSlot, int localMemberSlot) =>
+        PartyMemberSlotMap.IsValidSlot(partyMemberSlot) &&
+        PartyMemberSlotMap.IsValidSlot(localMemberSlot);
+
     internal static bool ShouldBlockBlacklistedRpc(
         int partyMemberSlot,
         int localMemberSlot,

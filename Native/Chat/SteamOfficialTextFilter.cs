@@ -253,17 +253,10 @@ internal static class SteamOfficialTextFilterBindings
 
     internal static SteamOfficialTextFilterExports? ResolveNative()
     {
-        if (_cachedExports is not null || _retainedLibraryHandle != IntPtr.Zero)
-        {
-            return _cachedExports;
-        }
-
         lock (NativeSync)
         {
-            if (_cachedExports is not null || _retainedLibraryHandle != IntPtr.Zero)
-            {
+            if (_cachedExports is not null)
                 return _cachedExports;
-            }
 
             _cachedExports = TryResolve();
             return _cachedExports;

@@ -182,6 +182,23 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
+    public void ChatFilter_UsesOptInFilteringAndConservativeAutoBlockDefaults()
+    {
+        var filter = new Config().ChatFilter;
+
+        Assert.False(filter.Enabled);
+        Assert.True(filter.UseSteamTextFilter);
+        Assert.Equal(ChatFilterAction.MaskMatchedWords, filter.Action);
+        Assert.False(filter.AutoBlockEnabled);
+        Assert.Equal(3, filter.AutoBlockThreshold);
+        Assert.Equal(10, filter.AutoBlockWindowMinutes);
+        Assert.Equal(ChatFilterNotificationMode.LocalOnly, filter.NotificationMode);
+        Assert.Equal(ChatFilterConfiguration.DefaultNotificationTemplate, filter.NotificationTemplate);
+        Assert.Empty(filter.Rules);
+        Assert.Empty(filter.BlockedPlayers);
+    }
+
+    [Fact]
     public void ChatPresentation_UsesReadableDefaultsAndHidesTimestamps()
     {
         var configuration = new Config();

@@ -13,6 +13,7 @@ public enum ChatCommunicationCue
     Victory,
     LinkAttack,
     Thanks,
+    Official,
 }
 
 public sealed record ChatMessage(

@@ -12,8 +12,11 @@ public sealed class ChatModerationServiceTests
     public void Evaluate_LocalAndCueMessagesAreAllowedWithoutCounting()
     {
         var service = new ChatModerationService();
-        service.ApplyConfiguration(CreateConfiguration(
-            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" }));
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 100;
+        service.ApplyConfiguration(configuration);
 
         var local = Evaluate(
             service,
@@ -24,12 +27,19 @@ public sealed class ChatModerationServiceTests
             Remote("remote"),
             "bad",
             cue: ChatCommunicationCue.Victory);
+        var genericOfficial = Evaluate(
+            service,
+            Remote("remote"),
+            "bad",
+            cue: ChatCommunicationCue.Official);
 
         Assert.Equal(ChatModerationDisposition.Allow, local.Disposition);
         Assert.Equal("bad", local.Text);
         Assert.False(local.Matched);
         Assert.Equal(ChatModerationDisposition.Allow, cue.Disposition);
         Assert.False(cue.Matched);
+        Assert.Equal(ChatModerationDisposition.Allow, genericOfficial.Disposition);
+        Assert.False(genericOfficial.Matched);
         Assert.Equal(0, service.GetSnapshot().SessionFilteredMessageCount);
         Assert.False(service.TryReadEvent(out _));
     }
@@ -404,6 +414,228 @@ public sealed class ChatModerationServiceTests
     }
 
     [Fact]
+    public void ObserveParticipant_RejectsOutOfRangePlayerNumberAndNormalizesEntityId()
+    {
+        var service = new ChatModerationService();
+
+        service.ObserveParticipant(new ChatModerationParticipant(99, "Invalid", null));
+        service.ObserveParticipant(new ChatModerationParticipant(2, "First", " entity-1 "));
+        service.ObserveParticipant(new ChatModerationParticipant(3, "Updated", "entity-1"));
+
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("Updated", player.Participant.DisplayName);
+        Assert.True(service.SetBlocked(player.Participant, true, persistent: true));
+        Assert.True(service.IsBlocked(new ChatModerationParticipant(2, "Other", " entity-1 ")));
+    }
+
+    [Fact]
+    public void ObserveParticipant_UpgradesSenderIdentityWithoutSplittingHitsOrRoomBlock()
+    {
+        var service = new ChatModerationService();
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 100;
+        service.ApplyConfiguration(configuration);
+        var senderIdentity = new ChatModerationParticipant(
+            2,
+            "Remote",
+            EntityId: null,
+            SenderId: 0x10);
+
+        Evaluate(service, senderIdentity, "bad", Start);
+        Assert.True(service.SetBlocked(senderIdentity, blocked: true, persistent: false));
+
+        var entityIdentity = senderIdentity with
+        {
+            DisplayName = "Resolved",
+            EntityId = " entity-1 ",
+        };
+        service.ObserveParticipant(entityIdentity);
+
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("entity-1", player.Participant.EntityId);
+        Assert.Equal(0x10u, player.Participant.SenderId);
+        Assert.Equal("Resolved", player.Participant.DisplayName);
+        Assert.Equal(1, player.WindowHitCount);
+        Assert.True(player.IsRoomBlocked);
+        Assert.True(service.IsBlocked(entityIdentity));
+    }
+
+    [Fact]
+    public void ObserveParticipant_SlotOnlyStateDoesNotTransferToStrongerIdentityWithoutEvidence()
+    {
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" }));
+        var slotOnly = new ChatModerationParticipant(2, "Old", EntityId: null);
+        Evaluate(service, slotOnly, "bad", Start);
+        Assert.True(service.SetBlocked(slotOnly, blocked: true, persistent: false));
+
+        var resolved = new ChatModerationParticipant(
+            2,
+            "New",
+            "entity-new",
+            SenderId: 0x20);
+        service.ObserveParticipant(resolved);
+
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("entity-new", player.Participant.EntityId);
+        Assert.Equal(0x20u, player.Participant.SenderId);
+        Assert.Equal(0, player.WindowHitCount);
+        Assert.False(player.IsRoomBlocked);
+        Assert.False(service.IsBlocked(resolved));
+        Assert.False(service.IsBlocked(slotOnly));
+    }
+
+    [Fact]
+    public void ObserveParticipant_WeakerFallbackDoesNotOverwriteResolvedIdentityName()
+    {
+        var service = new ChatModerationService();
+        service.ObserveParticipant(new ChatModerationParticipant(
+            2,
+            "Resolved Name",
+            "entity-1",
+            SenderId: 0x10));
+
+        service.ObserveParticipant(new ChatModerationParticipant(
+            2,
+            "玩家 2",
+            EntityId: null));
+
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("Resolved Name", player.Participant.DisplayName);
+        Assert.Equal("entity-1", player.Participant.EntityId);
+        Assert.Equal(0x10u, player.Participant.SenderId);
+    }
+
+    [Fact]
+    public void Evaluate_WeakerFallbackUsesResolvedIdentityHitWindowAndBlockState()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var resolved = new ChatModerationParticipant(
+            2,
+            "Resolved Name",
+            "entity-1",
+            SenderId: 0x10);
+        var fallback = new ChatModerationParticipant(
+            2,
+            "玩家 2",
+            EntityId: null,
+            SenderId: 0x10);
+
+        var first = Evaluate(service, resolved, "bad", Start);
+        var second = Evaluate(service, fallback, "bad", Start.AddMinutes(1));
+
+        Assert.False(first.AutoBlocked);
+        Assert.True(second.AutoBlocked);
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("entity-1", player.Participant.EntityId);
+        Assert.Equal("Resolved Name", player.Participant.DisplayName);
+        Assert.Equal(2, player.WindowHitCount);
+        Assert.True(player.IsRoomBlocked);
+        Assert.True(service.IsBlocked(fallback));
+        Assert.True(service.TryReadEvent(out var moderationEvent));
+        Assert.Equal("entity-1", moderationEvent.Participant.EntityId);
+        Assert.True(moderationEvent.PersistIdentity);
+    }
+
+    [Fact]
+    public void Evaluate_DifferentSenderInSameSlotDoesNotInheritResolvedIdentityState()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var oldParticipant = new ChatModerationParticipant(
+            2,
+            "Old",
+            "entity-old",
+            SenderId: 0x10);
+        Evaluate(service, oldParticipant, "bad", Start);
+        Assert.True(service.SetBlocked(oldParticipant, blocked: true, persistent: false));
+
+        var replacement = new ChatModerationParticipant(
+            2,
+            "Replacement",
+            EntityId: null,
+            SenderId: 0x20);
+        var decision = Evaluate(service, replacement, "bad", Start.AddMinutes(1));
+
+        Assert.Equal(ChatModerationDisposition.Mask, decision.Disposition);
+        Assert.False(decision.AutoBlocked);
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal(0x20u, player.Participant.SenderId);
+        Assert.Null(player.Participant.EntityId);
+        Assert.Equal(1, player.WindowHitCount);
+        Assert.False(player.IsRoomBlocked);
+        Assert.False(service.IsBlocked(replacement));
+        Assert.True(service.IsBlocked(oldParticipant));
+        Assert.False(service.TryReadEvent(out _));
+    }
+
+    [Fact]
+    public void ObserveParticipant_DifferentStrongIdentityInSameSlotReplacesCurrentRowWithoutInheritance()
+    {
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" }));
+        var oldParticipant = new ChatModerationParticipant(2, "Old", "entity-old");
+        Evaluate(service, oldParticipant, "bad", Start);
+        Assert.True(service.SetBlocked(oldParticipant, blocked: true, persistent: false));
+
+        var replacement = new ChatModerationParticipant(2, "New", "entity-new");
+        service.ObserveParticipant(replacement);
+
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("entity-new", player.Participant.EntityId);
+        Assert.Equal(0, player.WindowHitCount);
+        Assert.False(player.IsRoomBlocked);
+        Assert.False(service.IsBlocked(replacement));
+        Assert.True(service.IsBlocked(oldParticipant));
+    }
+
+    [Fact]
+    public void Evaluate_SlotOnlyFallbackAfterReplacementDoesNotAccrueToCurrentMember()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var oldParticipant = new ChatModerationParticipant(2, "Old", "entity-old");
+        Evaluate(service, oldParticipant, "bad", Start);
+        Assert.True(service.SetBlocked(oldParticipant, blocked: true, persistent: false));
+        var replacement = new ChatModerationParticipant(2, "New", "entity-new");
+        service.ObserveParticipant(replacement);
+
+        var decision = Evaluate(
+            service,
+            new ChatModerationParticipant(2, "玩家 2", EntityId: null),
+            "bad",
+            Start.AddMinutes(1));
+
+        Assert.True(decision.Matched);
+        Assert.False(decision.AutoBlocked);
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal("entity-new", player.Participant.EntityId);
+        Assert.Equal("New", player.Participant.DisplayName);
+        Assert.Equal(0, player.WindowHitCount);
+        Assert.False(player.IsRoomBlocked);
+        Assert.False(service.IsBlocked(replacement));
+        Assert.True(service.IsBlocked(oldParticipant));
+        Assert.False(service.TryReadEvent(out _));
+    }
+
+    [Fact]
     public void ForgetParticipant_RemovesOnlyThatPlayerAndKeepsPersistentBlockAndPendingEvents()
     {
         var configuration = CreateConfiguration(
@@ -414,7 +646,7 @@ public sealed class ChatModerationServiceTests
         var service = new ChatModerationService();
         service.ApplyConfiguration(configuration);
         var forgotten = Remote("entity-forgotten");
-        var retained = Remote("entity-retained");
+        var retained = Remote("entity-retained", playerNumber: 3);
 
         Evaluate(service, forgotten, "bad", Start);
         Evaluate(service, forgotten, "bad", Start.AddMinutes(1));
@@ -431,6 +663,66 @@ public sealed class ChatModerationServiceTests
         Assert.True(service.IsBlocked(forgotten));
         Assert.True(service.TryReadEvent(out var moderationEvent));
         Assert.Equal("entity-forgotten", moderationEvent.Participant.EntityId);
+    }
+
+    [Fact]
+    public void ForgetParticipant_ClearsTemporaryBlockAndHitsBeforePlayerSlotIsReused()
+    {
+        var configuration = CreateConfiguration(
+            new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" });
+        configuration.AutoBlockEnabled = true;
+        configuration.AutoBlockThreshold = 2;
+        configuration.AutoBlockWindowMinutes = 10;
+        var service = new ChatModerationService();
+        service.ApplyConfiguration(configuration);
+        var departed = new ChatModerationParticipant(
+            2,
+            "Departed",
+            EntityId: null,
+            SenderId: 0x10);
+
+        Evaluate(service, departed, "bad", Start);
+        Assert.True(service.SetBlocked(departed, blocked: true, persistent: false));
+
+        // Membership transitions know the relative player slot even when the native
+        // sender key and PlayFab identity are unavailable at departure time.
+        service.ForgetParticipant(new ChatModerationParticipant(2, "Departed", EntityId: null));
+
+        var replacement = new ChatModerationParticipant(
+            2,
+            "Replacement",
+            EntityId: null,
+            SenderId: 0x20);
+        Assert.False(service.IsBlocked(replacement));
+        var firstHit = Evaluate(service, replacement, "bad", Start.AddMinutes(1));
+
+        Assert.False(firstHit.AutoBlocked);
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal(0x20u, player.Participant.SenderId);
+        Assert.Equal(1, player.WindowHitCount);
+        Assert.False(player.IsRoomBlocked);
+        Assert.False(service.TryReadEvent(out _));
+    }
+
+    [Fact]
+    public void ForgetParticipant_LateEntityLeaveDoesNotRemoveDifferentSenderInReusedSlot()
+    {
+        var service = new ChatModerationService();
+        var replacement = new ChatModerationParticipant(
+            2,
+            "Replacement",
+            EntityId: null,
+            SenderId: 0x20);
+        service.ObserveParticipant(replacement);
+
+        service.ForgetParticipant(new ChatModerationParticipant(
+            2,
+            "Departed",
+            "entity-old"));
+
+        var player = Assert.Single(service.GetSnapshot().Players);
+        Assert.Equal(0x20u, player.Participant.SenderId);
+        Assert.Equal("Replacement", player.Participant.DisplayName);
     }
 
     [Fact]
@@ -544,7 +836,7 @@ public sealed class ChatModerationServiceTests
             new ChatFilterRuleConfiguration { Id = "bad", Term = "bad" }));
 
         Parallel.For(0, 200, index =>
-            Evaluate(service, Remote($"remote-{index}"), "bad"));
+            Evaluate(service, Remote($"remote-{index}", playerNumber: 0), "bad"));
 
         var snapshot = service.GetSnapshot();
         Assert.Equal(200, snapshot.SessionFilteredMessageCount);

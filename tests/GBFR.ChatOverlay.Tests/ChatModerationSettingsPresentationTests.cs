@@ -1,3 +1,4 @@
+using System.Text;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
@@ -6,6 +7,23 @@ namespace GBFR.ChatOverlay.Tests;
 
 public sealed class ChatModerationSettingsPresentationTests
 {
+    [Fact]
+    public void EnsureMutableCollections_RepairsExternallyNullLists()
+    {
+        var configuration = new ChatFilterConfiguration
+        {
+            Rules = null!,
+            BlockedPlayers = null!,
+        };
+
+        ChatModerationSettingsPresentation.EnsureMutableCollections(configuration);
+
+        Assert.NotNull(configuration.Rules);
+        Assert.NotNull(configuration.BlockedPlayers);
+        Assert.Empty(configuration.Rules);
+        Assert.Empty(configuration.BlockedPlayers);
+    }
+
     [Fact]
     public void FormatNotification_ReplacesSupportedVariables()
     {
@@ -18,6 +36,20 @@ public sealed class ChatModerationSettingsPresentationTests
             64);
 
         Assert.Equal("小明:4/7", result);
+    }
+
+    [Fact]
+    public void FormatNotification_DoesNotExpandTokensInsidePlayerName()
+    {
+        var result = ChatModerationSettingsPresentation.FormatNotification(
+            "{player}:{count}",
+            "{count}",
+            0,
+            4,
+            7,
+            64);
+
+        Assert.Equal("{count}:4", result);
     }
 
     [Fact]
@@ -82,6 +114,21 @@ public sealed class ChatModerationSettingsPresentationTests
             5);
 
         Assert.Equal("12345", result);
+    }
+
+    [Fact]
+    public void FormatNotification_LimitsUtf8BytesWithoutSplittingRunes()
+    {
+        var result = ChatModerationSettingsPresentation.FormatNotification(
+            "{player}",
+            "你你你",
+            0,
+            1,
+            1,
+            7);
+
+        Assert.Equal("你你", result);
+        Assert.Equal(6, Encoding.UTF8.GetByteCount(result));
     }
 
     [Theory]

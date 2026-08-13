@@ -1027,6 +1027,8 @@ public sealed class ChatOverlayPeerHotkeyTests
     [InlineData(UiLanguage.English, false, ChatCommunicationCue.LinkAttack, "Kuro (Link Attack):")]
     [InlineData(UiLanguage.SimplifiedChinese, false, ChatCommunicationCue.Thanks, "Kuro（感谢）:")]
     [InlineData(UiLanguage.English, false, ChatCommunicationCue.Thanks, "Kuro (Thanks):")]
+    [InlineData(UiLanguage.SimplifiedChinese, false, ChatCommunicationCue.Official, "Kuro（官方提示）:")]
+    [InlineData(UiLanguage.English, false, ChatCommunicationCue.Official, "Kuro (Official):")]
     [InlineData(UiLanguage.SimplifiedChinese, true, ChatCommunicationCue.LinkAttack, "[房主] Kuro（连携攻击）:")]
     [InlineData(UiLanguage.English, true, ChatCommunicationCue.LinkAttack, "[Host] Kuro (Link Attack):")]
     public void HistorySenderLabel_FormatsCommunicationCues(
@@ -1835,6 +1837,100 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
+    public void Tick_PersistsPendingAutoBlockBeforeRoomExitClearsTransientState()
+    {
+        var configuration = new Config();
+        configuration.ChatFilter.Enabled = true;
+        configuration.ChatFilter.UseSteamTextFilter = false;
+        configuration.ChatFilter.AutoBlockEnabled = true;
+        configuration.ChatFilter.AutoBlockThreshold = 2;
+        configuration.ChatFilter.Rules.Add(new ChatFilterRuleConfiguration
+        {
+            Id = "bad",
+            Term = "bad",
+        });
+        var moderation = new ChatModerationService();
+        moderation.ApplyConfiguration(configuration.ChatFilter);
+        var participant = new ChatModerationParticipant(2, "Remote", "entity-remote");
+        var now = DateTimeOffset.UtcNow;
+        _ = moderation.Evaluate(new ChatModerationInput(participant, "bad", now));
+        _ = moderation.Evaluate(new ChatModerationInput(participant, "bad", now.AddSeconds(1)));
+        var pending = new PartyRoomTransition(
+            PartyRoomTransitionKind.Exited,
+            PartyRoomExitReason.SelfLeft,
+            "Arca");
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            history: history,
+            readRoomTransition: () =>
+            {
+                var current = pending;
+                pending = default;
+                return current == default ? null : current;
+            },
+            getCurrentTime: () => now.AddSeconds(2),
+            chatModeration: moderation);
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        var blocked = Assert.Single(configuration.ChatFilter.BlockedPlayers);
+        Assert.Equal("entity-remote", blocked.Identity);
+        Assert.Equal(BlockedPlayerSource.FilterThreshold, blocked.Source);
+        Assert.Contains(
+            history.Snapshot(),
+            message => message.Kind == ChatMessageKind.System &&
+                       message.Text.Contains("Remote", StringComparison.Ordinal) &&
+                       message.Text.Contains("触发过滤条件次数过多", StringComparison.Ordinal));
+        Assert.Empty(moderation.GetSnapshot().Players);
+        Assert.Equal(0, moderation.GetSnapshot().SessionFilteredMessageCount);
+        Assert.True(moderation.IsBlocked(participant));
+        Assert.False(moderation.TryReadEvent(out _));
+    }
+
+    [Fact]
+    public void Tick_FirstActiveRoomFrameDoesNotDiscardNativeModerationEvents()
+    {
+        var configuration = new Config();
+        configuration.ChatFilter.Enabled = true;
+        configuration.ChatFilter.UseSteamTextFilter = false;
+        configuration.ChatFilter.AutoBlockEnabled = true;
+        configuration.ChatFilter.AutoBlockThreshold = 1;
+        configuration.ChatFilter.Rules.Add(new ChatFilterRuleConfiguration
+        {
+            Id = "bad",
+            Term = "bad",
+        });
+        var moderation = new ChatModerationService();
+        moderation.ApplyConfiguration(configuration.ChatFilter);
+        var participant = new ChatModerationParticipant(2, "Remote", "entity-remote");
+        _ = moderation.Evaluate(new ChatModerationInput(
+            participant,
+            "bad",
+            DateTimeOffset.UtcNow));
+        var history = new ChatHistory(10);
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true,
+            history: history,
+            chatModeration: moderation);
+        SetInitialized(peer);
+
+        peer.Tick();
+
+        Assert.Single(configuration.ChatFilter.BlockedPlayers);
+        Assert.Contains(
+            history.Snapshot(),
+            message => message.Kind == ChatMessageKind.System &&
+                       message.Text.Contains("Remote", StringComparison.Ordinal));
+        Assert.True(moderation.IsBlocked(participant));
+        Assert.False(moderation.TryReadEvent(out _));
+    }
+
+    [Fact]
     public void WantsRender_RemainsTrueForOfflineCompactTransientNotice()
     {
         var configuration = new Config
@@ -1950,7 +2046,8 @@ public sealed class ChatOverlayPeerHotkeyTests
         Func<DateTimeOffset>? getCurrentTime = null,
         Func<Action<bool>, VoicePushToTalkSafetyGate>? createWindowVoicePushToTalkGate = null,
         Func<int, bool>? isWindowKeyDown = null,
-        Action<string>? log = null) =>
+        Action<string>? log = null,
+        IChatModerationService? chatModeration = null) =>
         new(
             new ChatSession(history ?? new ChatHistory(10), new ChatComposer(), transport, incoming: incoming),
             () => configuration,
@@ -1978,7 +2075,8 @@ public sealed class ChatOverlayPeerHotkeyTests
             getCurrentTime: getCurrentTime,
             createWindowVoicePushToTalkGate: createWindowVoicePushToTalkGate,
             isWindowKeyDown: isWindowKeyDown,
-            getLocalPlayerName: getLocalPlayerName);
+            getLocalPlayerName: getLocalPlayerName,
+            chatModeration: chatModeration);
 
     private static void SetInitialized(ChatOverlayPeer peer) =>
         typeof(ChatOverlayPeer)

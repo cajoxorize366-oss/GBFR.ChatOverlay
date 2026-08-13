@@ -103,6 +103,9 @@ Automated tests cannot prove live two-client behavior inside Relink. A release c
 - Party voice creation, PTT press/release, remote playback, and focus-loss mute;
 - lobby and battle voice icons, including Full Chain masking;
 - member join/leave reasons and normal post-quest room exit;
+- custom/Steam text filtering in both Relink's official chat and the mod history;
+- official `vo_CMM_*` automatic lines bypassing hit counts and automatic blocks;
+- threshold auto-block, local/Party notification, room exit persistence, and same-slot member replacement;
 - OverlayHub coexistence with Extra Sigil Slots and RTSS.
 
 Any item not exercised on the final package must be recorded as runtime `UNVERIFIED`, even when its unit/integration coverage passes.

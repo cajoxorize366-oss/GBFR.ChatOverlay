@@ -68,7 +68,7 @@ public sealed class RelinkChatPacketDecoderTests
     }
 
     [Fact]
-    public void TryDecode_UnknownMachineCuePrefixHidesRawLabelWithNoCue()
+    public void TryDecode_UnknownMachineCuePrefixUsesGenericOfficialCue()
     {
         var packet = CreatePacket("hello", "vo_CMM_unknown_action", 0x89ABCDEF, 0, 0);
 
@@ -77,7 +77,7 @@ public sealed class RelinkChatPacketDecoderTests
             DateTimeOffset.UtcNow,
             out var message));
         Assert.Equal("Player 89ABCDEF", message.Sender);
-        Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
+        Assert.Equal(ChatCommunicationCue.Official, message.CommunicationCue);
     }
 
     [Fact]

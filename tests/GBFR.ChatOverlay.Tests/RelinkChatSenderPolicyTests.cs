@@ -59,6 +59,23 @@ public sealed class RelinkChatSenderPolicyTests
         Assert.False(RelinkChatSenderPolicy.ShouldBlockBlacklistedRpc(2, 2, blacklist));
     }
 
+    [Theory]
+    [InlineData(0, 2, true)]
+    [InlineData(2, 2, true)]
+    [InlineData(-1, 2, false)]
+    [InlineData(0, -1, false)]
+    [InlineData(4, 2, false)]
+    [InlineData(0, 4, false)]
+    public void ModerationGate_RequiresBothVerifiedFourPartySlots(
+        int partyMemberSlot,
+        int localMemberSlot,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            RelinkChatSenderPolicy.CanApplyModeration(partyMemberSlot, localMemberSlot));
+    }
+
     [Fact]
     public void EchoConsumption_RequiresProvenLocalSender()
     {

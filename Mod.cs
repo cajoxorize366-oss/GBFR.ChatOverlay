@@ -42,6 +42,7 @@ public sealed class Mod : IDisposable
 
     private readonly ChatSession _chatSession;
     private readonly ChatBlacklist _chatBlacklist = new();
+    private readonly ChatModerationService _chatModeration;
     private readonly ChatOverlayPeer _overlay;
     private DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
@@ -66,6 +67,10 @@ public sealed class Mod : IDisposable
 
         Action<string> moduleLog =
             message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+
+        _chatModeration = new ChatModerationService(new SteamOfficialTextFilter());
+        _chatModeration.ApplyConfiguration(_configuration.ChatFilter);
+        _chatModeration.RefreshOfficialFilter();
 
         if (_hooks is not null)
         {
@@ -188,7 +193,8 @@ public sealed class Mod : IDisposable
                     message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
                     _gameContextProbe,
                     _chatBlacklist,
-                    GetLocalNetworkRole);
+                    GetLocalNetworkRole,
+                    _chatModeration);
                 StartupPhaseDiagnostic.Run(
                     "native-chat-hooks",
                     moduleLog,
@@ -257,7 +263,8 @@ public sealed class Mod : IDisposable
             readRoomTransition: ReadRoomTransition,
             getEstablishedVoiceParticipantCount: GetEstablishedVoiceParticipantCount,
             getLocalPlayerName: GetLocalPlayerName,
-            readMemberTransition: ReadMemberTransition);
+            readMemberTransition: ReadMemberTransition,
+            chatModeration: _chatModeration);
 
         try
         {
@@ -293,6 +300,7 @@ public sealed class Mod : IDisposable
         {
             Volatile.Write(ref _configuration, configuration);
             _chatSession.History.Resize(Math.Clamp(configuration.HistoryCapacity, 10, 5_000));
+            _chatModeration.ApplyConfiguration(configuration.ChatFilter);
             _audioSettings?.ApplyConfiguration(configuration);
             if (!configuration.EnableVoiceInput)
                 SetLocalMicrophoneSelfTestRequested(false);
@@ -403,6 +411,7 @@ public sealed class Mod : IDisposable
         {
             _persistConfigurationUpdate(update);
             _chatSession.History.Resize(Math.Clamp(_configuration.HistoryCapacity, 10, 5_000));
+            _chatModeration.ApplyConfiguration(_configuration.ChatFilter);
         }
         finally
         {

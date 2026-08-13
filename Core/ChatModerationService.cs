@@ -38,7 +38,7 @@ internal sealed class ChatModerationService : IChatModerationService
             var previousPersistentBlocked = _persistentBlocked;
             _configuration = CloneConfiguration(configuration);
             _persistentBlocked = new HashSet<string>(
-                _configuration.BlockedPlayers.Select(static player => player.Identity),
+                _configuration.BlockedPlayers.Select(static player => player.Identity.Trim()),
                 StringComparer.Ordinal);
 
             foreach (var entityId in previousPersistentBlocked)
@@ -57,13 +57,13 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
-            ObserveParticipantCore(input.Participant);
+            var participant = ObserveParticipantCore(input.Participant);
 
-            if (input.Participant.IsLocal)
+            if (participant.IsLocal)
                 return ChatModerationDecision.Allow(input.Text);
 
-            if (IsBlockedCore(input.Participant))
-                return CreateBlockedDecision(input.Participant, input.Text);
+            if (IsBlockedCore(participant))
+                return CreateBlockedDecision(participant, input.Text);
 
             if (input.CommunicationCue != ChatCommunicationCue.None || !_configuration.Enabled)
                 return ChatModerationDecision.Allow(input.Text);
@@ -106,7 +106,7 @@ internal sealed class ChatModerationService : IChatModerationService
             }
 
             var autoBlocked = ApplyAutoBlock(
-                input.Participant,
+                participant,
                 GetMessageTime(input.ReceivedAt),
                 out _);
             var disposition = _configuration.Action == ChatFilterAction.HideEntireMessage
@@ -135,10 +135,25 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
-            if (!TryGetStableIdentityKey(participant, out var key))
-                return;
+            var leavingParticipant = participant;
+            var keysToForget = _players
+                .Where(pair => RepresentsLeavingParticipant(pair.Value.Participant, leavingParticipant))
+                .Select(static pair => pair.Key)
+                .ToHashSet(StringComparer.Ordinal);
+            if (TryGetStableIdentityKey(participant, out var directKey))
+                keysToForget.Add(directKey);
 
-            _players.Remove(key);
+            foreach (var key in keysToForget)
+            {
+                _players.Remove(key);
+                if (key.StartsWith("entity:", StringComparison.Ordinal))
+                    continue;
+
+                // Sender and player-number keys are room-local fallbacks. They must not
+                // survive a departure because Relink can reuse the same slot for a new member.
+                _roomBlockedKeys.Remove(key);
+                _autoBlockedKeys.Remove(key);
+            }
         }
     }
 
@@ -146,48 +161,48 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
-            if (participant.IsLocal)
+            var resolvedParticipant = ObserveParticipantCore(participant);
+            if (resolvedParticipant.IsLocal)
                 return false;
 
             if (persistent)
             {
-                if (string.IsNullOrWhiteSpace(participant.EntityId))
+                if (string.IsNullOrWhiteSpace(resolvedParticipant.EntityId))
                     return false;
 
                 if (blocked)
                 {
-                    if (_persistentBlocked.Add(participant.EntityId))
+                    var normalizedEntityId = resolvedParticipant.EntityId.Trim();
+                    if (_persistentBlocked.Add(normalizedEntityId))
                     {
                         _configuration.BlockedPlayers.Add(new BlockedPlayerConfiguration
                         {
                             IdentityKind = BlockedPlayerIdentityKind.PlayFabEntityId,
-                            Identity = participant.EntityId,
-                            LastKnownName = participant.DisplayName ?? string.Empty,
+                            Identity = normalizedEntityId,
+                            LastKnownName = resolvedParticipant.DisplayName ?? string.Empty,
                             Source = BlockedPlayerSource.Manual,
                         });
                     }
 
-                    AddRoomBlock(participant);
-                    ObserveParticipantCore(participant);
+                    AddRoomBlock(resolvedParticipant);
                     return true;
                 }
 
-                var entityId = participant.EntityId;
+                var entityId = resolvedParticipant.EntityId.Trim();
                 _persistentBlocked.Remove(entityId);
                 _configuration.BlockedPlayers.RemoveAll(player =>
                     player.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
                     string.Equals(player.Identity, entityId, StringComparison.Ordinal));
-                RemoveRoomBlock(participant);
+                RemoveRoomBlock(resolvedParticipant);
                 return true;
             }
 
-            if (!TryGetStableIdentityKey(participant, out var roomKey))
+            if (!TryGetStableIdentityKey(resolvedParticipant, out var roomKey))
                 return false;
 
             if (blocked)
             {
                 _roomBlockedKeys.Add(roomKey);
-                ObserveParticipantCore(participant);
             }
             else
             {
@@ -203,7 +218,7 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         lock (_sync)
         {
-            return IsBlockedCore(participant);
+            return IsBlockedCore(ResolveCanonicalParticipant(participant));
         }
     }
 
@@ -386,7 +401,7 @@ internal sealed class ChatModerationService : IChatModerationService
                 .Select(static player => new BlockedPlayerConfiguration
                 {
                     IdentityKind = BlockedPlayerIdentityKind.PlayFabEntityId,
-                    Identity = player.Identity,
+                    Identity = player.Identity.Trim(),
                     LastKnownName = player.LastKnownName ?? string.Empty,
                     Source = player.Source,
                     Reason = player.Reason ?? string.Empty,
@@ -395,19 +410,94 @@ internal sealed class ChatModerationService : IChatModerationService
         };
     }
 
-    private void ObserveParticipantCore(ChatModerationParticipant participant)
+    private ChatModerationParticipant ObserveParticipantCore(ChatModerationParticipant participant)
     {
+        participant = NormalizeParticipant(participant);
         if (!TryGetStableIdentityKey(participant, out var key))
-            return;
+            return participant;
 
         if (_players.TryGetValue(key, out var existing))
         {
-            existing.Participant = participant;
+            existing.Participant = MergeParticipant(existing.Participant, participant, preferIncomingIdentity: true);
+            return existing.Participant;
         }
-        else
+
+        if (participant.PlayerNumber is < 1 or > PartyMemberSlotMap.MemberCount)
         {
             _players.Add(key, new PlayerState { Participant = participant });
+            return participant;
         }
+
+        var sameSlotCandidates = _players
+            .Where(pair => pair.Value.Participant.PlayerNumber == participant.PlayerNumber)
+            .OrderByDescending(pair => GetIdentityStrength(pair.Value.Participant))
+            .ToArray();
+        if (sameSlotCandidates.Length == 0)
+        {
+            _players.Add(key, new PlayerState { Participant = participant });
+            return participant;
+        }
+
+        var corroboratedCandidates = sameSlotCandidates
+            .Where(pair => SharesStableIdentityEvidence(pair.Value.Participant, participant))
+            .ToArray();
+        if (corroboratedCandidates.Length == 1)
+        {
+            var corroborated = corroboratedCandidates[0];
+            var existingStrength = GetIdentityStrength(corroborated.Value.Participant);
+            var incomingStrength = GetIdentityStrength(participant);
+            if (incomingStrength > existingStrength)
+            {
+                _players.Remove(corroborated.Key);
+                MigrateTemporaryBlock(corroborated.Key, key);
+                corroborated.Value.Participant = MergeParticipant(
+                    corroborated.Value.Participant,
+                    participant,
+                    preferIncomingIdentity: true);
+                _players.Add(key, corroborated.Value);
+                return corroborated.Value.Participant;
+            }
+
+            corroborated.Value.Participant = MergeParticipant(
+                corroborated.Value.Participant,
+                participant,
+                preferIncomingIdentity: false);
+            return corroborated.Value.Participant;
+        }
+
+        // A slot number alone cannot prove continuity. Slot-only observations do not
+        // override a stronger current identity or accrue moderation against it.
+        if (GetIdentityStrength(participant) <= 1)
+            return participant with { PlayerNumber = 0 };
+
+        // A new sender key or EntityId is authoritative evidence of the current
+        // occupant. Replace stale rows without transferring temporary state.
+        foreach (var sameSlot in sameSlotCandidates)
+            RemoveObservedState(sameSlot.Key);
+        _players.Add(key, new PlayerState { Participant = participant });
+        return participant;
+    }
+
+    private ChatModerationParticipant ResolveCanonicalParticipant(
+        ChatModerationParticipant participant)
+    {
+        participant = NormalizeParticipant(participant);
+        if (!TryGetStableIdentityKey(participant, out var key))
+            return participant;
+        if (_players.TryGetValue(key, out var exact))
+            return exact.Participant;
+        if (participant.PlayerNumber is < 1 or > PartyMemberSlotMap.MemberCount)
+            return participant;
+
+        var incomingStrength = GetIdentityStrength(participant);
+        var stronger = _players.Values
+            .Where(state =>
+                state.Participant.PlayerNumber == participant.PlayerNumber &&
+                GetIdentityStrength(state.Participant) > incomingStrength &&
+                SharesStableIdentityEvidence(state.Participant, participant))
+            .OrderByDescending(state => GetIdentityStrength(state.Participant))
+            .ToArray();
+        return stronger.Length == 1 ? stronger[0].Participant : participant;
     }
 
     private bool IsBlockedCore(ChatModerationParticipant participant)
@@ -425,7 +515,7 @@ internal sealed class ChatModerationService : IChatModerationService
     private bool IsPersistentlyBlockedCore(ChatModerationParticipant participant)
     {
         return !string.IsNullOrWhiteSpace(participant.EntityId) &&
-               _persistentBlocked.Contains(participant.EntityId);
+               _persistentBlocked.Contains(participant.EntityId.Trim());
     }
 
     private bool IsRoomBlockedCore(ChatModerationParticipant participant)
@@ -661,7 +751,7 @@ internal sealed class ChatModerationService : IChatModerationService
     {
         if (!string.IsNullOrWhiteSpace(participant.EntityId))
         {
-            key = "entity:" + participant.EntityId;
+            key = "entity:" + participant.EntityId.Trim();
             return true;
         }
 
@@ -671,7 +761,7 @@ internal sealed class ChatModerationService : IChatModerationService
             return true;
         }
 
-        if (participant.PlayerNumber > 0)
+        if (participant.PlayerNumber is >= 1 and <= PartyMemberSlotMap.MemberCount)
         {
             key = "player:" + participant.PlayerNumber.ToString(CultureInfo.InvariantCulture);
             return true;
@@ -679,6 +769,114 @@ internal sealed class ChatModerationService : IChatModerationService
 
         key = string.Empty;
         return false;
+    }
+
+    private static bool RepresentsLeavingParticipant(
+        ChatModerationParticipant observed,
+        ChatModerationParticipant leaving)
+    {
+        if (!string.IsNullOrWhiteSpace(leaving.EntityId))
+        {
+            return !string.IsNullOrWhiteSpace(observed.EntityId) &&
+                   string.Equals(
+                       observed.EntityId.Trim(),
+                       leaving.EntityId.Trim(),
+                       StringComparison.Ordinal);
+        }
+
+        if (leaving.SenderId != 0)
+            return observed.SenderId != 0 && observed.SenderId == leaving.SenderId;
+
+        return HasSameValidPlayerNumber(observed, leaving);
+    }
+
+    private static bool HasSameValidPlayerNumber(
+        ChatModerationParticipant first,
+        ChatModerationParticipant second) =>
+        first.PlayerNumber is >= 1 and <= PartyMemberSlotMap.MemberCount &&
+        second.PlayerNumber == first.PlayerNumber;
+
+    private void MigrateTemporaryBlock(string oldKey, string newKey)
+    {
+        if (_roomBlockedKeys.Remove(oldKey))
+            _roomBlockedKeys.Add(newKey);
+        if (_autoBlockedKeys.Remove(oldKey))
+            _autoBlockedKeys.Add(newKey);
+    }
+
+    private void RemoveObservedState(string key)
+    {
+        _players.Remove(key);
+        if (key.StartsWith("entity:", StringComparison.Ordinal))
+            return;
+
+        _roomBlockedKeys.Remove(key);
+        _autoBlockedKeys.Remove(key);
+    }
+
+    private static ChatModerationParticipant NormalizeParticipant(
+        ChatModerationParticipant participant) =>
+        participant with
+        {
+            DisplayName = participant.DisplayName?.Trim() ?? string.Empty,
+            EntityId = string.IsNullOrWhiteSpace(participant.EntityId)
+                ? null
+                : participant.EntityId.Trim(),
+        };
+
+    private static ChatModerationParticipant MergeParticipant(
+        ChatModerationParticipant existing,
+        ChatModerationParticipant incoming,
+        bool preferIncomingIdentity)
+    {
+        var preferred = preferIncomingIdentity ? incoming : existing;
+        var fallback = preferIncomingIdentity ? existing : incoming;
+        var preferredDisplayName = preferIncomingIdentity
+            ? incoming.DisplayName
+            : existing.DisplayName;
+        var fallbackDisplayName = preferIncomingIdentity
+            ? existing.DisplayName
+            : incoming.DisplayName;
+        return preferred with
+        {
+            PlayerNumber = preferred.PlayerNumber is >= 1 and <= PartyMemberSlotMap.MemberCount
+                ? preferred.PlayerNumber
+                : fallback.PlayerNumber,
+            DisplayName = string.IsNullOrWhiteSpace(preferredDisplayName)
+                ? fallbackDisplayName
+                : preferredDisplayName,
+            EntityId = !string.IsNullOrWhiteSpace(preferred.EntityId)
+                ? preferred.EntityId
+                : fallback.EntityId,
+            SenderId = preferred.SenderId != 0
+                ? preferred.SenderId
+                : fallback.SenderId,
+            IsLocal = existing.IsLocal || incoming.IsLocal,
+        };
+    }
+
+    private static int GetIdentityStrength(ChatModerationParticipant participant)
+    {
+        if (!string.IsNullOrWhiteSpace(participant.EntityId))
+            return 3;
+        if (participant.SenderId != 0)
+            return 2;
+        return participant.PlayerNumber is >= 1 and <= PartyMemberSlotMap.MemberCount ? 1 : 0;
+    }
+
+    private static bool SharesStableIdentityEvidence(
+        ChatModerationParticipant first,
+        ChatModerationParticipant second)
+    {
+        var firstEntityId = first.EntityId?.Trim();
+        var secondEntityId = second.EntityId?.Trim();
+        if (!string.IsNullOrWhiteSpace(firstEntityId) &&
+            !string.IsNullOrWhiteSpace(secondEntityId))
+        {
+            return string.Equals(firstEntityId, secondEntityId, StringComparison.Ordinal);
+        }
+
+        return first.SenderId != 0 && first.SenderId == second.SenderId;
     }
 
     private sealed class PlayerState

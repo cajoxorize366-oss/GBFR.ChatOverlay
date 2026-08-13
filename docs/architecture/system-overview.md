@@ -15,6 +15,7 @@ flowchart LR
     RT --> HUB["OverlayHub election"]
     RT --> MOD["Mod composition root"]
     MOD --> CHAT["Native chat and identity"]
+    MOD --> FILTER["Chat moderation"]
     MOD --> PARTY["Party room and voice"]
     MOD --> HUD["Native party HUD"]
     MOD --> INPUT["DirectInput/XInput/Flydigi"]
@@ -22,7 +23,8 @@ flowchart LR
     HUB --> PRESENT["Single Present and WndProc writer"]
     PRESENT --> UI
     PRESENT --> INPUT
-    CHAT --> UI
+    CHAT --> FILTER
+    FILTER --> UI
     PARTY --> UI
     HUD --> UI
 ```
@@ -33,21 +35,22 @@ flowchart LR
 
 `Mod.cs` creates modules in dependency order:
 
-1. Resolve the current Relink chat manager context when hooks are available.
-2. Resolve configured audio endpoints when Party voice is enabled.
-3. Attach Party lifecycle hooks, which provide the authoritative online-room gate.
-4. Attach native party-HUD factory/destructor hooks.
-5. Create the local audio settings/self-test controller.
-6. Attach native text chat and identity hooks.
-7. Construct `ChatSession` and `ChatOverlayPeer`.
-8. Register the peer with the process-local OverlayHub.
-9. If this mod owns the OverlayHub host lease, activate the DirectInput carrier on the shared Present tick.
+1. Create the chat-moderation service and initialize the optional Steamworks text filter.
+2. Resolve the current Relink chat manager context when hooks are available.
+3. Resolve configured audio endpoints when Party voice is enabled.
+4. Attach Party lifecycle hooks, which provide the authoritative online-room gate.
+5. Attach native party-HUD factory/destructor hooks.
+6. Create the local audio settings/self-test controller.
+7. Attach native text, identity, and receive-moderation hooks.
+8. Construct `ChatSession` and `ChatOverlayPeer`.
+9. Register the peer with the process-local OverlayHub.
+10. If this mod owns the OverlayHub host lease, activate the DirectInput carrier on the shared Present tick.
 
 ## Major data flows
 
 ### Incoming text
 
-`Relink rpcMessage hook -> packet copy/decoder -> sender key resolver -> member slot -> lobby/player identity -> attribution policy -> incoming queue -> ChatSession -> ChatHistory -> overlay render`
+`Relink rpcMessage hook -> sender key resolver -> coherent member/local slots -> PlayFab identity -> raw-text decoder -> moderation decision -> original or rewritten Relink packet -> same final text queued to ChatSession -> ChatHistory -> overlay render`
 
 ### Outgoing text
 

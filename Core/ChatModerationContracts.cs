@@ -108,6 +108,8 @@ internal interface IChatModerationService
 
     void ObserveParticipant(in ChatModerationParticipant participant);
 
+    void ForgetParticipant(in ChatModerationParticipant participant);
+
     bool SetBlocked(in ChatModerationParticipant participant, bool blocked, bool persistent);
 
     bool IsBlocked(in ChatModerationParticipant participant);

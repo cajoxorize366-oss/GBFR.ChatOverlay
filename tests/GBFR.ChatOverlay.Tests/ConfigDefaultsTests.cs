@@ -1,7 +1,7 @@
 using System.IO;
 using System.ComponentModel;
 using GBFR.ChatOverlay.Configuration;
-using GBFR.ChatOverlay.Template.Configuration;
+using GBFR.ChatOverlay.Runtime.Configuration;
 
 namespace GBFR.ChatOverlay.Tests;
 
@@ -146,13 +146,7 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
-    public void MutedPartyChatControlCanary_IsEnabledForStage2ValidationBuilds()
-    {
-        Assert.True(new Config().EnableMutedPartyChatControlCanary);
-    }
-
-    [Fact]
-    public void ExperimentalPartyVoiceTest_IsEnabledForPreviewPackage()
+    public void PartyVoice_IsEnabledByDefault()
     {
         Assert.True(new Config().EnableVoiceInput);
     }

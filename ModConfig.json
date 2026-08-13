@@ -2,10 +2,10 @@
   "ModId": "gbfr.qol.chatoverlay",
   "ModName": "GBFR Chat Overlay",
   "ModAuthor": "Kuro",
-  "ModVersion": "0.5.0-preview.26",
-  "ModDescription": "Online-room-gated MMO-style chat and Party voice overlay with native party-HUD indicators and an RTSS-safe Present backend.",
+  "ModVersion": "0.6.0",
+  "ModDescription": "Native online-room text chat, PlayFab Party voice, room/member notices, and Relink party-HUD voice indicators through one shared OverlayHub graphics writer.",
   "ModDll": "GBFR.ChatOverlay.dll",
-  "ModIcon": "Preview.png",
+  "ModIcon": "Icon.png",
   "ModR2RManagedDll32": "",
   "ModR2RManagedDll64": "",
   "ModNativeDll32": "",
@@ -19,5 +19,5 @@
   "ModDependencies": [ "reloaded.sharedlib.hooks" ],
   "OptionalDependencies": [ "GBFR.ExtraSigilSlots.Reloaded" ],
   "SupportedAppId": [ "granblue_fantasy_relink.exe" ],
-  "ProjectUrl": ""
+  "ProjectUrl": "https://github.com/cajoxorize366-oss/GBFR.ChatOverlay"
 }

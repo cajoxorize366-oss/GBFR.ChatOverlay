@@ -1,6 +1,6 @@
 ﻿using Reloaded.Hooks.ReloadedII.Interfaces;
 using Reloaded.Mod.Interfaces;
-using GBFR.ChatOverlay.Template;
+using GBFR.ChatOverlay.Runtime;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
 using GBFR.ChatOverlay.Overlay;
@@ -12,15 +12,10 @@ using GBFR.OverlayHub.Contracts;
 namespace GBFR.ChatOverlay;
 
 /// <summary>
-/// Your mod logic goes here.
+/// Composes the native chat, Party voice, input and overlay modules for the Reloaded-II runtime.
 /// </summary>
-public class Mod : ModBase // <= Do not Remove.
+public sealed class Mod : IDisposable
 {
-    /// <summary>
-    /// Provides access to the mod loader API.
-    /// </summary>
-    private readonly IModLoader _modLoader;
-
     /// <summary>
     /// Provides access to the Reloaded.Hooks API.
     /// </summary>
@@ -31,11 +26,6 @@ public class Mod : ModBase // <= Do not Remove.
     /// Provides access to the Reloaded logger.
     /// </summary>
     private readonly ILogger _logger;
-
-    /// <summary>
-    /// Entry point into the mod, instance that created this class.
-    /// </summary>
-    private readonly IMod _owner;
 
     /// <summary>
     /// Provides access to this mod's configuration.
@@ -52,7 +42,7 @@ public class Mod : ModBase // <= Do not Remove.
 
     private readonly ChatSession _chatSession;
     private readonly ChatBlacklist _chatBlacklist = new();
-    private readonly ChatOverlayPeer? _overlay;
+    private readonly ChatOverlayPeer _overlay;
     private DirectInputKeyboardHook? _directInputKeyboard;
     private readonly RelinkChatBridge? _nativeChatBridge;
     private readonly PartyLifecycleProbe? _partyLifecycleProbe;
@@ -61,13 +51,12 @@ public class Mod : ModBase // <= Do not Remove.
     private readonly RelinkGameContextProbe? _gameContextProbe;
     private readonly IGbfrOverlayHub _overlayHub;
     private bool _ownsOverlayBroker;
+    private int _disposed;
 
-    public Mod(ModContext context)
+    internal Mod(ModContext context)
     {
-        _modLoader = context.ModLoader;
         _hooks = context.Hooks;
         _logger = context.Logger;
-        _owner = context.Owner;
         _configuration = context.Configuration;
         _modConfig = context.ModConfig;
         _persistConfigurationUpdate = context.UpdateConfiguration;
@@ -94,7 +83,7 @@ public class Mod : ModBase // <= Do not Remove.
 
         var audioInputSelection = ResolvedAudioEndpointSelection.SystemDefault();
         var audioOutputSelection = ResolvedAudioEndpointSelection.SystemDefault();
-        if (_configuration.EnableMutedPartyChatControlCanary || _configuration.EnableVoiceInput)
+        if (_configuration.EnableVoiceInput)
         {
             var audioCatalog = new WindowsAudioEndpointCatalog();
             audioInputSelection = AudioEndpointSelectionResolver.Resolve(
@@ -111,16 +100,14 @@ public class Mod : ModBase // <= Do not Remove.
 
         if (_hooks is not null)
         {
+            PartyLifecycleProbe? partyLifecycleProbe = null;
             try
             {
-                _partyLifecycleProbe = new PartyLifecycleProbe(
+                partyLifecycleProbe = new PartyLifecycleProbe(
                     _hooks,
                     moduleLog,
                     enableLifecycleLogging: _configuration.EffectivePartyLifecycleDiagnostics,
-                    enableMutedChatControlCanary:
-                        _configuration.EnableMutedPartyChatControlCanary ||
-                        _configuration.EnableVoiceInput,
-                    enableVoiceTest: _configuration.EnableVoiceInput,
+                    enableVoice: _configuration.EnableVoiceInput,
                     audioInputSelection: audioInputSelection,
                     audioOutputSelection: audioOutputSelection,
                     invalidateRoomIdentity: ResetLobbyOwner,
@@ -128,10 +115,12 @@ public class Mod : ModBase // <= Do not Remove.
                 StartupPhaseDiagnostic.Run(
                     "party-lifecycle-hooks",
                     moduleLog,
-                    _partyLifecycleProbe.Initialize);
+                    partyLifecycleProbe.Initialize);
+                _partyLifecycleProbe = partyLifecycleProbe;
             }
             catch (Exception exception)
             {
+                partyLifecycleProbe?.Dispose();
                 _logger.WriteLine(
                     $"[{_modConfig.ModId}] Online Party-room gate unavailable; the Overlay will remain " +
                     $"hidden (fail-closed): {exception}");
@@ -140,10 +129,12 @@ public class Mod : ModBase // <= Do not Remove.
 
         if (_hooks is not null)
         {
+            RelinkPartyHudTracker? partyHudTracker = null;
             try
             {
-                _partyHudTracker = new RelinkPartyHudTracker(_hooks, moduleLog);
-                _partyHudTracker.Initialize();
+                partyHudTracker = new RelinkPartyHudTracker(_hooks, moduleLog);
+                partyHudTracker.Initialize();
+                _partyHudTracker = partyHudTracker;
             }
             catch (Exception exception)
             {
@@ -179,7 +170,7 @@ public class Mod : ModBase // <= Do not Remove.
         {
             history.Add(
                 "System",
-                "VOICE PREVIEW: press F10 for microphone/speaker selection and the local self-test. " +
+                "VOICE: press F10 for microphone/speaker selection and the local self-test. " +
                 "Hold U for Party voice when another Mod client is ready. Use headphones for testing.",
                 ChatMessageKind.System);
         }
@@ -189,9 +180,10 @@ public class Mod : ModBase // <= Do not Remove.
         var transportStatus = "Native Relink chat is unavailable.";
         if (_hooks is not null && _configuration.EnableNativeChatBridge)
         {
+            RelinkChatBridge? nativeChatBridge = null;
             try
             {
-                _nativeChatBridge = new RelinkChatBridge(
+                nativeChatBridge = new RelinkChatBridge(
                     _hooks,
                     message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
                     _gameContextProbe,
@@ -200,10 +192,11 @@ public class Mod : ModBase // <= Do not Remove.
                 StartupPhaseDiagnostic.Run(
                     "native-chat-hooks",
                     moduleLog,
-                    _nativeChatBridge.Initialize);
-                _gameContextProbe ??= _nativeChatBridge.GameContext;
-                transport = _nativeChatBridge;
-                incoming = _nativeChatBridge;
+                    nativeChatBridge.Initialize);
+                _nativeChatBridge = nativeChatBridge;
+                _gameContextProbe ??= nativeChatBridge.GameContext;
+                transport = nativeChatBridge;
+                incoming = nativeChatBridge;
                 transportStatus = "Native Relink chat connected (2.0.4).";
                 history.Add(
                     "System",
@@ -293,8 +286,7 @@ public class Mod : ModBase // <= Do not Remove.
         StartDeferredFileHashDiagnostics(moduleLog);
     }
 
-    #region Standard Overrides
-    public override void ConfigurationUpdated(Config configuration)
+    public void ConfigurationUpdated(Config configuration)
     {
         Interlocked.Increment(ref _configurationRevision);
         try
@@ -312,40 +304,49 @@ public class Mod : ModBase // <= Do not Remove.
         }
     }
 
-    public override bool CanSuspend() => _overlay is not null;
-
-    public override void Suspend()
+    public void Suspend()
     {
         // The process-wide Broker and its input writer outlive this peer's suspended state.
         _audioSettings?.Suspend();
         _partyLifecycleProbe?.Suspend();
         _partyHudTracker?.Suspend();
         _nativeChatBridge?.Suspend();
-        _overlay?.Suspend();
+        _overlay.Suspend();
     }
 
-    public override void Resume()
+    public void Resume()
     {
-        _overlay?.Resume();
+        _overlay.Resume();
         _audioSettings?.Resume();
         _partyLifecycleProbe?.Resume();
         _partyHudTracker?.Resume();
         _nativeChatBridge?.Resume();
     }
 
-    public override void Disposing()
+    public void Dispose()
     {
-        _directInputKeyboard?.Dispose();
-        _overlay?.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+
+        RunDisposeStep("voice input release", ForceReleaseVoiceInputs);
+        RunDisposeStep("DirectInput carrier", () =>
+        {
+            _directInputKeyboard?.Dispose();
+            _directInputKeyboard = null;
+        });
+        RunDisposeStep("OverlayHub peer", _overlay.Dispose);
+        RunDisposeStep("local audio settings", () => _audioSettings?.Dispose());
+        RunDisposeStep("Party lifecycle and voice", () => _partyLifecycleProbe?.Dispose());
+        RunDisposeStep("native party HUD", () => _partyHudTracker?.Suspend());
+        RunDisposeStep("native chat", () => _nativeChatBridge?.Suspend());
     }
-    #endregion
 
     internal void BrokerCarrierUpkeep() => _directInputKeyboard?.Poll();
 
     internal void BecomeOverlayBrokerCarrier()
     {
         _ownsOverlayBroker = true;
-        if (_hooks is null || _overlay is null || _directInputKeyboard is not null)
+        if (_hooks is null || _directInputKeyboard is not null)
             return;
 
         DirectInputKeyboardHook? directInputKeyboard = null;
@@ -567,9 +568,25 @@ public class Mod : ModBase // <= Do not Remove.
         _audioSettings?.SetSelfTestPressed(false);
     }
 
-    #region For Exports, Serialization etc.
-#pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider declaring as nullable.
-    public Mod() { }
-#pragma warning restore CS8618
-    #endregion
+    private void RunDisposeStep(string component, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                _logger.WriteLine(
+                    $"[{_modConfig.ModId}] Disposal of {component} failed; continuing teardown: " +
+                    $"{exception.GetType().Name}: {exception.Message}");
+            }
+            catch
+            {
+                // Teardown must continue even when the host logger is unavailable.
+            }
+        }
+    }
+
 }

@@ -30,6 +30,7 @@ public sealed class PartyStateChangeCatalogTests
     [Theory]
     [InlineData(0u)]
     [InlineData(31u)]
+    [InlineData(59u)]
     [InlineData(60u)]
     public void IsKnown_AcceptsOfficialParty11012Values(uint value)
     {
@@ -64,6 +65,7 @@ public sealed class PartyStateChangeCatalogTests
     [InlineData(22u)]
     [InlineData(36u)]
     [InlineData(37u)]
+    [InlineData(59u)]
     [InlineData(61u)]
     public void IsLifecycle_FiltersPayloadAndUnknownEvents(uint value)
     {

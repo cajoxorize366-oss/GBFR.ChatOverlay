@@ -135,7 +135,7 @@ public sealed class DirectInputKeyboardStateFilterTests
     }
 
     [Fact]
-    public void Process_LeavesVoiceKeyForGameWhenVoiceTestIsDisabled()
+    public void Process_LeavesVoiceKeyForGameWhenVoiceIsDisabled()
     {
         var filter = new DirectInputKeyboardStateFilter();
         var reports = new List<bool>();

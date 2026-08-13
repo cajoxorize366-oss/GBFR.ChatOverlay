@@ -62,6 +62,14 @@ public sealed class QuickActionConfigurationTests
     }
 
     [Fact]
+    public void OfficialCatalog_DefaultIdFailsClosedForUnsupportedKinds()
+    {
+        Assert.Equal(16, CommunicationCatalog.GetDefaultId(QuickActionKind.Stamp));
+        Assert.Equal(-1, CommunicationCatalog.GetDefaultId(QuickActionKind.CustomText));
+        Assert.Equal(-1, CommunicationCatalog.GetDefaultId((QuickActionKind)int.MaxValue));
+    }
+
+    [Fact]
     public void UnknownOfficialId_IsNotConfigured()
     {
         var action = new QuickActionConfiguration
@@ -74,7 +82,7 @@ public sealed class QuickActionConfigurationTests
     }
 
     [Fact]
-    public void LegacyControllerBinding_IsIgnoredBySerializationAndRuntimeSnapshot()
+    public void LegacyControllerBinding_IsIgnoredWithoutADeadRuntimeProperty()
     {
         var action = JsonSerializer.Deserialize<QuickActionConfiguration>(
             "{\"Text\":\"Ready!\",\"ControllerBinding\":\"X\"}")!;
@@ -84,8 +92,8 @@ public sealed class QuickActionConfigurationTests
             QuickActions = [action],
         });
 
-        Assert.Equal(string.Empty, action.ControllerBinding);
         Assert.DoesNotContain("ControllerBinding", json, StringComparison.Ordinal);
+        Assert.Null(typeof(QuickActionConfiguration).GetProperty("ControllerBinding"));
         Assert.False(snapshot.QuickActions[0].Keyboard.IsBound);
     }
 }

@@ -1,9 +1,30 @@
 using GBFR.ChatOverlay.Native;
+using System.Reflection;
+using ReloadedHooksApi = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
 
 namespace GBFR.ChatOverlay.Tests;
 
 public sealed class PartyLifecycleProbeTests
 {
+    [Fact]
+    public void Dispose_IsIdempotentAndPreventsResume()
+    {
+        var invalidationCount = 0;
+        var hooks = DispatchProxy.Create<ReloadedHooksApi, UnusedReloadedHooksProxy>();
+        var probe = new PartyLifecycleProbe(
+            hooks,
+            _ => { },
+            invalidateRoomIdentity: () => invalidationCount++);
+
+        probe.Dispose();
+        probe.Dispose();
+
+        Assert.False(probe.IsInitialized);
+        Assert.False(probe.IsOnlineRoomActive);
+        Assert.Equal(1, invalidationCount);
+        Assert.Throws<ObjectDisposedException>(probe.Resume);
+    }
+
     [Fact]
     public void MapTalkingRemotePlayers_SkipsLocalSlotAndUsesAscendingRemoteOrdinals()
     {
@@ -154,5 +175,12 @@ public sealed class PartyLifecycleProbeTests
         Assert.Empty(snapshot.EstablishedRemotePlayers);
         Assert.Empty(snapshot.OccupiedRemotePlayers);
         Assert.Empty(snapshot.TalkingRemotePlayers);
+    }
+
+    private class UnusedReloadedHooksProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
+            throw new InvalidOperationException(
+                $"Unexpected Reloaded.Hooks call during lifecycle-only test: {targetMethod?.Name}");
     }
 }

@@ -1,4 +1,4 @@
-using GBFR.ChatOverlay.Template;
+using GBFR.ChatOverlay.Runtime;
 using GBFR.OverlayHub.Contracts;
 
 namespace GBFR.ChatOverlay.Tests;

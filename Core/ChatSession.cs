@@ -36,7 +36,7 @@ public sealed class ChatSession
         _getLocalIdentity = getLocalIdentity ?? (() => new LocalChatIdentity(_localSender, 0));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _incoming = incoming;
-        TransportStatusText = transportStatusText ?? "Local preview: the Relink chat bridge is not attached yet.";
+        TransportStatusText = transportStatusText ?? "Native Relink chat is unavailable because the bridge is not attached.";
     }
 
     public ChatHistory History { get; }

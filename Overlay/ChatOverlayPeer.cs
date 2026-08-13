@@ -858,7 +858,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             if ((Volatile.Read(ref _voicePushToTalkKeyDown) & WindowHotkeySource) != 0)
             {
                 LogSafely(
-                    "Stage 3 window push-to-talk hold was revoked because Party voice is no longer ready; " +
+                    "Party voice window push-to-talk hold was revoked because Party voice is no longer ready; " +
                     "release the physical key before retrying.");
             }
             _windowVoicePushToTalkGate.Report(false);
@@ -2155,7 +2155,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     action.Kind = selectedKind;
                     action.OfficialId = selectedKind == QuickActionKind.CustomText
                         ? -1
-                        : CommunicationCatalog.GetEntries(selectedKind).FirstOrDefault().Id;
+                        : CommunicationCatalog.GetDefaultId(selectedKind);
                 });
             }
 
@@ -3697,13 +3697,13 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             if (firstPhysicalDown && _canUseVoicePushToTalk())
             {
                 LogSafely(
-                    "Stage 3 window push-to-talk physical press reached the Chat input route and entered the safety gate.");
+                    "Party voice window push-to-talk physical press reached the Chat input route and entered the safety gate.");
                 _windowVoicePushToTalkGate.Report(true);
             }
             else if (firstPhysicalDown)
             {
                 LogSafely(
-                    "Stage 3 window push-to-talk physical press reached the Chat input route, but Party voice " +
+                    "Party voice window push-to-talk physical press reached the Chat input route, but Party voice " +
                     "is not ready; no unmute request was sent.");
                 _statusText = T(
                     "[语音] 尚未就绪，正在等待另一位安装相同版本模组的队友。",

@@ -122,7 +122,6 @@ public sealed class HotkeyBindingTests
                     Name = "Ready",
                     Text = "Ready!",
                     KeyboardBinding = "Alt+1",
-                    ControllerBinding = "LB+Y",
                 },
             ],
         };

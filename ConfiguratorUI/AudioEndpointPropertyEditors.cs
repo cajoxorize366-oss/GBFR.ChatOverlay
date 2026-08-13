@@ -78,7 +78,17 @@ internal static class AudioEndpointChoiceCatalog
         {
             endpoints = WindowsAudioEndpointCatalog.GetActiveEndpoints(flow);
         }
-        catch (Exception exception)
+        catch (ExternalException exception)
+        {
+            endpoints = Array.Empty<AudioEndpointInfo>();
+            defaultLabel += $" — 设备扫描失败 / device scan failed ({exception.GetType().Name})";
+        }
+        catch (InvalidCastException exception)
+        {
+            endpoints = Array.Empty<AudioEndpointInfo>();
+            defaultLabel += $" — 设备扫描失败 / device scan failed ({exception.GetType().Name})";
+        }
+        catch (OverflowException exception)
         {
             endpoints = Array.Empty<AudioEndpointInfo>();
             defaultLabel += $" — 设备扫描失败 / device scan failed ({exception.GetType().Name})";
@@ -93,7 +103,7 @@ internal static class AudioEndpointChoiceCatalog
             var duplicateName = endpoints.Count(candidate => string.Equals(
                 candidate.FriendlyName,
                 endpoint.FriendlyName,
-                StringComparison.CurrentCultureIgnoreCase)) > 1;
+                StringComparison.OrdinalIgnoreCase)) > 1;
             var defaultSuffix = endpoint.IsDefaultCommunicationsDevice
                 ? " (Windows 通信默认 / communications default)"
                 : string.Empty;
@@ -351,5 +361,6 @@ internal static class WindowsAudioEndpointCatalog
     }
 
     [DllImport("ole32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern int PropVariantClear(ref PropVariant value);
 }

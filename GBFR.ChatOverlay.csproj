@@ -11,11 +11,13 @@
     <OutputPath Condition="'$(RELOADEDIIMODS)' == ''">bin/$(Configuration)/</OutputPath>
     <ImplicitUsings>enable</ImplicitUsings>
     <NativeBridgeConfiguration>Release</NativeBridgeConfiguration>
-
-    <!-- IL Trimming Support for Framework Dependent Apps. Unofficial.
-         If you set this to true, trimming will be enabled when you publish the mod.
-         Test trimming with: `BuildLinked.ps1` in PowerShell. -->
-    <ReloadedILLink>false</ReloadedILLink>
+    <Version>0.6.0</Version>
+    <AssemblyVersion>0.6.0.0</AssemblyVersion>
+    <FileVersion>0.6.0.0</FileVersion>
+    <InformationalVersion>0.6.0</InformationalVersion>
+    <Authors>Kuro</Authors>
+    <Description>Native room chat and PlayFab Party voice overlay for Granblue Fantasy: Relink 2.0.4.</Description>
+    <RepositoryUrl>https://github.com/cajoxorize366-oss/GBFR.ChatOverlay</RepositoryUrl>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
@@ -34,25 +36,14 @@
     <NativeBridgeConfiguration>Release</NativeBridgeConfiguration>
   </PropertyGroup>
 
-  <ItemGroup>
-    <ReloadedLinkRoots Include="GBFR.ChatOverlay" />
-    <!-- Add assemblies to be trimmed. You might need to add their dependencies too!  -->
-    <!-- <ReloadedLinkAssemblies Include="Reloaded.Memory" /> -->
-  </ItemGroup>
-
-  <Import Project="Reloaded.Trimming.targets" />
   <Import Project="Reloaded.Checks.targets" />
 
   <ItemGroup>
     <None Remove="ModConfig.json" />
-    <None Remove="Publish.ps1" />
-    <None Remove="BuildLinked.ps1" />
     <None Remove="build-native-bridge.ps1" />
-    <None Remove="Reloaded.Trimming.targets" />
     <None Remove="Reloaded.Checks.targets" />
     <Compile Remove="ConfiguratorUI/**/*.cs" />
     <Compile Remove="GBFR.OverlayHub.Contracts/**/*.cs" />
-    <Compile Remove="Publish/**/*.cs" />
     <Compile Remove="tests/**/*.cs" />
   </ItemGroup>
 
@@ -60,7 +51,7 @@
     <Content Include="ModConfig.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
-    <None Update="Preview.png">
+    <None Update="Icon.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="THIRD_PARTY_NOTICES.md">
@@ -89,7 +80,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.ILLink.Tasks" Version="8.0.3" />
     <PackageReference Include="HidSharp" Version="2.6.4" />
     <PackageReference Include="NAudio.Wasapi" Version="2.3.0" />
     <PackageReference Include="Reloaded.Imgui.Hook" Version="4.1.0" />

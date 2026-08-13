@@ -179,8 +179,8 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         if (timedOut)
         {
             SafeLog(_operationName == "push-to-talk"
-                ? "Stage 3 push-to-talk heartbeat timed out; microphone mute was forced."
-                : $"Stage 3 {_operationName} heartbeat timed out; it was forced off.");
+                ? "Party voice push-to-talk heartbeat timed out; microphone mute was forced."
+                : $"Party voice {_operationName} heartbeat timed out; it was forced off.");
         }
     }
 
@@ -211,7 +211,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         }
         catch (Exception exception)
         {
-            SafeLog($"Stage 3 {_operationName} state callback failed: {exception.Message}");
+            SafeLog($"Party voice {_operationName} state callback failed: {exception.Message}");
         }
     }
 
@@ -223,7 +223,7 @@ public sealed class VoicePushToTalkSafetyGate : IDisposable
         }
         catch (Exception exception)
         {
-            SafeLog($"Stage 3 voice diagnostic callback failed: {exception.Message}");
+            SafeLog($"Party voice diagnostic callback failed: {exception.Message}");
         }
     }
 

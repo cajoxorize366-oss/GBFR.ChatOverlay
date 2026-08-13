@@ -1,0 +1,198 @@
+name: quality-gate
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality_gate:
+    name: quality-gate
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout Extra Sigil Slots main for OverlayHub sync gate
+        id: sibling
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runnerTemp = $env:RUNNER_TEMP
+          if ([string]::IsNullOrWhiteSpace($runnerTemp)) {
+            throw 'RUNNER_TEMP is not set'
+          }
+          $syncRoot = Join-Path $runnerTemp 'gbfr-overlayhub-sync-extra-sigil-slots'
+          $siblingPath = Join-Path $syncRoot 'ExtraSigilSlots'
+          $resolvedTemp = [System.IO.Path]::GetFullPath($runnerTemp)
+          $resolvedSibling = [System.IO.Path]::GetFullPath($siblingPath)
+          $tempPrefix = $resolvedTemp.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+          if (-not $resolvedSibling.StartsWith($tempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to clean outside RUNNER_TEMP: $resolvedSibling"
+          }
+          if (Test-Path -LiteralPath $siblingPath) {
+            Remove-Item -LiteralPath $siblingPath -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $syncRoot -Force | Out-Null
+          git clone --depth 1 --branch main --single-branch "https://github.com/cajoxorize366-oss/GBFR-Extra-Sigil-Slots.git" $siblingPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "git clone failed with exit code $LASTEXITCODE"
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "path=$siblingPath"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          }
+          else {
+            $modConfigPath = Join-Path $env:GITHUB_WORKSPACE 'ModConfig.json'
+            if (-not (Test-Path -LiteralPath $modConfigPath -PathType Leaf)) {
+              throw "Missing ModConfig.json: $modConfigPath"
+            }
+            $version = (Get-Content -Raw -LiteralPath $modConfigPath | ConvertFrom-Json).ModVersion
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Release version must be a stable semantic version: $version"
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+
+      - name: Verify shared OverlayHub sources
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/VerifyOverlayBrokerSync.ps1" `
+            -OtherRepository "${{ steps.sibling.outputs.path }}"
+
+      - name: Restore
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+            throw 'RUNNER_TEMP is not set'
+          }
+          $reloadedModsRoot = Join-Path $env:RUNNER_TEMP 'gbfr-chatoverlay-tests-reloaded-mods'
+          New-Item -ItemType Directory -Path $reloadedModsRoot -Force | Out-Null
+          if (-not (Test-Path -LiteralPath $reloadedModsRoot -PathType Container)) {
+            throw "Failed to create RELOADEDIIMODS directory: $reloadedModsRoot"
+          }
+          $env:RELOADEDIIMODS = $reloadedModsRoot
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "RELOADEDIIMODS=$reloadedModsRoot"
+          dotnet restore "$env:GITHUB_WORKSPACE/tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj" --nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build with repository analyzers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet build "$env:GITHUB_WORKSPACE/tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj" `
+            --configuration Release `
+            --no-restore `
+            --nologo `
+            -p:TreatWarningsAsErrors=true
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet test "$env:GITHUB_WORKSPACE/tests/GBFR.ChatOverlay.Tests/GBFR.ChatOverlay.Tests.csproj" `
+            --configuration Release `
+            --no-build `
+            --no-restore `
+            --nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package ZIP
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/ci/package-chat.ps1" -Version "${{ steps.version.outputs.version }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-overlay-${{ steps.version.outputs.version }}
+          path: |
+            artifacts/GBFR.ChatOverlay-${{ steps.version.outputs.version }}-Relink-2.0.4.zip
+            artifacts/GBFR.ChatOverlay-${{ steps.version.outputs.version }}-Relink-2.0.4.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Attach ZIP to GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: quality_gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: chat-overlay-${{ needs.quality_gate.outputs.version }}
+          path: release
+
+      - name: Verify release checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/release"
+          sha256sum --check ./*.sha256
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find "$GITHUB_WORKSPACE/release" -maxdepth 1 -type f \( -name '*.zip' -o -name '*.sha256' \) -print | sort)
+          if [[ "${#assets[@]}" -ne 2 ]]; then
+            echo "::error::No ZIP artifact found under release/"
+            exit 1
+          fi
+          version="${{ needs.quality_gate.outputs.version }}"
+          title="GBFR Chat Overlay $version"
+          notes="$GITHUB_WORKSPACE/release-notes.md"
+          awk -v heading="## $version" '
+            index($0, heading) == 1 { capture = 1 }
+            capture && /^## / && index($0, heading) != 1 { exit }
+            capture { print }
+          ' "$GITHUB_WORKSPACE/CHANGELOG.md" > "$notes"
+          if [[ ! -s "$notes" ]]; then
+            echo "::error::No changelog section found for $version"
+            exit 1
+          fi
+          if ! gh release view "$GITHUB_REF_NAME" --json tagName >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "$title" --notes-file "$notes"
+          else
+            gh release edit "$GITHUB_REF_NAME" --title "$title" --notes-file "$notes" --draft=false --prerelease=false
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber

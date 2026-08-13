@@ -58,7 +58,7 @@ internal static class AudioEndpointSelectionResolver
         var role = flow == AudioEndpointFlow.Capture ? "microphone" : "playback";
         if (AudioEndpointSelectionValues.IsSystemDefault(configuredDeviceId))
         {
-            log($"Stage 3 voice {role}: following the Windows default communications device.");
+            log($"Party voice {role}: following the Windows default communications device.");
             return ResolvedAudioEndpointSelection.SystemDefault();
         }
 
@@ -70,7 +70,7 @@ internal static class AudioEndpointSelectionResolver
         catch (Exception exception)
         {
             log(
-                $"Stage 3 voice {role} enumeration failed with {exception.GetType().Name}: " +
+                $"Party voice {role} enumeration failed with {exception.GetType().Name}: " +
                 $"{exception.Message}; falling back to the Windows default communications device.");
             return ResolvedAudioEndpointSelection.SystemDefault(fellBack: true);
         }
@@ -80,13 +80,13 @@ internal static class AudioEndpointSelectionResolver
         if (endpoint is null)
         {
             log(
-                $"Stage 3 configured voice {role} endpoint is not active: {configuredDeviceId}; " +
+                $"Configured Party voice {role} endpoint is not active: {configuredDeviceId}; " +
                 "falling back to the Windows default communications device.");
             return ResolvedAudioEndpointSelection.SystemDefault(fellBack: true);
         }
 
         log(
-            $"Stage 3 voice {role}: selected \"{endpoint.FriendlyName}\" " +
+            $"Party voice {role}: selected \"{endpoint.FriendlyName}\" " +
             $"with manual Windows endpoint ID {endpoint.Id}.");
         return new ResolvedAudioEndpointSelection(
             UseSystemDefault: false,
@@ -232,7 +232,7 @@ public abstract class AudioEndpointIdTypeConverter : StringConverter
         var duplicateName = endpoints.Count(candidate => string.Equals(
             candidate.FriendlyName,
             endpoint.FriendlyName,
-            StringComparison.CurrentCultureIgnoreCase)) > 1;
+            StringComparison.OrdinalIgnoreCase)) > 1;
         var defaultSuffix = endpoint.IsDefaultCommunicationsDevice
             ? " (Windows communications default)"
             : string.Empty;
@@ -505,5 +505,6 @@ public sealed class WindowsAudioEndpointCatalog : IAudioEndpointCatalog
     }
 
     [DllImport("ole32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern int PropVariantClear(ref PropVariant value);
 }

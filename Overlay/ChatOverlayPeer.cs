@@ -1168,6 +1168,11 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
             var language = CurrentLanguage;
             var memberName = ResolveMemberTransitionName(transition);
+            var participant = new ChatModerationParticipant(
+                transition.RemotePlayerOrdinal + 1,
+                memberName,
+                NormalizeEntityId(transition.EntityId));
+            _chatModeration?.ObserveParticipant(participant);
             if (transition.Kind == PartyMemberTransitionKind.Baseline)
                 continue;
 

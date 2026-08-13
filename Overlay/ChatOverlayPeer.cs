@@ -62,6 +62,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly Action<string> _requestOverlayBrokerRecovery;
     private readonly Action<string> _log;
     private readonly ChatBlacklist _chatBlacklist;
+    private readonly IChatModerationService? _chatModeration;
     private readonly Func<int?> _getHostPlayerNumber;
     private readonly Func<int, string?> _getRemotePlayerName;
     private readonly Func<string?> _getLocalPlayerName;
@@ -78,6 +79,9 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private readonly byte[] _inputBuffer = new byte[InputBufferSize];
     private readonly byte[] _quickActionNameBuffer = new byte[256];
     private readonly byte[] _quickActionTextBuffer = new byte[InputBufferSize];
+    private readonly byte[] _chatModerationRuleBuffer = new byte[512];
+    private readonly byte[] _chatModerationPreviewBuffer = new byte[InputBufferSize];
+    private readonly byte[] _chatModerationTemplateBuffer = new byte[InputBufferSize];
     private readonly Dictionary<string, int> _quickActionKeyDown = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingQuickActions = new();
     private readonly object _memberNameSync = new();
@@ -156,6 +160,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private string? _voiceMuteStatusText;
     private string? _lastVoiceIndicatorSnapshotFingerprint;
     private int _voiceIndicatorSnapshotFailureLogged;
+    private string? _chatModerationRuleEditId;
+    private string? _chatModerationRuleBufferValue;
+    private string? _chatModerationPreviewBufferValue;
+    private string? _chatModerationTemplateBufferValue;
 
     internal ChatOverlayPeer(
         ChatSession session,
@@ -185,7 +193,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Func<Action<bool>, VoicePushToTalkSafetyGate>? createWindowVoicePushToTalkGate = null,
         Func<int, bool>? isWindowKeyDown = null,
         Func<string?>? getLocalPlayerName = null,
-        Func<PartyMemberTransition?>? readMemberTransition = null)
+        Func<PartyMemberTransition?>? readMemberTransition = null,
+        IChatModerationService? chatModeration = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -212,6 +221,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             throw new ArgumentNullException(nameof(requestOverlayBrokerRecovery));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
+        _chatModeration = chatModeration;
         _getHostPlayerNumber = getHostPlayerNumber ?? (() => null);
         _getRemotePlayerName = getRemotePlayerName ?? (_ => null);
         _getLocalPlayerName = getLocalPlayerName ?? (() => null);
@@ -1047,6 +1057,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         var configuration = _getConfiguration();
         DrainMemberTransitions();
         var roomTransitionExited = DrainRoomTransitions();
+        DrainChatModerationEvents();
         if (!configuration.EnableImeCandidateFallback)
             ClearImeCandidateSnapshot();
         var onlineRoomActive = IsOnlineRoomActive();
@@ -1057,6 +1068,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ClearMemberNameCache();
         if (!onlineRoomActive && previousOnlineRoomInactive == 0)
         {
+            _chatModeration?.ClearRoom();
             _chatBlacklist.Clear();
             _session.Composer.Cancel(clearDraft: true);
             _session.InputHistory.ResetNavigation();
@@ -1069,6 +1081,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
         else if (onlineRoomActive && previousOnlineRoomInactive != 0)
         {
+            _chatModeration?.ClearRoom();
             _chatBlacklist.Clear();
             _session.Composer.Cancel(clearDraft: true);
             _session.InputHistory.ResetNavigation();
@@ -1778,6 +1791,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                         DrawSettingsTab(T("00 通用设置", "00 General"), DrawGeneralSettingsTab);
                         DrawSettingsTab(T("01 语音", "01 Voice"), DrawVoiceSettingsTab);
                         DrawSettingsTab(T("02 快捷动作", "02 Quick Actions"), DrawQuickActionSettingsTab);
+                        DrawSettingsTab(T("04 聊天过滤", "04 Chat Filter"), DrawChatFilterSettingsTab);
+                        DrawSettingsTab(T("05 屏蔽管理", "05 Block Management"), DrawChatBlockManagementTab);
                     }
                     finally
                     {
@@ -3128,6 +3143,654 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ImGui.ImDrawListAddLine(drawList, rightStart, rightEnd, highlightColor, gripThickness);
         }
     }
+
+    private void DrainChatModerationEvents()
+    {
+        if (_chatModeration is null)
+            return;
+
+        while (true)
+        {
+            ChatModerationEvent moderationEvent;
+            try
+            {
+                if (!_chatModeration.TryReadEvent(out moderationEvent))
+                    return;
+            }
+            catch (Exception exception)
+            {
+                LogSafely(
+                    $"Chat moderation event reader failed; remaining events were deferred: " +
+                    $"{exception.GetType().Name}: {exception.Message}.");
+                return;
+            }
+
+            if (moderationEvent.Participant.IsLocal)
+                continue;
+
+            var language = CurrentLanguage;
+            var participant = moderationEvent.Participant;
+            var playerLabel = ChatModerationSettingsPresentation.ParticipantLabel(participant, language);
+            var configuration = _getConfiguration();
+            var filter = configuration.ChatFilter ?? new ChatFilterConfiguration();
+            var notification = ChatModerationSettingsPresentation.FormatNotification(
+                filter.NotificationTemplate,
+                playerLabel,
+                participant.PlayerNumber,
+                moderationEvent.HitCount,
+                moderationEvent.Threshold,
+                _session.Composer.MaximumDraftLength,
+                language);
+            var reason = ChatModerationSettingsPresentation.FormatThresholdReason(
+                moderationEvent.HitCount,
+                moderationEvent.Threshold,
+                language);
+
+            if (moderationEvent.PersistIdentity && !string.IsNullOrWhiteSpace(participant.EntityId))
+            {
+                var entityId = participant.EntityId.Trim();
+                UpdateConfigurationSafely(value =>
+                {
+                    value.ChatFilter ??= new ChatFilterConfiguration();
+                    var existing = value.ChatFilter.BlockedPlayers.FirstOrDefault(blocked =>
+                        blocked.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
+                        string.Equals(blocked.Identity, entityId, StringComparison.Ordinal));
+                    if (existing is null)
+                    {
+                        value.ChatFilter.BlockedPlayers.Add(new BlockedPlayerConfiguration
+                        {
+                            IdentityKind = BlockedPlayerIdentityKind.PlayFabEntityId,
+                            Identity = entityId,
+                            LastKnownName = participant.DisplayName ?? string.Empty,
+                            Source = BlockedPlayerSource.FilterThreshold,
+                            Reason = reason,
+                            BlockedAtUtc = moderationEvent.OccurredAt,
+                        });
+                    }
+                    else
+                    {
+                        existing.LastKnownName = participant.DisplayName ?? existing.LastKnownName;
+                        existing.Source = BlockedPlayerSource.FilterThreshold;
+                        existing.Reason = reason;
+                        existing.BlockedAtUtc = moderationEvent.OccurredAt;
+                    }
+                });
+            }
+
+            switch (filter.NotificationMode)
+            {
+                case ChatFilterNotificationMode.LocalOnly:
+                    AddChatModerationSystemNotice(notification, moderationEvent.OccurredAt);
+                    break;
+                case ChatFilterNotificationMode.PartyChat:
+                    var sendResult = _session.SendText(notification);
+                    if (!sendResult.Succeeded)
+                    {
+                        AddChatModerationSystemNotice(
+                            T(
+                                $"已屏蔽 {playerLabel}，但无法发送队伍通知。",
+                                $"Blocked {playerLabel}, but the party notification could not be sent."),
+                            moderationEvent.OccurredAt);
+                    }
+                    break;
+                case ChatFilterNotificationMode.None:
+                    break;
+            }
+        }
+    }
+
+    private void AddChatModerationSystemNotice(string text, DateTimeOffset timestamp)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+        _session.History.Add(
+            UiLocalization.Select(CurrentLanguage, "系统", "System"),
+            text,
+            ChatMessageKind.System,
+            timestamp == default ? ReadCurrentTime() : timestamp);
+    }
+
+    private unsafe void DrawChatFilterSettingsTab()
+    {
+        using var childSize = CreateVector2(0.0f, -1.0f);
+        var began = ImGui.BeginChildStr("##GBFRChatFilterPage", childSize, false, 0);
+        try
+        {
+            if (!began)
+                return;
+            if (_chatModeration is null)
+            {
+                ImGui.TextWrapped(T(
+                    "聊天过滤服务尚未接入。",
+                    "Chat moderation service is not connected."));
+                return;
+            }
+
+            var configuration = _getConfiguration();
+            var filter = configuration.ChatFilter ?? new ChatFilterConfiguration();
+            DrawConfigurationCheckbox(
+                T("启用聊天过滤", "Enable Chat Filter"),
+                filter.Enabled,
+                (value, enabled) =>
+                {
+                    value.ChatFilter ??= new ChatFilterConfiguration();
+                    value.ChatFilter.Enabled = enabled;
+                });
+            DrawConfigurationCheckbox(
+                T("Steam 官方过滤", "Steam Official Filter"),
+                filter.UseSteamTextFilter,
+                (value, enabled) =>
+                {
+                    value.ChatFilter ??= new ChatFilterConfiguration();
+                    value.ChatFilter.UseSteamTextFilter = enabled;
+                });
+
+            var snapshot = _chatModeration.GetSnapshot();
+            ImGui.Text($"{T("官方过滤状态", "Official filter status")}: {DescribeOfficialFilterStatus(snapshot.OfficialFilter)}");
+            if (!string.IsNullOrWhiteSpace(snapshot.OfficialFilter.Detail))
+                ImGui.TextWrapped(snapshot.OfficialFilter.Detail);
+            using var refreshSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
+            if (ImGui.Button($"{T("刷新状态", "Refresh Status")}##ChatFilterRefresh", refreshSize))
+                _chatModeration.RefreshOfficialFilter();
+
+            ImGui.Separator();
+            ImGui.Text(T("过滤方式", "Filter action"));
+            DrawChatFilterActionCombo(filter.Action);
+
+            ImGui.Separator();
+            ImGui.Text(T("自定义词汇", "Custom rules"));
+            ImGui.TextWrapped(T(
+                "空规则不会生效。规则 Id 会保持稳定，支持中文、Backspace 和实时编辑。",
+                "Empty rules are ignored. Rule IDs stay stable; Chinese UTF-8 editing and Backspace are supported."));
+            using var addRuleSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
+            if (ImGui.Button($"{T("＋ 新增规则", "＋ Add Rule")}##ChatFilterAddRule", addRuleSize))
+                AddChatFilterRule();
+            using var ruleListSize = CreateVector2(0.0f, OverlayUiScale.Scale(170.0f));
+            var beganRules = ImGui.BeginChildStr("##ChatFilterRules", ruleListSize, false, 0);
+            try
+            {
+                if (beganRules)
+                {
+                    if (filter.Rules is null || filter.Rules.Count == 0)
+                    {
+                        ImGui.TextWrapped(T("暂无自定义规则。", "No custom rules."));
+                    }
+                    else
+                    {
+                        foreach (var rule in filter.Rules.ToArray())
+                            DrawChatFilterRuleRow(rule);
+                    }
+                }
+            }
+            finally
+            {
+                ImGui.EndChild();
+            }
+
+            ImGui.Separator();
+            ImGui.Text(T("实时预览", "Live preview"));
+            ImGui.SetNextItemWidth(-1.0f);
+            EnsurePreviewBuffer(filter);
+            fixed (byte* previewBuffer = _chatModerationPreviewBuffer)
+            {
+                _ = ImGui.InputText(
+                    $"{T("输入消息", "Message")}##ChatFilterPreviewInput",
+                    (sbyte*)previewBuffer,
+                    (nint)_chatModerationPreviewBuffer.Length,
+                    0,
+                    null!,
+                    nint.Zero);
+                _chatModerationPreviewBufferValue = ReadUtf8Buffer(_chatModerationPreviewBuffer);
+            }
+            var previewText = _chatModerationPreviewBufferValue ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(previewText))
+            {
+                ImGui.TextWrapped(T("输入消息后显示预览。", "Enter a message to preview it."));
+            }
+            else
+            {
+                var preview = _chatModeration.Preview(previewText);
+                ImGui.TextWrapped($"{T("结果", "Result")}: {DescribeChatDisposition(preview.Disposition)}");
+                ImGui.TextWrapped($"{T("官方命中", "Official hit")}: {YesNo(preview.OfficialFilterMatched)}  ·  " +
+                                  $"{T("自定义命中", "Custom hit")}: {YesNo(preview.MatchedRuleIds.Count > 0)}");
+                ImGui.TextWrapped($"{T("文本", "Text")}: {preview.Text}");
+            }
+
+            ImGui.Separator();
+            ImGui.Text(T("自动屏蔽", "Automatic blocking"));
+            DrawConfigurationCheckbox(
+                T("达到阈值后自动屏蔽", "Auto-block at threshold"),
+                filter.AutoBlockEnabled,
+                (value, enabled) =>
+                {
+                    value.ChatFilter ??= new ChatFilterConfiguration();
+                    value.ChatFilter.AutoBlockEnabled = enabled;
+                });
+            var threshold = Math.Clamp(filter.AutoBlockThreshold, 1, 100);
+            ImGui.BeginDisabled(!filter.AutoBlockEnabled);
+            try
+            {
+                if (ImGui.SliderInt(
+                        $"{T("命中阈值", "Hit threshold")}##ChatFilterThreshold",
+                        ref threshold,
+                        1,
+                        100,
+                        "%d",
+                        0))
+                {
+                    UpdateChatFilter(configurationValue => configurationValue.AutoBlockThreshold = threshold);
+                }
+            }
+            finally
+            {
+                ImGui.EndDisabled();
+            }
+            var windowMinutes = Math.Clamp(filter.AutoBlockWindowMinutes, 1, 1440);
+            ImGui.BeginDisabled(!filter.AutoBlockEnabled);
+            try
+            {
+                if (ImGui.SliderInt(
+                        $"{T("时间窗口（分钟）", "Window (minutes)")}##ChatFilterWindow",
+                        ref windowMinutes,
+                        1,
+                        1440,
+                        "%d",
+                        0))
+                {
+                    UpdateChatFilter(configurationValue => configurationValue.AutoBlockWindowMinutes = windowMinutes);
+                }
+            }
+            finally
+            {
+                ImGui.EndDisabled();
+            }
+
+            ImGui.Separator();
+            ImGui.Text(T("通知", "Notifications"));
+            DrawChatNotificationModeCombo(filter.NotificationMode);
+            ImGui.SetNextItemWidth(-1.0f);
+            EnsureTemplateBuffer(filter);
+            fixed (byte* templateBuffer = _chatModerationTemplateBuffer)
+            {
+                if (ImGui.InputText(
+                        $"{T("通知模板", "Notification template")}##ChatFilterTemplate",
+                        (sbyte*)templateBuffer,
+                        (nint)_chatModerationTemplateBuffer.Length,
+                        0,
+                        null!,
+                        nint.Zero))
+                {
+                    var template = ReadUtf8Buffer(_chatModerationTemplateBuffer);
+                    _chatModerationTemplateBufferValue = template;
+                    UpdateChatFilter(configurationValue => configurationValue.NotificationTemplate = template);
+                }
+            }
+            ImGui.TextWrapped(T(
+                "支持 {player}、{count}、{threshold}；空模板会回退默认文本。",
+                "Supports {player}, {count}, and {threshold}; an empty template falls back to the default."));
+            var templatePreview = ChatModerationSettingsPresentation.FormatNotification(
+                _chatModerationTemplateBufferValue,
+                T("示例玩家", "Example Player"),
+                2,
+                Math.Max(1, filter.AutoBlockThreshold),
+                filter.AutoBlockThreshold,
+                _session.Composer.MaximumDraftLength,
+                CurrentLanguage);
+            ImGui.TextWrapped($"{T("预览", "Preview")}: {templatePreview}");
+        }
+        finally
+        {
+            ImGui.EndChild();
+        }
+    }
+
+    private unsafe void DrawChatBlockManagementTab()
+    {
+        using var childSize = CreateVector2(0.0f, -1.0f);
+        var began = ImGui.BeginChildStr("##GBFRChatBlockManagementPage", childSize, false, 0);
+        try
+        {
+            if (!began)
+                return;
+            if (_chatModeration is null)
+            {
+                ImGui.TextWrapped(T(
+                    "聊天屏蔽服务尚未接入。",
+                    "Chat block management is not connected."));
+                return;
+            }
+
+            var snapshot = _chatModeration.GetSnapshot();
+            ImGui.Text(T("当前房间", "Current room"));
+            var remotePlayers = snapshot.Players
+                .Where(static player => !player.Participant.IsLocal)
+                .ToArray();
+            if (remotePlayers.Length == 0)
+            {
+                ImGui.TextWrapped(T("当前没有可管理的远端玩家。", "No remote players are currently available."));
+            }
+            else
+            {
+                foreach (var player in remotePlayers)
+                    DrawChatModerationPlayerRow(player);
+            }
+
+            ImGui.Separator();
+            ImGui.Text(T("已保存的屏蔽玩家", "Persisted blocked players"));
+            var blockedPlayers = _getConfiguration().ChatFilter?.BlockedPlayers ?? [];
+            if (blockedPlayers.Count == 0)
+            {
+                ImGui.TextWrapped(T("暂无已保存的屏蔽玩家。", "No persisted blocked players."));
+            }
+            else
+            {
+                foreach (var blockedPlayer in blockedPlayers.ToArray())
+                {
+                    var displayName = string.IsNullOrWhiteSpace(blockedPlayer.LastKnownName)
+                        ? T("未知玩家", "Unknown player")
+                        : blockedPlayer.LastKnownName;
+                    ImGui.TextWrapped(
+                        $"{displayName}  ·  {T("身份", "Identity")}: {ChatModerationSettingsPresentation.ShortenIdentity(blockedPlayer.Identity)}");
+                    ImGui.SameLine(0.0f, OverlayUiScale.Scale(10.0f));
+                    using var removeSize = CreateVector2(OverlayUiScale.Scale(100.0f), OverlayUiScale.Scale(32.0f));
+                    if (ImGui.Button(
+                            $"{T("解除", "Unblock")}##PersistedBlock{blockedPlayer.Identity}",
+                            removeSize))
+                    {
+                        RemovePersistedBlockedPlayer(blockedPlayer.Identity);
+                    }
+                    ImGui.Separator();
+                }
+            }
+        }
+        finally
+        {
+            ImGui.EndChild();
+        }
+    }
+
+    private void DrawChatModerationPlayerRow(ChatModerationPlayerStatus player)
+    {
+        var participant = player.Participant;
+        var label = ChatModerationSettingsPresentation.ParticipantLabel(participant, CurrentLanguage);
+        var identity = string.IsNullOrWhiteSpace(participant.EntityId)
+            ? T("无 EntityId", "No EntityId")
+            : ChatModerationSettingsPresentation.ShortenIdentity(participant.EntityId);
+        ImGui.TextWrapped(
+            $"{label}  ·  {T("玩家号", "Player")}: {participant.PlayerNumber}  ·  " +
+            $"{T("身份", "Identity")}: {identity}");
+        ImGui.TextWrapped(
+            $"{T("窗口命中", "Window hits")}: {player.WindowHitCount}  ·  " +
+            $"{T("房间屏蔽", "Room block")}: {YesNo(player.IsRoomBlocked)}  ·  " +
+            $"{T("持久屏蔽", "Persistent block")}: {YesNo(player.IsPersistentlyBlocked)}");
+
+        using var roomSize = CreateVector2(OverlayUiScale.Scale(140.0f), OverlayUiScale.Scale(32.0f));
+        var roomLabel = player.IsRoomBlocked
+            ? T("解除房间屏蔽", "Unblock Room")
+            : T("屏蔽本房间", "Block Room");
+        var moderation = _chatModeration;
+        if (moderation is not null &&
+            ImGui.Button($"{roomLabel}##RoomBlock{participant.EntityId}{participant.PlayerNumber}", roomSize))
+        {
+            moderation.SetBlocked(participant, !player.IsRoomBlocked, persistent: false);
+        }
+
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(8.0f));
+        var hasEntityId = !string.IsNullOrWhiteSpace(participant.EntityId);
+        ImGui.BeginDisabled(!hasEntityId);
+        try
+        {
+            var persistentLabel = player.IsPersistentlyBlocked
+                ? T("解除持久屏蔽", "Unblock Persistently")
+                : T("持久屏蔽", "Block Persistently");
+            if (moderation is not null &&
+                ImGui.Button($"{persistentLabel}##PersistentBlock{participant.EntityId}{participant.PlayerNumber}", roomSize))
+            {
+                SetPersistentChatBlock(participant, !player.IsPersistentlyBlocked);
+            }
+        }
+        finally
+        {
+            ImGui.EndDisabled();
+        }
+        ImGui.Separator();
+    }
+
+    private void DrawChatFilterRuleRow(ChatFilterRuleConfiguration rule)
+    {
+        var enabled = rule.Enabled;
+        if (ImGui.Checkbox($"##ChatFilterRuleEnabled{rule.Id}", ref enabled))
+            UpdateChatFilter(configurationValue =>
+            {
+                var target = configurationValue.Rules.FirstOrDefault(candidate => candidate.Id == rule.Id);
+                if (target is not null)
+                    target.Enabled = enabled;
+            });
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(6.0f));
+        EnsureRuleBuffer(rule);
+        ImGui.SetNextItemWidth(-OverlayUiScale.Scale(104.0f));
+        unsafe
+        {
+            fixed (byte* buffer = _chatModerationRuleBuffer)
+            {
+                if (ImGui.InputText(
+                        $"##ChatFilterRuleTerm{rule.Id}",
+                        (sbyte*)buffer,
+                        (nint)_chatModerationRuleBuffer.Length,
+                        0,
+                        null!,
+                        nint.Zero))
+                {
+                    var term = ReadUtf8Buffer(_chatModerationRuleBuffer);
+                    _chatModerationRuleBufferValue = term;
+                    UpdateChatFilter(configurationValue =>
+                    {
+                        var target = configurationValue.Rules.FirstOrDefault(candidate => candidate.Id == rule.Id);
+                        if (target is not null)
+                            target.Term = term;
+                    });
+                }
+            }
+        }
+        ImGui.SameLine(0.0f, OverlayUiScale.Scale(6.0f));
+        using var deleteSize = CreateVector2(OverlayUiScale.Scale(70.0f), OverlayUiScale.Scale(32.0f));
+        if (ImGui.Button($"{T("删除", "Delete")}##ChatFilterRuleDelete{rule.Id}", deleteSize))
+        {
+            UpdateChatFilter(configurationValue => configurationValue.Rules.RemoveAll(candidate => candidate.Id == rule.Id));
+            if (string.Equals(_chatModerationRuleEditId, rule.Id, StringComparison.Ordinal))
+            {
+                _chatModerationRuleEditId = null;
+                _chatModerationRuleBufferValue = null;
+            }
+        }
+    }
+
+    private void DrawChatFilterActionCombo(ChatFilterAction current)
+    {
+        var preview = current == ChatFilterAction.HideEntireMessage
+            ? T("隐藏整条消息", "Hide entire message")
+            : T("仅屏蔽词汇", "Mask matched words");
+        if (!ImGui.BeginCombo($"{T("动作", "Action")}##ChatFilterAction", preview, 0))
+            return;
+        try
+        {
+            using var zero = CreateVector2(0.0f, 0.0f);
+            foreach (var action in new[] { ChatFilterAction.MaskMatchedWords, ChatFilterAction.HideEntireMessage })
+            {
+                var label = action == ChatFilterAction.HideEntireMessage
+                    ? T("隐藏整条消息", "Hide entire message")
+                    : T("仅屏蔽词汇", "Mask matched words");
+                if (ImGui.SelectableBool($"{label}##ChatFilterAction{action}", current == action, 0, zero))
+                    UpdateChatFilter(configurationValue => configurationValue.Action = action);
+            }
+        }
+        finally
+        {
+            ImGui.EndCombo();
+        }
+    }
+
+    private void DrawChatNotificationModeCombo(ChatFilterNotificationMode current)
+    {
+        var preview = current switch
+        {
+            ChatFilterNotificationMode.PartyChat => T("PartyChat", "PartyChat"),
+            ChatFilterNotificationMode.None => T("不通知", "None"),
+            _ => T("仅本地", "LocalOnly"),
+        };
+        if (!ImGui.BeginCombo($"{T("通知方式", "Notification mode")}##ChatFilterNotificationMode", preview, 0))
+            return;
+        try
+        {
+            using var zero = CreateVector2(0.0f, 0.0f);
+            foreach (var mode in new[]
+                     {
+                         ChatFilterNotificationMode.LocalOnly,
+                         ChatFilterNotificationMode.PartyChat,
+                         ChatFilterNotificationMode.None,
+                     })
+            {
+                var label = mode switch
+                {
+                    ChatFilterNotificationMode.PartyChat => T("PartyChat", "PartyChat"),
+                    ChatFilterNotificationMode.None => T("不通知", "None"),
+                    _ => T("仅本地", "LocalOnly"),
+                };
+                if (ImGui.SelectableBool($"{label}##ChatFilterNotificationMode{mode}", current == mode, 0, zero))
+                    UpdateChatFilter(configurationValue => configurationValue.NotificationMode = mode);
+            }
+        }
+        finally
+        {
+            ImGui.EndCombo();
+        }
+    }
+
+    private void AddChatFilterRule()
+    {
+        var rule = new ChatFilterRuleConfiguration();
+        UpdateChatFilter(configurationValue => configurationValue.Rules.Add(rule));
+        _chatModerationRuleEditId = rule.Id;
+        _chatModerationRuleBufferValue = rule.Term;
+        WriteUtf8Buffer(_chatModerationRuleBuffer, rule.Term);
+    }
+
+    private void RemovePersistedBlockedPlayer(string identity)
+    {
+        if (string.IsNullOrWhiteSpace(identity))
+            return;
+
+        if (_chatModeration is not null)
+        {
+            foreach (var player in _chatModeration.GetSnapshot().Players)
+            {
+                if (string.Equals(player.Participant.EntityId, identity, StringComparison.Ordinal))
+                    _chatModeration.SetBlocked(player.Participant, blocked: false, persistent: true);
+            }
+        }
+
+        UpdateConfigurationSafely(configuration =>
+        {
+            configuration.ChatFilter ??= new ChatFilterConfiguration();
+            configuration.ChatFilter.BlockedPlayers.RemoveAll(player =>
+                player.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
+                string.Equals(player.Identity, identity, StringComparison.Ordinal));
+        });
+    }
+
+    private void SetPersistentChatBlock(ChatModerationParticipant participant, bool blocked)
+    {
+        if (_chatModeration is null || string.IsNullOrWhiteSpace(participant.EntityId))
+            return;
+        if (!_chatModeration.SetBlocked(participant, blocked, persistent: true))
+            return;
+
+        var identity = participant.EntityId.Trim();
+        UpdateConfigurationSafely(configuration =>
+        {
+            configuration.ChatFilter ??= new ChatFilterConfiguration();
+            if (!blocked)
+            {
+                configuration.ChatFilter.BlockedPlayers.RemoveAll(player =>
+                    player.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
+                    string.Equals(player.Identity, identity, StringComparison.Ordinal));
+                return;
+            }
+
+            var existing = configuration.ChatFilter.BlockedPlayers.FirstOrDefault(player =>
+                player.IdentityKind == BlockedPlayerIdentityKind.PlayFabEntityId &&
+                string.Equals(player.Identity, identity, StringComparison.Ordinal));
+            if (existing is null)
+            {
+                configuration.ChatFilter.BlockedPlayers.Add(new BlockedPlayerConfiguration
+                {
+                    IdentityKind = BlockedPlayerIdentityKind.PlayFabEntityId,
+                    Identity = identity,
+                    LastKnownName = participant.DisplayName ?? string.Empty,
+                    Source = BlockedPlayerSource.Manual,
+                    BlockedAtUtc = ReadCurrentTime(),
+                });
+                return;
+            }
+
+            existing.LastKnownName = participant.DisplayName ?? existing.LastKnownName;
+            existing.Source = BlockedPlayerSource.Manual;
+            existing.BlockedAtUtc = ReadCurrentTime();
+        });
+    }
+
+    private void UpdateChatFilter(Action<ChatFilterConfiguration> update)
+    {
+        UpdateConfigurationSafely(configuration =>
+        {
+            configuration.ChatFilter ??= new ChatFilterConfiguration();
+            update(configuration.ChatFilter);
+        });
+    }
+
+    private void EnsureRuleBuffer(ChatFilterRuleConfiguration rule)
+    {
+        if (string.Equals(_chatModerationRuleEditId, rule.Id, StringComparison.Ordinal) &&
+            string.Equals(_chatModerationRuleBufferValue, rule.Term, StringComparison.Ordinal))
+        {
+            return;
+        }
+        _chatModerationRuleEditId = rule.Id;
+        _chatModerationRuleBufferValue = rule.Term;
+        WriteUtf8Buffer(_chatModerationRuleBuffer, rule.Term);
+    }
+
+    private void EnsurePreviewBuffer(ChatFilterConfiguration configuration)
+    {
+        _chatModerationPreviewBufferValue ??= string.Empty;
+        if (ReadUtf8Buffer(_chatModerationPreviewBuffer) != _chatModerationPreviewBufferValue)
+            WriteUtf8Buffer(_chatModerationPreviewBuffer, _chatModerationPreviewBufferValue);
+    }
+
+    private void EnsureTemplateBuffer(ChatFilterConfiguration configuration)
+    {
+        var template = configuration.NotificationTemplate ?? string.Empty;
+        if (string.Equals(_chatModerationTemplateBufferValue, template, StringComparison.Ordinal))
+            return;
+        _chatModerationTemplateBufferValue = template;
+        WriteUtf8Buffer(_chatModerationTemplateBuffer, template);
+    }
+
+    private string DescribeOfficialFilterStatus(OfficialTextFilterStatus status) => status.State switch
+    {
+        OfficialTextFilterState.Ready => T("Ready", "Ready"),
+        OfficialTextFilterState.Passthrough => T("Passthrough", "Passthrough"),
+        _ => T("Unavailable", "Unavailable"),
+    };
+
+    private string DescribeChatDisposition(ChatModerationDisposition disposition) => disposition switch
+    {
+        ChatModerationDisposition.Mask => T("Mask", "Mask"),
+        ChatModerationDisposition.Block => T("Block", "Block"),
+        _ => T("Allow", "Allow"),
+    };
+
+    private string YesNo(bool value) => value ? T("是", "Yes") : T("否", "No");
 
     private string DescribeSelfTest(LocalMicrophoneMonitorState state) => state switch
     {

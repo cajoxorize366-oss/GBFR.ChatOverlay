@@ -33,9 +33,9 @@ Capture policy can independently suppress activation, settings, push-to-talk, qu
 
 Keyboard bindings support one primary key plus Ctrl, Shift, and Alt. Actions fire on a physical down edge and reset on release. Rebinding waits for all previous keys to be released before accepting a new edge.
 
-Standard controller bindings use XInput buttons and may contain one or two buttons. User-level controller bindings remain available for settings, chat, push-to-talk, quick-action menu, global chat mute, and player chat mute.
+Standard controller bindings use XInput buttons and may contain one or two buttons. User-level controller bindings remain available for settings, chat, push-to-talk, global chat mute, and player chat mute.
 
-Individual quick actions are keyboard-only. The obsolete per-action controller field is accepted as unknown legacy JSON and is not written back.
+Individual quick actions are keyboard-only and run directly from their own binding; there is no separate quick-action panel hotkey. The obsolete panel bindings and per-action controller field are accepted as unknown legacy JSON and are not written back.
 
 `DPadDown` is rejected by both parser and binding-capture UI because Relink uses it for the official quick-phrase path. This prevents a mod binding from sending an unrelated official communication line.
 

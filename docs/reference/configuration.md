@@ -10,7 +10,7 @@ Reloaded-II/User/Mods/gbfr.qol.chatoverlay/Config.json
 
 An explicit configurator directory takes precedence. If Reloaded does not supply one, the runtime derives the portable `User/Mods/gbfr.qol.chatoverlay` path from `ModConfig.json`.
 
-Configuration uses indented JSON and string enum names. Unknown JSON properties are ignored by `System.Text.Json`; this keeps older files readable after a property is retired. The removed per-action `ControllerBinding` field is therefore accepted as legacy input but is not represented or written by 0.6.0.
+Configuration uses indented JSON and string enum names. Unknown JSON properties are ignored by `System.Text.Json`; this keeps older files readable after a property is retired. The removed quick-action panel bindings and per-action `ControllerBinding` field are therefore accepted as legacy input but are not represented or written back.
 
 ## Hot reload
 
@@ -44,13 +44,12 @@ Default player colors are `#5ED9FF`, `#FFAD5E`, `#71DF8A`, and `#C69CFF`.
 | open chat | `Y` | unbound |
 | push-to-talk | `U` | unbound |
 | settings | `F10` | unbound |
-| quick-action menu | unbound | unbound |
 | global chat mute | unbound | unbound |
 | remote players 1-3 chat mute | unbound | unbound |
 
 Keyboard bindings may use Ctrl, Shift, or Alt plus one primary key. Controller bindings use one or two standard/extended buttons. `DPadDown` is invalid because it belongs to Relink's official communication shortcut.
 
-Individual quick actions support only `KeyboardBinding`. Their kinds are:
+There is no separate quick-action panel hotkey. Individual quick actions run directly from their own keyboard-only `KeyboardBinding`. Their kinds are:
 
 - `CustomText`: sends `Text` through native room chat;
 - `Stamp`: invokes a verified official stamp ID;

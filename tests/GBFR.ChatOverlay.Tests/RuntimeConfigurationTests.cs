@@ -38,6 +38,50 @@ public sealed class RuntimeConfigurationTests
     }
 
     [Fact]
+    public void TryReadFromWithRetry_IgnoresRetiredQuickActionPanelBindings()
+    {
+        Assert.Null(typeof(Config).GetProperty("QuickActionsKeyboardBinding"));
+        Assert.Null(typeof(Config).GetProperty("QuickActionsControllerBinding"));
+
+        var directory = CreateTemporaryDirectory();
+        var path = Path.Combine(directory, "Config.json");
+        try
+        {
+            File.WriteAllText(
+                path,
+                """
+                {
+                  "PushToTalkKeyboardBinding": "F8",
+                  "QuickActionsKeyboardBinding": "I",
+                  "QuickActionsControllerBinding": "X"
+                }
+                """);
+
+            var loaded = Configurable<Config>.TryReadFromWithRetry(
+                path,
+                "Default Config",
+                out var configuration,
+                timeoutMilliseconds: 50,
+                retryDelayMilliseconds: 1);
+
+            Assert.True(loaded);
+            Assert.NotNull(configuration);
+            Assert.Equal("F8", configuration.PushToTalkKeyboardBinding);
+
+            var rewritten = JsonSerializer.Serialize(
+                configuration,
+                Configurable<Config>.SerializerOptions);
+            Assert.DoesNotContain("QuickActionsKeyboardBinding", rewritten, StringComparison.Ordinal);
+            Assert.DoesNotContain("QuickActionsControllerBinding", rewritten, StringComparison.Ordinal);
+            configuration.DisposeEvents();
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TryReadFromWithRetry_LeavesCurrentConfigurationUntouchedForPartialJson()
     {
         var directory = CreateTemporaryDirectory();

@@ -13,7 +13,6 @@ public sealed class ChatOverlayPeerHotkeyTests
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
     private const int VirtualKeyBackspace = 0x08;
-    private const int VirtualKeyEscape = 0x1B;
 
     [Fact]
     public void KeyboardCapture_CanBeRepeatedAfterAStaleKeyDown_AndCustomTextSends()
@@ -54,27 +53,6 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
-    public void KeyboardCapture_ReplacesAnExistingConflictingBinding()
-    {
-        var configuration = new Config
-        {
-            OpenChatKeyboardBinding = "P",
-            QuickActionsKeyboardBinding = string.Empty,
-        };
-        using var peer = CreatePeer(configuration, new RecordingTransport());
-        var request = new BindingCaptureRequest(
-            BindingTarget.QuickActionsPanel,
-            BindingCaptureDevice.Keyboard,
-            null);
-
-        peer.BeginBindingCapture(request);
-        PressAndRelease(peer, 'P');
-
-        Assert.Equal(string.Empty, configuration.OpenChatKeyboardBinding);
-        Assert.Equal("P", configuration.QuickActionsKeyboardBinding);
-    }
-
-    [Fact]
     public void ControllerBinding_CanBeClearedWithoutAConnectedController()
     {
         var configuration = new Config
@@ -99,7 +77,7 @@ public sealed class ChatOverlayPeerHotkeyTests
         var configuration = new Config();
         using var peer = CreatePeer(configuration, new RecordingTransport());
         peer.BeginBindingCapture(new BindingCaptureRequest(
-            BindingTarget.QuickActionsPanel,
+            BindingTarget.OpenChat,
             BindingCaptureDevice.Controller,
             null));
 
@@ -111,7 +89,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             ControllerButtons = ControllerButtons.DPadDown,
         });
 
-        Assert.Equal(string.Empty, configuration.QuickActionsControllerBinding);
+        Assert.Equal(string.Empty, configuration.OpenChatControllerBinding);
         Assert.Contains("DPadDown", GetPrivateField<string>(peer, "_captureStatusText"));
 
         peer.ObserveNativeInputSnapshot(new DirectInputBrokerSnapshot
@@ -136,7 +114,7 @@ public sealed class ChatOverlayPeerHotkeyTests
             ControllerButtons = ControllerButtons.None,
         });
 
-        Assert.Equal("X", configuration.QuickActionsControllerBinding);
+        Assert.Equal("X", configuration.OpenChatControllerBinding);
     }
 
     [Fact]
@@ -693,34 +671,9 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
-    public void QuickActionsPanel_CapturesKeysAndClosesOnEscapeWithoutDispatching()
+    public void RemovedQuickActionsPanelBinding_IsNotAnEnumCaptureTarget()
     {
-        var action = new QuickActionConfiguration
-        {
-            Kind = QuickActionKind.CustomText,
-            Text = "sent after close",
-            KeyboardBinding = "P",
-        };
-        var configuration = new Config { QuickActions = [action] };
-        var transport = new RecordingTransport();
-        using var peer = CreatePeer(configuration, transport, isOnlineRoomActive: () => true);
-
-        peer.SetQuickActionsPanelOpen(true);
-        var blockedAction = peer.ObserveWindowMessage(nint.Zero, WmKeyDown, 'P', nint.Zero);
-        var escape = peer.ObserveWindowMessage(
-            nint.Zero,
-            WmKeyDown,
-            new nint(VirtualKeyEscape),
-            nint.Zero);
-
-        Assert.True(blockedAction.Handled);
-        Assert.True(escape.Handled);
-        Assert.False(peer.IsQuickActionsPanelOpen);
-        Assert.Equal(0, transport.SendCount);
-
-        PressAndRelease(peer, 'P');
-        Assert.Equal(1, peer.DrainQuickActionRequests());
-        Assert.Equal("sent after close", transport.LastMessage);
+        Assert.DoesNotContain("QuickActionsPanel", Enum.GetNames<BindingTarget>());
     }
 
     [Fact]

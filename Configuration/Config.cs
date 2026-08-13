@@ -59,12 +59,6 @@ public class Config : Configurable<Config>
     public string SettingsMenuKeyboardBinding { get; set; } = "F10";
 
     [Category("00 通用设置 / General")]
-    [DisplayName("快捷菜单 / Quick Action Menu")]
-    [Description("打开快捷菜单的键盘按键。 / Keyboard key used to open the quick action menu.")]
-    [DefaultValue("")]
-    public string QuickActionsKeyboardBinding { get; set; } = string.Empty;
-
-    [Category("00 通用设置 / General")]
     [DisplayName("聊天背景透明度 / Chat Background Opacity")]
     [Description("调整聊天界面的背景透明度。 / Adjust the chat background opacity.")]
     [DefaultValue(0.55)]
@@ -146,12 +140,6 @@ public class Config : Configurable<Config>
     [Description("平时隐藏聊天框，按聊天键时显示语音状态和输入框。 / Hide the chat window until the chat key is pressed, then show voice status and the input box.")]
     [DefaultValue(false)]
     public bool CompactMode { get; set; }
-
-    [Category("00 通用设置 / General")]
-    [DisplayName("快捷菜单（手柄） / Quick Action (Controller)")]
-    [Description("打开快捷菜单的手柄按键。 / Controller button used to open the quick action menu.")]
-    [DefaultValue("")]
-    public string QuickActionsControllerBinding { get; set; } = string.Empty;
 
     [Category("00 通用设置 / General")]
     [DisplayName("全局聊天禁言（手柄） / Block All Chat (Controller)")]

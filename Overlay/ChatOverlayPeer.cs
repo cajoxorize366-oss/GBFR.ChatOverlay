@@ -95,9 +95,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private int _openRequested;
     private int _settingsToggleRequested;
     private int _settingsToggleKeyDown;
-    private int _quickActionsToggleRequested;
-    private int _quickActionsToggleKeyDown;
-    private int _quickActionsPanelOpen;
     private int _settingsMenuOpen;
     private int _suspended;
     private int _captureKeyboard;
@@ -152,7 +149,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private bool _controllerOpenChatWasDown;
     private bool _controllerPushToTalkWasDown;
     private bool _controllerPushToTalkPhysicalWasDown;
-    private bool _controllerQuickActionsWasDown;
     private bool _managedControllerReleasePending = true;
     private bool _captureWaitingForRelease;
     private string? _captureStatusText;
@@ -240,8 +236,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     public bool IsSuspended => Volatile.Read(ref _suspended) != 0;
 
-    internal bool IsQuickActionsPanelOpen => Volatile.Read(ref _quickActionsPanelOpen) != 0;
-
     public string ModId => "GBFR.ChatOverlay";
 
     private UiLanguage CurrentLanguage => _getConfiguration().InterfaceLanguage;
@@ -275,7 +269,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     public bool ShouldCaptureKeyboard() =>
         Volatile.Read(ref _initialized) &&
         (Volatile.Read(ref _settingsMenuOpen) != 0 ||
-         Volatile.Read(ref _quickActionsPanelOpen) != 0 ||
          (_getConfiguration().EnableOverlay &&
           IsOnlineRoomActive() &&
           Volatile.Read(ref _captureKeyboard) != 0));
@@ -296,18 +289,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 OverlayInputDevices.Mouse |
                 OverlayInputDevices.Text);
         }
-    }
-
-    public void ObserveQuickActionsMenuKey(bool pressed) =>
-        ObserveQuickActionsMenuKey(pressed, NativeHotkeySource);
-
-    private void ObserveQuickActionsMenuKey(bool pressed, int source)
-    {
-        if (!Volatile.Read(ref _initialized) || Volatile.Read(ref _suspended) != 0)
-            return;
-        var previous = UpdateSourceMask(ref _quickActionsToggleKeyDown, source, pressed);
-        if (pressed && previous == 0)
-            Interlocked.Increment(ref _quickActionsToggleRequested);
     }
 
     public void ObserveQuickActionKey(string actionId, bool pressed) =>
@@ -682,19 +663,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
         _controllerPushToTalkPhysicalWasDown = pushToTalkPhysicalDown;
 
-        var officialActionsAvailable = configuration.EnableOverlay;
-        var customActionsAvailable = configuration.EnableOverlay;
-        var quickActionsPanelAvailable = officialActionsAvailable || customActionsAvailable;
-        var quickActionsDown = !inputCaptured &&
-            quickActionsPanelAvailable &&
-            IsControllerBindingPressed(
-                configuration.QuickActionsControllerBinding,
-                buttons,
-                extendedButtons);
-        if (quickActionsDown != _controllerQuickActionsWasDown)
-            ObserveQuickActionsMenuKey(quickActionsDown, ControllerHotkeySource);
-        _controllerQuickActionsWasDown = quickActionsDown;
-
         var globalMuteDown = !inputCaptured &&
             IsOnlineRoomActive() &&
             IsControllerBindingPressed(
@@ -732,8 +700,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             ObserveSettingsMenuKey(false, ControllerHotkeySource);
         if (_controllerPushToTalkWasDown)
             ObserveVoicePushToTalkKey(false, ControllerHotkeySource);
-        if (_controllerQuickActionsWasDown)
-            ObserveQuickActionsMenuKey(false, ControllerHotkeySource);
         if (_controllerGlobalMuteWasDown)
             ObserveGlobalMuteKey(false, ControllerHotkeySource);
         for (var index = 0; index < _controllerRemotePlayerChatMuteWasDown.Length; index++)
@@ -746,7 +712,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _controllerOpenChatWasDown = false;
         _controllerPushToTalkWasDown = false;
         _controllerPushToTalkPhysicalWasDown = false;
-        _controllerQuickActionsWasDown = false;
         _controllerGlobalMuteWasDown = false;
     }
 
@@ -1064,8 +1029,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             var configuration = _getConfiguration();
             return Volatile.Read(ref _settingsMenuOpen) != 0 ||
                    Volatile.Read(ref _settingsToggleRequested) != 0 ||
-                   Volatile.Read(ref _quickActionsPanelOpen) != 0 ||
-                   Volatile.Read(ref _quickActionsToggleRequested) != 0 ||
                    Volatile.Read(ref _openRequested) != 0 ||
                    _session.Composer.IsOpen ||
                    (configuration.EnableVoiceIndicators &&
@@ -1438,9 +1401,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Interlocked.Exchange(ref _openRequested, 0);
         Interlocked.Exchange(ref _settingsToggleRequested, 0);
         Interlocked.Exchange(ref _settingsToggleKeyDown, 0);
-        Interlocked.Exchange(ref _quickActionsToggleRequested, 0);
-        Interlocked.Exchange(ref _quickActionsToggleKeyDown, 0);
-        Interlocked.Exchange(ref _quickActionsPanelOpen, 0);
         lock (_quickActionKeyDown)
             _quickActionKeyDown.Clear();
         ClearPendingQuickActions();
@@ -1503,13 +1463,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
             if ((Interlocked.Exchange(ref _settingsToggleRequested, 0) & 1) != 0)
                 SetSettingsMenuOpen(Volatile.Read(ref _settingsMenuOpen) == 0);
-            if ((Interlocked.Exchange(ref _quickActionsToggleRequested, 0) & 1) != 0 &&
-                configuration.EnableOverlay &&
-                Volatile.Read(ref _settingsMenuOpen) == 0)
-            {
-                var open = Volatile.Read(ref _quickActionsPanelOpen) == 0;
-                SetQuickActionsPanelOpen(open);
-            }
             var settingsOpen = Volatile.Read(ref _settingsMenuOpen) != 0;
             if (settingsOpen &&
                 !HasActiveBindingCapture() &&
@@ -1517,18 +1470,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             {
                 SetSettingsMenuOpen(false);
                 settingsOpen = false;
-            }
-
-            var quickActionsOpen = Volatile.Read(ref _quickActionsPanelOpen) != 0;
-            if (quickActionsOpen && (!configuration.EnableOverlay || settingsOpen))
-            {
-                SetQuickActionsPanelOpen(false);
-                quickActionsOpen = false;
-            }
-            else if (quickActionsOpen && ImGui.IsKeyPressed((int)ImGuiKey.Escape, false))
-            {
-                SetQuickActionsPanelOpen(false);
-                quickActionsOpen = false;
             }
 
             if (settingsOpen || (configuration.EnableOverlay && onlineRoomActive))
@@ -1543,10 +1484,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     SetSettingsMenuOpen(false);
                     settingsOpen = false;
                 }
-            }
-            else if (quickActionsOpen)
-            {
-                DrawQuickActionsPanel(configuration);
             }
             if (!configuration.EnableOverlay || !onlineRoomActive)
             {
@@ -2069,7 +2006,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         DrawBindingRow(T("设置菜单", "Settings Menu"), BindingTarget.SettingsMenu);
         DrawBindingRow(T("打开聊天", "Open Chat"), BindingTarget.OpenChat);
         DrawBindingRow(T("按住说话", "Push-to-Talk"), BindingTarget.PushToTalk);
-        DrawBindingRow(T("快捷动作面板", "Quick Actions Panel"), BindingTarget.QuickActionsPanel);
         DrawBindingRow(T("全局聊天禁言", "Block All Chat"), BindingTarget.GlobalMute);
         DrawBindingRow(T("玩家 1 聊天禁言", "Player 1 Chat Mute"), BindingTarget.RemotePlayerChatMute, playerNumber: 1);
         DrawBindingRow(T("玩家 2 聊天禁言", "Player 2 Chat Mute"), BindingTarget.RemotePlayerChatMute, playerNumber: 2);
@@ -2619,12 +2555,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             case BindingTarget.PushToTalk:
                 configuration.PushToTalkControllerBinding = value;
                 break;
-            case BindingTarget.QuickActionsPanel when request.Device == BindingCaptureDevice.Keyboard:
-                configuration.QuickActionsKeyboardBinding = value;
-                break;
-            case BindingTarget.QuickActionsPanel:
-                configuration.QuickActionsControllerBinding = value;
-                break;
             case BindingTarget.GlobalMute when request.Device == BindingCaptureDevice.Keyboard:
                 configuration.GlobalMuteKeyboardBinding = value;
                 break;
@@ -2669,8 +2599,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         yield return (new(BindingTarget.OpenChat, BindingCaptureDevice.Controller, null), configuration.OpenChatControllerBinding);
         yield return (new(BindingTarget.PushToTalk, BindingCaptureDevice.Keyboard, null), configuration.PushToTalkKeyboardBinding);
         yield return (new(BindingTarget.PushToTalk, BindingCaptureDevice.Controller, null), configuration.PushToTalkControllerBinding);
-        yield return (new(BindingTarget.QuickActionsPanel, BindingCaptureDevice.Keyboard, null), configuration.QuickActionsKeyboardBinding);
-        yield return (new(BindingTarget.QuickActionsPanel, BindingCaptureDevice.Controller, null), configuration.QuickActionsControllerBinding);
         yield return (new(BindingTarget.GlobalMute, BindingCaptureDevice.Keyboard, null), configuration.GlobalMuteKeyboardBinding);
         yield return (new(BindingTarget.GlobalMute, BindingCaptureDevice.Controller, null), configuration.GlobalMuteControllerBinding);
         for (var remotePlayerNumber = 1; remotePlayerNumber <= 3; remotePlayerNumber++)
@@ -2705,7 +2633,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         BindingTarget.SettingsMenu => T("设置菜单", "Settings Menu"),
         BindingTarget.OpenChat => T("打开聊天", "Open Chat"),
         BindingTarget.PushToTalk => T("按住说话", "Push-to-Talk"),
-        BindingTarget.QuickActionsPanel => T("快捷动作面板", "Quick Actions Panel"),
         BindingTarget.GlobalMute => T("全局聊天禁言", "Block All Chat"),
         BindingTarget.RemotePlayerChatMute => T(
             $"玩家 {request.PlayerNumber} 聊天禁言",
@@ -3019,69 +2946,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         return false;
     }
 
-    private void DrawQuickActionsPanel(Config configuration)
-    {
-        var viewport = ImGui.GetMainViewport();
-        var workPosition = viewport.WorkPos;
-        var workSize = viewport.WorkSize;
-        using var position = CreateVector2(
-            workPosition.X + Math.Max(OverlayUiScale.Scale(16.0f), workSize.X - OverlayUiScale.Scale(410.0f)),
-            workPosition.Y + Math.Max(OverlayUiScale.Scale(16.0f), workSize.Y * 0.18f));
-        using var size = CreateVector2(
-            OverlayUiScale.Scale(380.0f),
-            Math.Min(
-                OverlayUiScale.Scale(520.0f),
-                Math.Max(OverlayUiScale.Scale(180.0f), workSize.Y - OverlayUiScale.Scale(80.0f))));
-        using var pivot = CreateVector2(0.0f, 0.0f);
-        ImGui.SetNextWindowPos(position, (int)ImGuiCond.FirstUseEver, pivot);
-        ImGui.SetNextWindowSize(size, (int)ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowBgAlpha(0.94f);
-        var open = true;
-        var began = ImGui.Begin(
-            $"{T("快捷动作", "Quick Actions")}##GBFRQuickActionsPanel",
-            ref open,
-            (int)(ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoSavedSettings));
-        try
-        {
-            if (!began)
-                return;
-            var actions = (configuration.QuickActions ?? [])
-                .Where(action =>
-                    action.Enabled &&
-                    action.IsConfigured)
-                .ToArray();
-            if (actions.Length == 0)
-            {
-                ImGui.TextWrapped(
-                    T(
-                        "暂无快捷动作，请先在设置中添加。",
-                        "No quick actions yet. Add one in Settings."));
-                return;
-            }
-
-            foreach (var action in actions)
-            {
-                var payload = DescribeQuickActionPayload(action);
-                var label = string.IsNullOrWhiteSpace(action.Name)
-                    ? payload
-                    : LocalizeQuickActionName(action.Name);
-                using var buttonSize = CreateVector2(-1.0f, OverlayUiScale.Scale(42.0f));
-                if (ImGui.Button($"{label}##QuickActionRun{action.Id}", buttonSize))
-                    SendQuickAction(action.Id);
-                if (!string.Equals(label, payload, StringComparison.Ordinal))
-                    ImGui.TextWrapped(payload);
-            }
-        }
-        finally
-        {
-            ImGui.End();
-            if (!open)
-            {
-                SetQuickActionsPanelOpen(false);
-            }
-        }
-    }
-
     private void SendQuickAction(string actionId)
     {
         var action = (_getConfiguration().QuickActions ?? []).FirstOrDefault(candidate =>
@@ -3131,15 +2995,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         while (_pendingQuickActions.TryDequeue(out _))
         {
         }
-    }
-
-    private string DescribeQuickActionPayload(QuickActionConfiguration action)
-    {
-        if (action.Kind == QuickActionKind.CustomText)
-            return action.Text;
-        return CommunicationCatalog.TryGetEntry(action.Kind, action.OfficialId, out var entry)
-            ? $"{GetQuickActionKindLabel(action.Kind)} · {entry.GetDisplayName(CurrentLanguage)}"
-            : T("未选择内容", "No content selected");
     }
 
     private void DrawChatEditHandles(
@@ -3725,20 +3580,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (Volatile.Read(ref _settingsMenuOpen) != 0)
             return MatchesConfiguredWindowHotkey(configuration, virtualKey, isDown);
 
-        // The quick-action panel captures keyboard input so Escape and its own
-        // toggle never leak into the game or trigger an action behind the panel.
-        if (Volatile.Read(ref _quickActionsPanelOpen) != 0)
-        {
-            if ((isDown && virtualKey == VirtualKeyEscape) ||
-                (isDown && MatchesWindowBinding(
-                    configuration.QuickActionsKeyboardBinding,
-                    virtualKey)))
-            {
-                SetQuickActionsPanelOpen(false);
-            }
-            return true;
-        }
-
         var onlineRoomActive = IsOnlineRoomActive();
         if (isDown &&
             configuration.EnableVoiceInput &&
@@ -3810,15 +3651,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
         if (!configuration.EnableOverlay)
             return false;
-
-        if ((isDown &&
-             MatchesWindowBinding(configuration.QuickActionsKeyboardBinding, virtualKey)) ||
-            (isUp &&
-             MatchesWindowBindingPrimary(configuration.QuickActionsKeyboardBinding, virtualKey)))
-        {
-            ObserveQuickActionsMenuKey(isDown, WindowHotkeySource);
-            return true;
-        }
 
         foreach (var action in configuration.QuickActions ?? [])
         {
@@ -3940,7 +3772,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (Matches(configuration.PushToTalkKeyboardBinding) ||
             Matches(configuration.OpenChatKeyboardBinding) ||
             Matches(configuration.SettingsMenuKeyboardBinding) ||
-            Matches(configuration.QuickActionsKeyboardBinding) ||
             Matches(configuration.GlobalMuteKeyboardBinding) ||
             Matches(configuration.RemotePlayer1ChatMuteKeyboardBinding) ||
             Matches(configuration.RemotePlayer2ChatMuteKeyboardBinding) ||
@@ -4254,7 +4085,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         if (open)
         {
             ResetChatInteractionState();
-            SetQuickActionsPanelOpen(false);
             _settingsWindowOpen = true;
             _editedChatRect = null;
             _mouseInteractionGate.Open();
@@ -4282,12 +4112,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         LogSafely("Settings closed; held DirectInput keys and mouse buttons will drain before release.");
     }
 
-    internal void SetQuickActionsPanelOpen(bool open)
-    {
-        Interlocked.Exchange(ref _quickActionsPanelOpen, open ? 1 : 0);
-        UpdateInputCapture();
-    }
-
     private void UpdateInputCapture()
     {
         var devices = OverlayInputDevices.None;
@@ -4298,10 +4122,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 devices = OverlayInputDevices.Keyboard |
                           OverlayInputDevices.Mouse |
                           OverlayInputDevices.Text;
-            }
-            else if (Volatile.Read(ref _quickActionsPanelOpen) != 0)
-            {
-                devices = OverlayInputDevices.Keyboard | OverlayInputDevices.Mouse;
             }
             else if (Volatile.Read(ref _captureKeyboard) != 0)
             {
@@ -4351,9 +4171,6 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Interlocked.Exchange(ref _imeCompositionObserved, 0);
         Interlocked.Exchange(ref _imeCandidateCapturedInComposition, 0);
         _releaseCaptureFrames = 0;
-        Interlocked.Exchange(ref _quickActionsPanelOpen, 0);
-        Interlocked.Exchange(ref _quickActionsToggleRequested, 0);
-        Interlocked.Exchange(ref _quickActionsToggleKeyDown, 0);
         ClearPendingQuickActions();
         _focusInputNextFrame = false;
         _statusText = null;
@@ -4479,7 +4296,6 @@ internal enum BindingTarget
     SettingsMenu,
     OpenChat,
     PushToTalk,
-    QuickActionsPanel,
     GlobalMute,
     RemotePlayerChatMute,
     QuickAction,

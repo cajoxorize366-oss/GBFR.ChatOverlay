@@ -21,7 +21,6 @@ public sealed class ConfigDefaultsTests
     [InlineData(nameof(Config.OpenChatKeyboardBinding), "聊天键（键盘） / Chat (Keyboard)")]
     [InlineData(nameof(Config.SettingsMenuControllerBinding), "菜单键（手柄） / Menu (Controller)")]
     [InlineData(nameof(Config.SettingsMenuKeyboardBinding), "菜单键（键盘） / Menu (Keyboard)")]
-    [InlineData(nameof(Config.QuickActionsKeyboardBinding), "快捷菜单 / Quick Action Menu")]
     [InlineData(nameof(Config.BackgroundOpacity), "聊天背景透明度 / Chat Background Opacity")]
     [InlineData(nameof(Config.ChatFontSize), "字体大小 / Font Size")]
     [InlineData(nameof(Config.ShowTimestamps), "显示时间戳 / Show Timestamps")]
@@ -35,7 +34,6 @@ public sealed class ConfigDefaultsTests
     [InlineData(nameof(Config.EnableImeCandidateFallback), "输入法兼容 / IME Compatibility")]
     [InlineData(nameof(Config.EnableOverlay), "启用聊天界面 / Enable Chat Overlay")]
     [InlineData(nameof(Config.CompactMode), "精简模式 / Compact Mode")]
-    [InlineData(nameof(Config.QuickActionsControllerBinding), "快捷菜单（手柄） / Quick Action (Controller)")]
     [InlineData(nameof(Config.GlobalMuteControllerBinding), "全局聊天禁言（手柄） / Block All Chat (Controller)")]
     [InlineData(nameof(Config.GlobalMuteKeyboardBinding), "全局聊天禁言（键盘） / Block All Chat (Keyboard)")]
     [InlineData(nameof(Config.RemotePlayer1ChatMuteControllerBinding), "玩家 1 聊天禁言（手柄） / Player 1 Chat Mute (Controller)")]
@@ -169,11 +167,9 @@ public sealed class ConfigDefaultsTests
         Assert.Equal("F10", configuration.SettingsMenuKeyboardBinding);
         Assert.Equal("Y", configuration.OpenChatKeyboardBinding);
         Assert.Equal("U", configuration.PushToTalkKeyboardBinding);
-        Assert.Equal(string.Empty, configuration.QuickActionsKeyboardBinding);
         Assert.Equal(string.Empty, configuration.SettingsMenuControllerBinding);
         Assert.Equal(string.Empty, configuration.OpenChatControllerBinding);
         Assert.Equal(string.Empty, configuration.PushToTalkControllerBinding);
-        Assert.Equal(string.Empty, configuration.QuickActionsControllerBinding);
         Assert.Equal(string.Empty, configuration.GlobalMuteKeyboardBinding);
         Assert.Equal(string.Empty, configuration.GlobalMuteControllerBinding);
         Assert.Equal(string.Empty, configuration.RemotePlayer1ChatMuteKeyboardBinding);

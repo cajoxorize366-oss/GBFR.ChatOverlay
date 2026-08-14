@@ -22,6 +22,7 @@ Stable chat-moderation and native WordFilter synchronization release for Granblu
 
 - Enlarged and stabilized the chat resize target so the lower-right handle is easier to drag.
 - Removed the obsolete Quick Actions panel hotkey and its unused DirectInput backend path; configured quick actions continue to use their direct bindings.
+- Canonicalized numpad binding labels so legacy values such as `VK_61` display as `Num1`, remain executable, and conflict correctly with newly captured bindings.
 - Clarified page `04` status text so Relink's native WordFilter synchronization and the optional Steam PC supplementary filter are shown as separate stages.
 
 ### Release

@@ -702,6 +702,72 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
+    public void KeyboardCapture_SavesCanonicalNumpadName()
+    {
+        var action = new QuickActionConfiguration
+        {
+            Kind = QuickActionKind.CustomText,
+            Text = "快放奥义",
+        };
+        var configuration = new Config { QuickActions = [action] };
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+
+        peer.BeginBindingCapture(new BindingCaptureRequest(
+            BindingTarget.QuickAction,
+            BindingCaptureDevice.Keyboard,
+            action.Id));
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, new nint(0x61), nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, new nint(0x61), nint.Zero);
+
+        Assert.Equal("Num1", action.KeyboardBinding);
+    }
+
+    [Fact]
+    public void KeyboardCapture_ClearsLegacyNumpadAliasConflict()
+    {
+        var legacyAction = new QuickActionConfiguration
+        {
+            Kind = QuickActionKind.CustomText,
+            Text = "Legacy",
+            KeyboardBinding = "VK_61",
+        };
+        var replacementAction = new QuickActionConfiguration
+        {
+            Kind = QuickActionKind.CustomText,
+            Text = "Replacement",
+        };
+        var configuration = new Config { QuickActions = [legacyAction, replacementAction] };
+        using var peer = CreatePeer(configuration, new RecordingTransport());
+
+        peer.BeginBindingCapture(new BindingCaptureRequest(
+            BindingTarget.QuickAction,
+            BindingCaptureDevice.Keyboard,
+            replacementAction.Id));
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, new nint(0x61), nint.Zero);
+        peer.ObserveWindowMessage(nint.Zero, WmKeyUp, new nint(0x61), nint.Zero);
+
+        Assert.Empty(legacyAction.KeyboardBinding);
+        Assert.Equal("Num1", replacementAction.KeyboardBinding);
+    }
+
+    [Theory]
+    [InlineData("VK_61", "Num1")]
+    [InlineData("Num1", "Num1")]
+    [InlineData("Ctrl+VK_61", "Ctrl+Num1")]
+    [InlineData("1", "1")]
+    [InlineData("VK_BA", "VK_BA")]
+    [InlineData("Unknown", "Unknown")]
+    [InlineData("", "未绑定")]
+    public void DescribeBinding_NormalizesKnownValuesAndPreservesUnknownText(
+        string configuredValue,
+        string expected)
+    {
+        using var peer = CreatePeer(new Config(), new RecordingTransport());
+
+        Assert.Equal(expected, InvokeDescribeBinding(peer, configuredValue));
+    }
+
+    [Fact]
     public void PushToTalkWindowHotkey_ReportsOnlyPhysicalPressAndReleaseEdges()
     {
         var configuration = new Config
@@ -2087,6 +2153,11 @@ public sealed class ChatOverlayPeerHotkeyTests
         (T?)typeof(ChatOverlayPeer)
             .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(peer);
+
+    private static string InvokeDescribeBinding(ChatOverlayPeer peer, string value) =>
+        (string)typeof(ChatOverlayPeer)
+            .GetMethod("DescribeBinding", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(peer, [value])!;
 
     private static void SetPrivateField<T>(ChatOverlayPeer peer, string name, T value) =>
         typeof(ChatOverlayPeer)

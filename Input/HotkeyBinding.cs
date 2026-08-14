@@ -346,11 +346,33 @@ internal static class KeyboardKeyNames
         ["Delete"] = 0x2E,
     };
 
+    private static readonly (ushort VirtualKey, string Name)[] NumpadKeys =
+    [
+        (0x60, "Num0"),
+        (0x61, "Num1"),
+        (0x62, "Num2"),
+        (0x63, "Num3"),
+        (0x64, "Num4"),
+        (0x65, "Num5"),
+        (0x66, "Num6"),
+        (0x67, "Num7"),
+        (0x68, "Num8"),
+        (0x69, "Num9"),
+    ];
+
     internal static bool TryParse(string value, out ushort virtualKey)
     {
         virtualKey = 0;
         if (NamedKeys.TryGetValue(value, out virtualKey))
             return true;
+        foreach (var item in NumpadKeys)
+        {
+            if (item.Name.Equals(value, StringComparison.OrdinalIgnoreCase))
+            {
+                virtualKey = item.VirtualKey;
+                return true;
+            }
+        }
         if (value.Length == 1)
         {
             var character = char.ToUpperInvariant(value[0]);
@@ -381,6 +403,11 @@ internal static class KeyboardKeyNames
     {
         if (virtualKey is >= 'A' and <= 'Z' or >= '0' and <= '9')
             return ((char)virtualKey).ToString();
+        foreach (var item in NumpadKeys)
+        {
+            if (item.VirtualKey == virtualKey)
+                return item.Name;
+        }
         if (virtualKey is >= 0x70 and <= 0x87)
             return $"F{virtualKey - 0x70 + 1}";
         foreach (var item in NamedKeys)

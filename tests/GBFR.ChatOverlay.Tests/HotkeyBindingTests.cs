@@ -9,15 +9,38 @@ public sealed class HotkeyBindingTests
 {
     [Theory]
     [InlineData("F10", "F10")]
+    [InlineData("1", "1")]
     [InlineData("ctrl+1", "Ctrl+1")]
+    [InlineData("Num1", "Num1")]
+    [InlineData("Ctrl+VK_61", "Ctrl+Num1")]
     [InlineData("Shift+Alt+Y", "Shift+Alt+Y")]
     [InlineData("PageDown", "PageDown")]
+    [InlineData("VK_61", "Num1")]
     [InlineData("VK_BA", "VK_BA")]
     [InlineData("F13", "F13")]
     public void KeyboardBinding_ParsesAndFormatsCanonicalText(string input, string expected)
     {
         Assert.True(KeyboardBinding.TryParse(input, out var binding));
         Assert.True(binding.IsBound);
+        Assert.Equal(expected, binding.Format());
+    }
+
+    [Theory]
+    [InlineData("VK_60", "Num0")]
+    [InlineData("VK_61", "Num1")]
+    [InlineData("VK_62", "Num2")]
+    [InlineData("VK_63", "Num3")]
+    [InlineData("VK_64", "Num4")]
+    [InlineData("VK_65", "Num5")]
+    [InlineData("VK_66", "Num6")]
+    [InlineData("VK_67", "Num7")]
+    [InlineData("VK_68", "Num8")]
+    [InlineData("VK_69", "Num9")]
+    public void KeyboardBinding_FormatsNumpadVirtualKeysWithCanonicalNames(
+        string legacyValue,
+        string expected)
+    {
+        Assert.True(KeyboardBinding.TryParse(legacyValue, out var binding));
         Assert.Equal(expected, binding.Format());
     }
 

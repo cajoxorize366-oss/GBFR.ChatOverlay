@@ -1788,9 +1788,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     ImGuiWindowFlags.NoSavedSettings |
                     ImGuiWindowFlags.NoCollapse |
                     ImGuiWindowFlags.NoResize;
-        var settingsBinding = string.IsNullOrWhiteSpace(configuration.SettingsMenuKeyboardBinding)
-            ? T("未绑定", "Unbound")
-            : configuration.SettingsMenuKeyboardBinding;
+        var settingsBinding = DescribeBinding(configuration.SettingsMenuKeyboardBinding);
         var began = ImGui.Begin(
             $"{T("GBFR 聊天与语音设置", "GBFR Chat & Voice Settings")}  [{settingsBinding}]##GBFRSettings",
             ref _settingsWindowOpen,
@@ -2618,10 +2616,27 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         return EnumerateBindings(_getConfiguration())
             .Where(item => item.Request.Device == request.Device &&
                            item.Request != request &&
-                           string.Equals(item.Value, value, StringComparison.OrdinalIgnoreCase))
+                           BindingValuesEqual(request.Device, item.Value, value))
             .Select(item => item.Request)
             .Distinct()
             .ToArray();
+    }
+
+    private static bool BindingValuesEqual(
+        BindingCaptureDevice device,
+        string left,
+        string right)
+    {
+        if (device == BindingCaptureDevice.Keyboard &&
+            KeyboardBinding.TryParse(left, out var leftBinding) &&
+            leftBinding.IsBound &&
+            KeyboardBinding.TryParse(right, out var rightBinding) &&
+            rightBinding.IsBound)
+        {
+            return leftBinding == rightBinding;
+        }
+
+        return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<(BindingCaptureRequest Request, string Value)> EnumerateBindings(
@@ -2654,8 +2669,14 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             .FirstOrDefault(item => item.Request == request).Value ?? string.Empty;
     }
 
-    private string DescribeBinding(string value) =>
-        string.IsNullOrWhiteSpace(value) ? T("未绑定", "Unbound") : value;
+    private string DescribeBinding(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return T("未绑定", "Unbound");
+        return KeyboardBinding.TryParse(value, out var binding)
+            ? binding.Format()
+            : value;
+    }
 
     private string DescribeControllerBinding(string value) =>
         ControllerBinding.ContainsReservedDPadDown(value)

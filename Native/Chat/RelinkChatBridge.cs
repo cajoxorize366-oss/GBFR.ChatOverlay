@@ -25,11 +25,16 @@ public sealed unsafe class RelinkChatBridge :
     private readonly Func<PartyNetworkLocalRole> _getLocalNetworkRole;
     private readonly ConcurrentQueue<IncomingChatMessage> _incoming = new();
     private readonly RecentEchoSuppressor _echoSuppressor = new();
+    private readonly PendingFilteredChatQueue _pendingFilteredSends = new();
+    private readonly PendingFilteredReceiveQueue _pendingFilteredReceives = new();
     private readonly object _lifecycleSync = new();
+    private readonly object _filterPipelineSync = new();
     private readonly LocalChatIdentityCache _localIdentityCache = new();
 
     private IHook<SendMessageDelegate>? _sendHook;
     private IHook<RpcMessageDelegate>? _rpcHook;
+    private IHook<WordFilterCallbackDelegate>? _filteredSendHook;
+    private IHook<WordFilterCallbackDelegate>? _filteredReceiveHook;
     private SendStampDelegate? _sendStamp;
     private SendFixedPhraseDelegate? _sendFixedPhrase;
     private SendEmotionDelegate? _sendEmotion;
@@ -48,6 +53,7 @@ public sealed unsafe class RelinkChatBridge :
     private int _attributionDiagnosticsLogged;
     private int _moderationFailureLogged;
     private int _moderationRewriteFailureLogged;
+    private int _filterPipelineGeneration;
 
     public RelinkChatBridge(
         ReloadedHooksApi hooks,
@@ -75,6 +81,9 @@ public sealed unsafe class RelinkChatBridge :
     }
 
     public bool IsInitialized => Volatile.Read(ref _initialized);
+
+    internal bool IsNativeWordFilterSynchronized =>
+        IsInitialized && _filteredSendHook is not null && _filteredReceiveHook is not null;
 
     public RelinkGameContextProbe? GameContext { get; private set; }
 
@@ -112,6 +121,16 @@ public sealed unsafe class RelinkChatBridge :
                     moduleBase + rvas.PlayFixedPhrase);
                 _playEmotion = Marshal.GetDelegateForFunctionPointer<PlayEmotionDelegate>(
                     moduleBase + rvas.PlayEmotion);
+                _filteredSendHook = _hooks.CreateHook<WordFilterCallbackDelegate>(
+                    FilteredSendMessage,
+                    moduleBase + rvas.FilteredSendCallback);
+                _filteredSendHook.Activate();
+
+                _filteredReceiveHook = _hooks.CreateHook<WordFilterCallbackDelegate>(
+                    FilteredReceiveMessage,
+                    moduleBase + rvas.FilteredReceiveCallback);
+                _filteredReceiveHook.Activate();
+
                 _sendHook = _hooks.CreateHook<SendMessageDelegate>(
                     SendMessage,
                     moduleBase + rvas.SendMessage);
@@ -152,6 +171,11 @@ public sealed unsafe class RelinkChatBridge :
                     $"Relink 2.0.4 native chat bridge attached: send=0x{(nuint)(moduleBase + rvas.SendMessage):X}, " +
                     $"receive=0x{(nuint)(moduleBase + rvas.RpcMessage):X}.");
                 _log(
+                    $"Relink native WordFilter completion callbacks attached: send=0x" +
+                    $"{(nuint)(moduleBase + rvas.FilteredSendCallback):X}, receive=0x" +
+                    $"{(nuint)(moduleBase + rvas.FilteredReceiveCallback):X}; overlay history now uses " +
+                    $"the final sanitized text accepted by Relink.");
+                _log(
                     $"Relink incoming player-name resolver attached: senderSlot=0x" +
                     $"{(nuint)(moduleBase + rvas.SenderSlotResolver):X}, memberLookup=0x" +
                     $"{(nuint)(moduleBase + rvas.LobbyMemberLookup):X}; opaque RPC member keys are " +
@@ -167,8 +191,12 @@ public sealed unsafe class RelinkChatBridge :
                 _lobbyOwnerTracker?.Disable();
                 _rpcHook?.Disable();
                 _sendHook?.Disable();
+                _filteredReceiveHook?.Disable();
+                _filteredSendHook?.Disable();
                 _rpcHook = null;
                 _sendHook = null;
+                _filteredReceiveHook = null;
+                _filteredSendHook = null;
                 _playerNameResolver = null;
                 _partyMemberIdentityResolver = null;
                 _lobbyOwnerTracker = null;
@@ -178,6 +206,7 @@ public sealed unsafe class RelinkChatBridge :
                 _sendEmotion = null;
                 _playFixedPhrase = null;
                 _playEmotion = null;
+                ClearFilterPipelineState();
                 GameContext = null;
                 throw;
             }
@@ -215,7 +244,11 @@ public sealed unsafe class RelinkChatBridge :
             {
                 var messageView = new NativeStringView((nint)messageBytes, (nuint)byteCount);
                 var emptyView = new NativeStringView((nint)empty, 0);
-                var echoToken = _echoSuppressor.Register(message, DateTimeOffset.UtcNow);
+                var pendingToken = EnqueuePendingFilteredSend(
+                    message,
+                    GetLocalIdentity(),
+                    ChatCommunicationCue.None,
+                    DateTimeOffset.UtcNow);
                 try
                 {
                     _sendHook!.OriginalFunction(
@@ -227,16 +260,10 @@ public sealed unsafe class RelinkChatBridge :
                 }
                 catch (Exception exception)
                 {
-                    _echoSuppressor.Cancel(echoToken);
+                    _pendingFilteredSends.Cancel(pendingToken);
                     SafeLog($"Native chat send failed: {exception.Message}");
                     return ChatSendResult.Failed("Relink rejected the native chat call.");
                 }
-
-                CompleteLocalSend(
-                    echoToken,
-                    message,
-                    GetLocalIdentity(),
-                    ChatCommunicationCue.None);
             }
         }
 
@@ -418,6 +445,7 @@ public sealed unsafe class RelinkChatBridge :
 
     internal void ResetLobbyOwner()
     {
+        ClearFilterPipelineState();
         _lobbyOwnerTracker?.Reset();
         _localIdentityCache.Clear();
         Volatile.Write(ref _localIdentityLogged, 0);
@@ -429,9 +457,12 @@ public sealed unsafe class RelinkChatBridge :
         lock (_lifecycleSync)
         {
             Volatile.Write(ref _suspended, true);
+            ClearFilterPipelineState();
             _lobbyOwnerTracker?.Suspend();
             _rpcHook?.Disable();
             _sendHook?.Disable();
+            _filteredReceiveHook?.Disable();
+            _filteredSendHook?.Disable();
         }
     }
 
@@ -439,6 +470,8 @@ public sealed unsafe class RelinkChatBridge :
     {
         lock (_lifecycleSync)
         {
+            _filteredSendHook?.Enable();
+            _filteredReceiveHook?.Enable();
             _sendHook?.Enable();
             _rpcHook?.Enable();
             _lobbyOwnerTracker?.Resume();
@@ -448,21 +481,23 @@ public sealed unsafe class RelinkChatBridge :
 
     private void SendMessage(nint manager, nint messageView, uint messageHash, nint senderView, int category)
     {
-        string? outgoingText = null;
-        var outgoingCue = ChatCommunicationCue.None;
-        long echoToken = 0;
+        long pendingToken = 0;
         if (!Volatile.Read(ref _suspended) &&
             messageHash == RelinkChatPacketDecoder.RawTextHash &&
             TryReadOutgoingText(messageView, out var decodedText))
         {
-            outgoingText = decodedText;
+            var outgoingCue = ChatCommunicationCue.None;
             if (TryReadOutgoingText(senderView, out var presentationLabel))
             {
                 outgoingCue = RelinkChatPacketDecoder.ClassifyCommunicationCue(
                     presentationLabel,
                     out _);
             }
-            echoToken = _echoSuppressor.Register(outgoingText, DateTimeOffset.UtcNow);
+            pendingToken = EnqueuePendingFilteredSend(
+                decodedText,
+                GetLocalIdentity(),
+                outgoingCue,
+                DateTimeOffset.UtcNow);
         }
 
         try
@@ -471,16 +506,9 @@ public sealed unsafe class RelinkChatBridge :
         }
         catch (Exception exception)
         {
-            if (echoToken != 0)
-                _echoSuppressor.Cancel(echoToken);
+            _pendingFilteredSends.Cancel(pendingToken);
             SafeLog($"Native sendMessage hook failed: {exception.Message}");
-            return;
         }
-
-        if (outgoingText is null)
-            return;
-
-        CompleteLocalSend(echoToken, outgoingText, GetLocalIdentity(), outgoingCue);
     }
 
     private static bool TryReadOutgoingText(nint messageView, out string text)
@@ -502,10 +530,176 @@ public sealed unsafe class RelinkChatBridge :
             out text);
     }
 
+    private void FilteredSendMessage(nint callbackState, nint unused, nint filteredTextView)
+    {
+        var callbackGeneration = 0;
+        var completedAt = DateTimeOffset.UtcNow;
+        var finalText = string.Empty;
+        var pending = default(PendingFilteredChatQueueEntry);
+        long echoToken = 0;
+        try
+        {
+            lock (_filterPipelineSync)
+            {
+                callbackGeneration = Volatile.Read(ref _filterPipelineGeneration);
+                var decoded = TryReadOutgoingText(filteredTextView, out finalText);
+                var hasPending = IsInitialized &&
+                                 !Volatile.Read(ref _suspended) &&
+                                 (decoded
+                                     ? _pendingFilteredSends.TryTake(finalText, completedAt, out pending)
+                                     : _pendingFilteredSends.TryTakeOldest(completedAt, out pending));
+                if (decoded && hasPending)
+                    echoToken = _echoSuppressor.Register(finalText, completedAt);
+            }
+        }
+        catch (Exception exception)
+        {
+            SafeLog($"Relink filtered-send callback sampling failed: {exception.Message}");
+        }
+
+        try
+        {
+            _filteredSendHook!.OriginalFunction(callbackState, unused, filteredTextView);
+        }
+        catch (Exception exception)
+        {
+            if (echoToken != 0)
+                _echoSuppressor.Cancel(echoToken);
+            SafeLog($"Relink filtered-send callback failed: {exception.Message}");
+            return;
+        }
+
+        try
+        {
+            lock (_filterPipelineSync)
+            {
+                if (echoToken == 0)
+                    return;
+                if (Volatile.Read(ref _suspended) ||
+                    callbackGeneration != Volatile.Read(ref _filterPipelineGeneration))
+                {
+                    _echoSuppressor.Cancel(echoToken);
+                    return;
+                }
+
+                var communicationCue = pending.ChatCommunicationCue;
+                if (callbackState != nint.Zero &&
+                    RelinkFilteredChatCallbackDecoder.TryDecodeSendCue(
+                        new ReadOnlySpan<byte>(
+                            (void*)callbackState,
+                            RelinkFilteredChatCallbackDecoder.SendCallbackStateBytes),
+                        out var callbackCue))
+                {
+                    communicationCue = callbackCue;
+                }
+
+                CompleteLocalSend(
+                    echoToken,
+                    finalText,
+                    pending.LocalChatIdentity,
+                    communicationCue);
+            }
+        }
+        catch (Exception exception)
+        {
+            _echoSuppressor.Cancel(echoToken);
+            SafeLog($"Relink filtered-send history publication failed: {exception.Message}");
+        }
+    }
+
+    private void FilteredReceiveMessage(nint callbackState, nint unused, nint filteredTextView)
+    {
+        var callbackGeneration = Volatile.Read(ref _filterPipelineGeneration);
+        var decoded = false;
+        var pending = default(IncomingChatMessage);
+        try
+        {
+            decoded = TryDecodeFilteredReceive(
+                callbackState,
+                filteredTextView,
+                DateTimeOffset.UtcNow,
+                out pending);
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _decodeFailureLogged, 1) == 0)
+                SafeLog($"Filtered Relink chat decoding failed: {exception.Message}");
+        }
+
+        try
+        {
+            _filteredReceiveHook!.OriginalFunction(callbackState, unused, filteredTextView);
+        }
+        catch (Exception exception)
+        {
+            SafeLog($"Relink filtered-receive callback failed: {exception.Message}");
+            return;
+        }
+
+        try
+        {
+            lock (_filterPipelineSync)
+            {
+                if (!decoded ||
+                    !IsInitialized ||
+                    Volatile.Read(ref _suspended) ||
+                    callbackGeneration != Volatile.Read(ref _filterPipelineGeneration) ||
+                    !_pendingFilteredReceives.TryTake(
+                        pending.SenderId,
+                        pending.Category,
+                        pending.Metadata,
+                        pending.ReceivedAt))
+                {
+                    return;
+                }
+
+                PublishFilteredIncoming(pending);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (Interlocked.Exchange(ref _decodeFailureLogged, 1) == 0)
+            {
+                SafeLog(
+                    $"Filtered Relink chat publication failed; further failures are suppressed: " +
+                    $"{exception.Message}");
+            }
+        }
+    }
+
+    private static bool TryDecodeFilteredReceive(
+        nint callbackState,
+        nint filteredTextView,
+        DateTimeOffset receivedAt,
+        out IncomingChatMessage message)
+    {
+        message = default;
+        if (callbackState == nint.Zero || filteredTextView == nint.Zero)
+            return false;
+
+        var view = *(NativeStringView*)filteredTextView;
+        if (view.Data == nint.Zero ||
+            view.Length == 0 ||
+            view.Length > RelinkChatPacketDecoder.MaximumMessageBytes)
+        {
+            return false;
+        }
+
+        return RelinkFilteredChatCallbackDecoder.TryDecodeReceive(
+            new ReadOnlySpan<byte>(
+                (void*)callbackState,
+                RelinkFilteredChatCallbackDecoder.ReceiveCallbackStateBytes),
+            new ReadOnlySpan<byte>((void*)view.Data, checked((int)view.Length)),
+            receivedAt,
+            out message);
+    }
+
     private void RpcMessage(nint chat)
     {
-        IncomingChatMessage pending = default;
-        var decoded = false;
+        var trackFilteredReceive = false;
+        var filteredReceiveSenderKey = 0u;
+        var filteredReceiveCategory = 0u;
+        var filteredReceiveMetadata = 0u;
         var rawSenderKey = 0u;
         var hasRawSenderKey = false;
         var remoteMemberSlot = -1;
@@ -560,12 +754,15 @@ public sealed unsafe class RelinkChatBridge :
                         return;
                 }
 
-                decoded = RelinkChatPacketDecoder.TryDecode(
-                    packet,
-                    DateTimeOffset.UtcNow,
-                    out pending);
-                if (decoded)
+                if (RelinkChatPacketDecoder.TryDecode(
+                        packet,
+                        DateTimeOffset.UtcNow,
+                        out var pending))
                 {
+                    trackFilteredReceive = true;
+                    filteredReceiveSenderKey = pending.SenderId;
+                    filteredReceiveCategory = pending.Category;
+                    filteredReceiveMetadata = pending.Metadata;
                     if (attributionProven)
                     {
                         pending = isLocal
@@ -590,15 +787,6 @@ public sealed unsafe class RelinkChatBridge :
                         };
                     }
 
-                    LogAttributionDecision(
-                        hasRawSenderKey,
-                        rawSenderKey,
-                        remoteResolved,
-                        remoteMemberSlot,
-                        localMemberSlot,
-                        isLocal,
-                        pending);
-
                     var moderation = attributionProven
                         ? EvaluateModeration(participant, pending)
                         : ChatModerationDecision.Allow(pending.Text);
@@ -618,7 +806,6 @@ public sealed unsafe class RelinkChatBridge :
                         }
                         return;
                     }
-                    pending = moderationResult.Message;
                     useRewrittenPacket = moderationResult.Action == RelinkIncomingChatAction.PassRewritten;
                 }
             }
@@ -629,6 +816,13 @@ public sealed unsafe class RelinkChatBridge :
                 SafeLog($"Incoming Relink chat decoding failed; further failures are suppressed: {exception.Message}");
         }
 
+        var pendingReceiveToken = trackFilteredReceive
+            ? EnqueuePendingFilteredReceive(
+                filteredReceiveSenderKey,
+                filteredReceiveCategory,
+                filteredReceiveMetadata,
+                DateTimeOffset.UtcNow)
+            : 0;
         try
         {
             if (useRewrittenPacket)
@@ -643,12 +837,56 @@ public sealed unsafe class RelinkChatBridge :
         }
         catch (Exception exception)
         {
+            _pendingFilteredReceives.Cancel(pendingReceiveToken);
             SafeLog($"Native rpcMessage hook failed: {exception.Message}");
-            return;
+        }
+    }
+
+    private void PublishFilteredIncoming(IncomingChatMessage pending)
+    {
+        var rawSenderKey = pending.SenderId;
+        var remoteMemberSlot = -1;
+        var localMemberSlot = -1;
+        var remoteResolved = _memberSlotResolver?.TryResolveSlot(rawSenderKey, out remoteMemberSlot) == true &&
+                             PartyMemberSlotMap.IsValidSlot(remoteMemberSlot);
+        TryResolveLocalSlot(out localMemberSlot);
+        var attributionProven = remoteResolved &&
+                                RelinkChatSenderPolicy.CanApplyModeration(
+                                    remoteMemberSlot,
+                                    localMemberSlot);
+        var isLocal = attributionProven &&
+                      RelinkChatSenderPolicy.IsLocalRpc(remoteMemberSlot, localMemberSlot);
+
+        if (attributionProven)
+        {
+            var participant = ResolveModerationParticipant(
+                rawSenderKey,
+                remoteMemberSlot,
+                localMemberSlot,
+                isLocal);
+            pending = isLocal
+                ? pending with
+                {
+                    Sender = participant.DisplayName,
+                    PlayerNumber = 1,
+                    IsLocal = true,
+                }
+                : RelinkChatMessageAttribution.ApplyRemoteIdentity(
+                    pending,
+                    localMemberSlot,
+                    remoteMemberSlot,
+                    participant.DisplayName);
         }
 
-        if (!decoded)
-            return;
+        LogAttributionDecision(
+            hasRawSenderKey: true,
+            rawSenderKey,
+            remoteResolved,
+            remoteMemberSlot,
+            localMemberSlot,
+            isLocal,
+            pending);
+
         var publishAuthoritativeEcho = RelinkChatSenderPolicy.TryConsumeAuthoritativeLocalEcho(
             _echoSuppressor,
             isLocal,
@@ -802,8 +1040,47 @@ public sealed unsafe class RelinkChatBridge :
         if (Interlocked.Exchange(ref _localFallbackLogged, 1) == 0)
         {
             SafeLog(
-                "Relink local chat history fallback is active: successful native sends are published " +
-                "immediately, and any later authoritative RPC echo is identity-only and deduplicated.");
+                "Relink local chat history is synchronized with the native WordFilter completion callback; " +
+                "later authoritative RPC echoes are identity-only and deduplicated.");
+        }
+    }
+
+    private void ClearFilterPipelineState()
+    {
+        lock (_filterPipelineSync)
+        {
+            _pendingFilteredSends.Clear();
+            _pendingFilteredReceives.Clear();
+            _echoSuppressor.Clear();
+            Interlocked.Increment(ref _filterPipelineGeneration);
+        }
+    }
+
+    private long EnqueuePendingFilteredSend(
+        string text,
+        LocalChatIdentity identity,
+        ChatCommunicationCue communicationCue,
+        DateTimeOffset now)
+    {
+        lock (_filterPipelineSync)
+        {
+            if (!IsInitialized || Volatile.Read(ref _suspended))
+                return 0;
+            return _pendingFilteredSends.Enqueue(text, identity, communicationCue, now);
+        }
+    }
+
+    private long EnqueuePendingFilteredReceive(
+        uint senderKey,
+        uint category,
+        uint metadata,
+        DateTimeOffset now)
+    {
+        lock (_filterPipelineSync)
+        {
+            if (!IsInitialized || Volatile.Read(ref _suspended))
+                return 0;
+            return _pendingFilteredReceives.Enqueue(senderKey, category, metadata, now);
         }
     }
 
@@ -937,6 +1214,12 @@ public sealed unsafe class RelinkChatBridge :
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate void RpcMessageDelegate(nint chat);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate void WordFilterCallbackDelegate(
+        nint callbackState,
+        nint unused,
+        nint filteredTextView);
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     private delegate void SendStampDelegate(nint manager, int stampId);

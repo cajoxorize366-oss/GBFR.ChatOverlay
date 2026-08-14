@@ -365,7 +365,7 @@ internal sealed class ChatModerationService : IChatModerationService
 
     private static ChatFilterConfiguration CreateDefaultConfiguration() => new()
     {
-        UseSteamTextFilter = true,
+        UseSteamTextFilter = false,
         Action = ChatFilterAction.MaskMatchedWords,
         AutoBlockThreshold = 3,
         AutoBlockWindowMinutes = 10,

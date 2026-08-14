@@ -51,6 +51,14 @@ public sealed class RecentEchoSuppressor
         }
     }
 
+    public void Clear()
+    {
+        lock (_sync)
+        {
+            _entries.Clear();
+        }
+    }
+
     public bool TryConsume(string text, DateTimeOffset now)
         => TryConsume(text, now, out _);
 

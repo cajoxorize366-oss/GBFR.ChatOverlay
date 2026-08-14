@@ -1,12 +1,13 @@
-# GBFR Chat Overlay 0.6.0
+# GBFR Chat Overlay 0.7.0
 
 GBFR Chat Overlay is a Reloaded-II mod for **Granblue Fantasy: Relink 2.0.4**. It adds native online-room text chat, configurable quick actions, PlayFab Party push-to-talk voice, room/member notices, and voice indicators aligned to Relink's own party HUD.
 
-This is the first stable release. Development handoff notes and preview-only scaffolding are not shipped.
+Version 0.7.0 adds cross-platform room-chat moderation and keeps the mod history synchronized with Relink's final native WordFilter text. Development handoff notes and preview-only scaffolding are not shipped.
 
 ## Features
 
 - Native Relink text send/receive with authoritative sender, slot, local-player, and lobby-owner resolution.
+- Custom term filtering, whole-message blocking, hit-threshold automatic blocks, and persistent PlayFab EntityId block management.
 - Custom text, official stamps, fixed phrases, and emotions through Relink's native communication functions.
 - PlayFab Party voice that joins the game's authenticated Party network and remains muted unless push-to-talk is physically held.
 - Voice status in the chat header plus microphone icons on the native lobby and battle party HUD.
@@ -32,7 +33,7 @@ Every fixed native address is checked against its expected machine-code pattern 
 
 1. Close the game and Reloaded-II.
 2. Delete any existing `Reloaded-II/Mods/GBFR.ChatOverlay` folder. This removes stale preview binaries and documents.
-3. Extract `GBFR.ChatOverlay-0.6.0-Relink-2.0.4.zip` into `Reloaded-II/Mods`.
+3. Extract `GBFR.ChatOverlay-0.7.0-Relink-2.0.4.zip` into `Reloaded-II/Mods`.
 4. Confirm the resulting path is `Reloaded-II/Mods/GBFR.ChatOverlay/ModConfig.json`.
 5. Enable `GBFR Chat Overlay` and its required hooks dependency in Reloaded-II.
 
@@ -66,7 +67,7 @@ The repository requires .NET 8 and Visual Studio 2022 Build Tools with the C++ w
 
 ```powershell
 dotnet test tests\GBFR.ChatOverlay.Tests\GBFR.ChatOverlay.Tests.csproj -c Release
-./ci/package-chat.ps1 -Version 0.6.0
+./ci/package-chat.ps1 -Version 0.7.0
 ```
 
 The packaging script builds the managed projects and x64 native bridge, validates required files and version metadata, and creates the release ZIP under `artifacts/`.

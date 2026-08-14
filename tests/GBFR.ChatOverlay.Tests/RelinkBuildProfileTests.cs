@@ -23,6 +23,8 @@ public sealed class RelinkBuildProfileTests
         var chat = RelinkBuildLocator.Resolve(imagePath);
         Assert.Equal(0x009049F0, chat.SendMessage);
         Assert.Equal(0x00B97950, chat.RpcMessage);
+        Assert.Equal(0x00905160, chat.FilteredSendCallback);
+        Assert.Equal(0x009054B0, chat.FilteredReceiveCallback);
         Assert.Equal(0x07C23460, chat.ManagerSlot);
         Assert.Equal(0x006CD520, chat.SenderSlotResolver);
         Assert.Equal(0x003760A0, chat.LobbyMemberLookup);

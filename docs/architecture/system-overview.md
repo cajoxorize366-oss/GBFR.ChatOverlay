@@ -35,13 +35,13 @@ flowchart LR
 
 `Mod.cs` creates modules in dependency order:
 
-1. Create the chat-moderation service and initialize the optional Steamworks text filter.
+1. Create the chat-moderation service; keep the optional Steamworks supplementary filter dormant until the user refreshes it.
 2. Resolve the current Relink chat manager context when hooks are available.
 3. Resolve configured audio endpoints when Party voice is enabled.
 4. Attach Party lifecycle hooks, which provide the authoritative online-room gate.
 5. Attach native party-HUD factory/destructor hooks.
 6. Create the local audio settings/self-test controller.
-7. Attach native text, identity, and receive-moderation hooks.
+7. Attach native text, identity, receive-moderation, and post-WordFilter completion hooks.
 8. Construct `ChatSession` and `ChatOverlayPeer`.
 9. Register the peer with the process-local OverlayHub.
 10. If this mod owns the OverlayHub host lease, activate the DirectInput carrier on the shared Present tick.
@@ -50,11 +50,11 @@ flowchart LR
 
 ### Incoming text
 
-`Relink rpcMessage hook -> sender key resolver -> coherent member/local slots -> PlayFab identity -> raw-text decoder -> moderation decision -> original or rewritten Relink packet -> same final text queued to ChatSession -> ChatHistory -> overlay render`
+`Relink rpcMessage pre-hook -> sender key resolver -> coherent member/local slots -> PlayFab identity -> custom/optional Steam moderation -> original or rewritten packet -> Relink Block/Mute and WordFilter -> filtered-receive callback -> official UI -> final sanitized text queued to ChatSession -> ChatHistory -> overlay render`
 
 ### Outgoing text
 
-`chat/custom action -> ChatSession -> Relink send function -> immediate authoritative-local queue entry -> later RPC echo reconciliation/deduplication`
+`chat/custom action -> pending-send association -> Relink send function -> native WordFilter -> filtered-send callback -> actual native send -> final sanitized local history entry -> later filtered RPC echo reconciliation/deduplication`
 
 ### Party voice
 

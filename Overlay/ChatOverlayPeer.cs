@@ -163,6 +163,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private int _voiceIndicatorSnapshotFailureLogged;
     private string? _chatModerationPreviewBufferValue;
     private string? _chatModerationTemplateBufferValue;
+    private readonly Func<bool> _isRelinkWordFilterSynchronized;
 
     internal ChatOverlayPeer(
         ChatSession session,
@@ -193,7 +194,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         Func<int, bool>? isWindowKeyDown = null,
         Func<string?>? getLocalPlayerName = null,
         Func<PartyMemberTransition?>? readMemberTransition = null,
-        IChatModerationService? chatModeration = null)
+        IChatModerationService? chatModeration = null,
+        Func<bool>? isRelinkWordFilterSynchronized = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _getConfiguration = getConfiguration ?? throw new ArgumentNullException(nameof(getConfiguration));
@@ -221,6 +223,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _chatBlacklist = chatBlacklist ?? new ChatBlacklist();
         _chatModeration = chatModeration;
+        _isRelinkWordFilterSynchronized = isRelinkWordFilterSynchronized ?? (() => false);
         _getHostPlayerNumber = getHostPlayerNumber ?? (() => null);
         _getRemotePlayerName = getRemotePlayerName ?? (_ => null);
         _getLocalPlayerName = getLocalPlayerName ?? (() => null);
@@ -3297,7 +3300,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     value.ChatFilter.Enabled = enabled;
                 });
             DrawConfigurationCheckbox(
-                T("Steam 官方过滤", "Steam Official Filter"),
+                T("Steam PC 补充过滤", "Steam PC Supplementary Filter"),
                 filter.UseSteamTextFilter,
                 (value, enabled) =>
                 {
@@ -3305,12 +3308,17 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     value.ChatFilter.UseSteamTextFilter = enabled;
                 });
 
+            ImGui.Text(
+                _isRelinkWordFilterSynchronized()
+                    ? T("Relink 官方文字过滤：已同步", "Relink Official Word Filter: Synchronized")
+                    : T("Relink 官方文字过滤：未同步", "Relink Official Word Filter: Not synchronized"));
+
             var snapshot = _chatModeration.GetSnapshot();
-            ImGui.Text($"{T("官方过滤状态", "Official filter status")}: {DescribeOfficialFilterStatus(snapshot.OfficialFilter)}");
+            ImGui.Text($"{T("Steam 补充过滤状态", "Steam supplementary filter status")}: {DescribeOfficialFilterStatus(snapshot.OfficialFilter)}");
             if (!string.IsNullOrWhiteSpace(snapshot.OfficialFilter.Detail))
                 ImGui.TextWrapped(snapshot.OfficialFilter.Detail);
             using var refreshSize = CreateVector2(OverlayUiScale.Scale(150.0f), OverlayUiScale.Scale(34.0f));
-            if (ImGui.Button($"{T("刷新状态", "Refresh Status")}##ChatFilterRefresh", refreshSize))
+            if (ImGui.Button($"{T("刷新 Steam 状态", "Refresh Steam Status")}##ChatFilterRefresh", refreshSize))
                 _chatModeration.RefreshOfficialFilter();
 
             ImGui.Separator();
@@ -3368,7 +3376,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             {
                 var preview = _chatModeration.Preview(previewText);
                 ImGui.TextWrapped($"{T("结果", "Result")}: {DescribeChatDisposition(preview.Disposition)}");
-                ImGui.TextWrapped($"{T("官方命中", "Official hit")}: {YesNo(preview.OfficialFilterMatched)}  ·  " +
+                ImGui.TextWrapped($"{T("Steam 补充命中", "Steam supplementary hit")}: {YesNo(preview.OfficialFilterMatched)}  ·  " +
                                   $"{T("自定义命中", "Custom hit")}: {YesNo(preview.MatchedRuleIds.Count > 0)}");
                 ImGui.TextWrapped($"{T("文本", "Text")}: {preview.Text}");
             }

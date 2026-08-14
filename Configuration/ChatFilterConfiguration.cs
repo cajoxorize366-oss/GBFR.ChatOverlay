@@ -69,7 +69,7 @@ public sealed class ChatFilterConfiguration
     public bool Enabled { get; set; }
 
     [Browsable(false)]
-    public bool UseSteamTextFilter { get; set; } = true;
+    public bool UseSteamTextFilter { get; set; }
 
     [Browsable(false)]
     public ChatFilterAction Action { get; set; } = ChatFilterAction.MaskMatchedWords;

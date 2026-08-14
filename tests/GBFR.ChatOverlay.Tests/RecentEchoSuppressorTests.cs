@@ -68,4 +68,21 @@ public sealed class RecentEchoSuppressorTests
         Assert.False(suppressor.TryConsume("hello", now, out var wasLocalEcho));
         Assert.False(wasLocalEcho);
     }
+
+    [Fact]
+    public void Clear_RemovesEveryPendingAndPublishedEcho()
+    {
+        var suppressor = new RecentEchoSuppressor(TimeSpan.FromSeconds(5));
+        var now = DateTimeOffset.UtcNow;
+        var published = suppressor.Register("published", now);
+        suppressor.Register("pending", now);
+        Assert.True(suppressor.TryComplete(published, now));
+
+        suppressor.Clear();
+
+        Assert.False(suppressor.TryConsume("published", now, out var publishedWasLocal));
+        Assert.False(publishedWasLocal);
+        Assert.False(suppressor.TryConsume("pending", now, out var pendingWasLocal));
+        Assert.False(pendingWasLocal);
+    }
 }

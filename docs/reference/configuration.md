@@ -65,7 +65,8 @@ Chat filtering is configured in in-game pages `04 Chat Filter` and `05 Block Man
 | Setting | Default | Runtime behavior |
 | --- | --- | --- |
 | filtering | disabled | opt-in; existing chat behavior is unchanged |
-| Steam official filter | enabled | used only while filtering is enabled; unavailable status fails open |
+| Relink official WordFilter | always game-owned | page 04 reports whether the verified completion callbacks are synchronized |
+| Steam PC supplementary filter | disabled | explicit opt-in; used only while filtering is enabled; unavailable status fails open |
 | action | mask matched words | hide-entire-message is selectable |
 | automatic block | disabled | opt-in |
 | hit threshold | `3` | one hit per matched message |
@@ -76,6 +77,8 @@ Chat filtering is configured in in-game pages `04 Chat Filter` and `05 Block Man
 | blocked players | empty | only PlayFab EntityId entries persist |
 
 Saved block entries contain `IdentityKind`, `Identity`, `LastKnownName`, `Source`, `Reason`, and `BlockedAtUtc`. Display names are never used as block keys. Sender-key and player-number fallbacks exist only for the active room and are not written to disk.
+
+The persisted JSON field remains `UseSteamTextFilter` for backward compatibility. Existing configurations that explicitly saved `true` remain enabled; configurations without the field use the new opt-in default `false`.
 
 ## Voice defaults
 
@@ -96,4 +99,4 @@ Changing microphone or playback rebuilds the local test immediately. Party voice
 
 ## Reset and migration
 
-There is no alternate legacy configuration directory in 0.6.0. To reset all settings, close the game and delete `Config.json`; Reloaded creates a new file from the defaults on the next load. Deleting or replacing the mod package does not automatically delete the user configuration.
+There is no alternate legacy configuration directory in 0.7.0. To reset all settings, close the game and delete `Config.json`; Reloaded creates a new file from the defaults on the next load. Deleting or replacing the mod package does not automatically delete the user configuration.

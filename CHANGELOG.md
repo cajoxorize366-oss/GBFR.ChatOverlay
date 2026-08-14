@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.0 - 2026-08-14
+
+Stable chat-moderation and native WordFilter synchronization release for Granblue Fantasy: Relink 2.0.4.
+
+### Chat filtering and blocking
+
+- Added pages `04 Chat Filter` and `05 Block Management` with live custom-term editing, mask-word or hide-message behavior, per-rule hit counts, room blocks, and persistent PlayFab EntityId blocks.
+- Added threshold-based automatic blocking with a sliding hit window and configurable local, Party-chat, or disabled notification behavior.
+- Applied custom moderation to verified Relink room participants before the game accepts incoming raw-text packets, without treating Steam IDs or packet member keys as platform identifiers.
+- Kept Relink automatic communication and victory cues out of custom hit counts and automatic blocking while preserving their resolved player attribution.
+
+### Native text path
+
+- Synchronized mod history with Relink's final native WordFilter text through verified send and receive completion callbacks for game version 2.0.4.
+- Added bounded, thread-safe send/receive associations and room-generation resets so synchronous, worker-thread, and delayed callbacks do not normally publish stale room text.
+- Changed Steamworks text filtering into a disabled-by-default PC supplementary stage; the adapter now borrows an already loaded Steam API module instead of loading or freeing one during mod startup.
+- Fixed the startup crash caused by eager Steam text-filter initialization and preserved fail-open behavior when the supplementary API is unavailable.
+
+### Interface and input
+
+- Enlarged and stabilized the chat resize target so the lower-right handle is easier to drag.
+- Removed the obsolete Quick Actions panel hotkey and its unused DirectInput backend path; configured quick actions continue to use their direct bindings.
+- Clarified page `04` status text so Relink's native WordFilter synchronization and the optional Steam PC supplementary filter are shown as separate stages.
+
+### Release
+
+- Release ZIP naming is `GBFR.ChatOverlay-0.7.0-Relink-2.0.4.zip`.
+
 ## 0.6.0 - 2026-08-13
 
 First stable release for Granblue Fantasy: Relink 2.0.4.

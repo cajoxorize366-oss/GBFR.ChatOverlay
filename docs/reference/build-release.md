@@ -39,7 +39,7 @@ dotnet test tests\GBFR.ChatOverlay.Tests\GBFR.ChatOverlay.Tests.csproj `
   --no-build `
   --no-restore
 
-.\ci\package-chat.ps1 -Version 0.6.0
+.\ci\package-chat.ps1 -Version 0.7.0
 ```
 
 Before publishing, clone or update Extra Sigil Slots main and run:
@@ -55,8 +55,8 @@ The sync gate normalizes line endings and requires exact source parity for Overl
 `ci/package-chat.ps1` creates:
 
 ```text
-artifacts/GBFR.ChatOverlay-0.6.0-Relink-2.0.4.zip
-artifacts/GBFR.ChatOverlay-0.6.0-Relink-2.0.4.zip.sha256
+artifacts/GBFR.ChatOverlay-0.7.0-Relink-2.0.4.zip
+artifacts/GBFR.ChatOverlay-0.7.0-Relink-2.0.4.zip.sha256
 ```
 
 The ZIP has one top-level `GBFR.ChatOverlay/` directory. The script:
@@ -103,7 +103,7 @@ Automated tests cannot prove live two-client behavior inside Relink. A release c
 - Party voice creation, PTT press/release, remote playback, and focus-loss mute;
 - lobby and battle voice icons, including Full Chain masking;
 - member join/leave reasons and normal post-quest room exit;
-- custom/Steam text filtering in both Relink's official chat and the mod history;
+- custom filtering, optional Steam supplementary filtering, and final native WordFilter text matching between Relink's official chat and mod history;
 - official `vo_CMM_*` automatic lines bypassing hit counts and automatic blocks;
 - threshold auto-block, local/Party notification, room exit persistence, and same-slot member replacement;
 - OverlayHub coexistence with Extra Sigil Slots and RTSS.

@@ -2,7 +2,7 @@
   "ModId": "gbfr.qol.chatoverlay",
   "ModName": "GBFR Chat Overlay",
   "ModAuthor": "Kuro",
-  "ModVersion": "0.6.0",
+  "ModVersion": "0.7.0",
   "ModDescription": "Native online-room text chat, PlayFab Party voice, room/member notices, and Relink party-HUD voice indicators through one shared OverlayHub graphics writer.",
   "ModDll": "GBFR.ChatOverlay.dll",
   "ModIcon": "Icon.png",

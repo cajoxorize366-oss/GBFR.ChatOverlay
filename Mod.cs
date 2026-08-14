@@ -70,7 +70,6 @@ public sealed class Mod : IDisposable
 
         _chatModeration = new ChatModerationService(new SteamOfficialTextFilter());
         _chatModeration.ApplyConfiguration(_configuration.ChatFilter);
-        _chatModeration.RefreshOfficialFilter();
 
         if (_hooks is not null)
         {
@@ -264,7 +263,9 @@ public sealed class Mod : IDisposable
             getEstablishedVoiceParticipantCount: GetEstablishedVoiceParticipantCount,
             getLocalPlayerName: GetLocalPlayerName,
             readMemberTransition: ReadMemberTransition,
-            chatModeration: _chatModeration);
+            chatModeration: _chatModeration,
+            isRelinkWordFilterSynchronized: () =>
+                _nativeChatBridge?.IsNativeWordFilterSynchronized == true);
 
         try
         {

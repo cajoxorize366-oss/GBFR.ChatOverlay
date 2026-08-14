@@ -2,7 +2,7 @@
 
 ## Scope and notation
 
-This document records the fixed-build contract used by 0.6.0. Values labelled **RVA** are relative to the loaded base of `granblue_fantasy_relink.exe`; they are not absolute process addresses. Object offsets are relative to a verified live object. Party functions are resolved by export name from the verified `PartyWin.dll`.
+This document records the fixed-build contract used by 0.7.0. Values labelled **RVA** are relative to the loaded base of `granblue_fantasy_relink.exe`; they are not absolute process addresses. Object offsets are relative to a verified live object. Party functions are resolved by export name from the verified `PartyWin.dll`.
 
 Supported executable SHA-256:
 
@@ -18,6 +18,8 @@ Every required RVA is validated against its instruction pattern. RIP-relative gl
 | --- | ---: | --- |
 | `SendMessage` | `0x009049F0` | Native raw text send hook/original call |
 | `RpcMessage` | `0x00B97950` | Incoming room message hook |
+| filtered-send callback | `0x00905160` | `sendMessage` WordFilter completion lambda and actual-send handoff |
+| filtered-receive callback | `0x009054B0` | `rpcMessage` WordFilter completion lambda and official-UI handoff |
 | chat manager instruction | `0x025F633A` | RIP-relative source used to derive manager slot |
 | chat manager slot | `0x07C23460` | Current HUD chat manager global |
 | sender-slot resolver | `0x006CD520` | Maps opaque member key to actual slot |
@@ -49,6 +51,39 @@ The RPC hook copies `0x1A0` bytes before decoding.
 | category | `0x198`, 4 bytes |
 | metadata | `0x19C`, 4 bytes |
 | raw text hash | `0x887AE0B0` |
+
+## Native WordFilter callback ABI
+
+Both completion callbacks use the Windows x64 ABI:
+
+```text
+rcx = callback closure
+rdx = unused callback argument
+r8  = pointer to NativeStringView { data, length }
+```
+
+Filtered-send closure (`0x60` bytes):
+
+| Field | Offset |
+| --- | ---: |
+| manager | `0x08` |
+| local member key | `0x10` |
+| category | `0x14` |
+| presentation/cue label bytes | `0x18` |
+| label length | `0x58` |
+
+Filtered-receive closure (`0x68` bytes):
+
+| Field | Offset |
+| --- | ---: |
+| manager | `0x08` |
+| sender/member key | `0x10` |
+| category | `0x14` |
+| presentation/cue label bytes | `0x18` |
+| label length | `0x58` |
+| metadata | `0x60` |
+
+Raw text calls `WordFilterImpl::sanitizeComment`; non-raw messages bypass these two callbacks and continue through the existing native message path. A cache hit may invoke the callback synchronously, while a miss may complete on a worker thread. Closure and string-view pointers are valid only for the active callback and are never retained by managed code.
 
 ## Player name and EntityId layouts
 

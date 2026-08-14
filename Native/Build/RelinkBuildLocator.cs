@@ -2,6 +2,10 @@ namespace GBFR.ChatOverlay.Native;
 
 public readonly record struct RelinkChatRvas(int SendMessage, int RpcMessage, int ManagerSlot)
 {
+    public int FilteredSendCallback { get; init; }
+
+    public int FilteredReceiveCallback { get; init; }
+
     public int SenderSlotResolver { get; init; }
 
     public int LobbyMemberLookup { get; init; }
@@ -30,6 +34,8 @@ public static class RelinkBuildLocator
 
     private const int ExpectedSendMessageRva = 0x009049F0;
     private const int ExpectedRpcMessageRva = 0x00B97950;
+    private const int ExpectedFilteredSendCallbackRva = 0x00905160;
+    private const int ExpectedFilteredReceiveCallbackRva = 0x009054B0;
     private const int ExpectedManagerSlotRva = 0x07C23460;
     private const int ExpectedSenderSlotResolverRva = 0x006CD520;
     private const int ExpectedLobbyMemberLookupRva = 0x003760A0;
@@ -54,6 +60,14 @@ public static class RelinkBuildLocator
     private static readonly SignaturePattern RpcMessagePattern = SignaturePattern.Parse(
         "41 57 41 56 41 54 56 57 55 53 48 81 EC 20 01 00 00 48 89 CE " +
         "48 8B 05 ?? ?? ?? ?? 48 83 B8 58 01 00 00 00 48 8B 3D");
+
+    private static readonly SignaturePattern FilteredSendCallbackPattern = SignaturePattern.Parse(
+        "56 57 53 48 81 EC 80 00 00 00 48 89 CF C4 C1 78 10 00 " +
+        "C5 F8 29 44 24 60 48 8B 71 08 48 8B 41 58");
+
+    private static readonly SignaturePattern FilteredReceiveCallbackPattern = SignaturePattern.Parse(
+        "48 83 EC 38 48 83 C1 08 C4 C1 78 10 00 C5 F8 29 44 24 20 " +
+        "48 8D 54 24 20 E8 ?? ?? ?? ?? 90 48 83 C4 38 C3");
 
     private static readonly SignaturePattern ManagerSlotPattern = SignaturePattern.Parse(
         "48 8B 3D ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 44 24 38 " +
@@ -108,6 +122,14 @@ public static class RelinkBuildLocator
         using var preflight = RelinkExecutablePreflight.Open(imagePath);
         preflight.RequirePattern(ExpectedSendMessageRva, SendMessagePattern, "chat sendMessage");
         preflight.RequirePattern(ExpectedRpcMessageRva, RpcMessagePattern, "chat rpcMessage");
+        preflight.RequirePattern(
+            ExpectedFilteredSendCallbackRva,
+            FilteredSendCallbackPattern,
+            "chat filtered-send callback");
+        preflight.RequirePattern(
+            ExpectedFilteredReceiveCallbackRva,
+            FilteredReceiveCallbackPattern,
+            "chat filtered-receive callback");
         preflight.RequirePattern(
             ExpectedManagerInstructionRva,
             ManagerSlotPattern,
@@ -183,6 +205,8 @@ public static class RelinkBuildLocator
 
         return new RelinkChatRvas(ExpectedSendMessageRva, ExpectedRpcMessageRva, managerSlotRva)
         {
+            FilteredSendCallback = ExpectedFilteredSendCallbackRva,
+            FilteredReceiveCallback = ExpectedFilteredReceiveCallbackRva,
             SenderSlotResolver = ExpectedSenderSlotResolverRva,
             LobbyMemberLookup = lobbyMemberLookupRva,
             LobbyMemberManagerSlot = lobbyMemberManagerSlotRva,

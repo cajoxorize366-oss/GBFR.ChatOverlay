@@ -29,7 +29,7 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
         _resolveExports = resolveExports ??
                           throw new ArgumentNullException(nameof(resolveExports));
         _status = OfficialTextFilterStatus.Unavailable(
-            "Steam text filter has not been refreshed.");
+            "Steam supplementary text filter has not been refreshed.");
     }
 
     public OfficialTextFilterStatus Status
@@ -61,7 +61,7 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
             {
                 _exports = null;
                 _status = OfficialTextFilterStatus.Unavailable(
-                    "Steam text filter exports are unavailable.");
+                    "Steam supplementary text filter exports are unavailable.");
                 return _status;
             }
 
@@ -72,20 +72,20 @@ internal sealed class SteamOfficialTextFilter : IOfficialTextFilter
                 {
                     _status = new OfficialTextFilterStatus(
                         OfficialTextFilterState.Ready,
-                        "Steam text filter is ready.");
+                        "Steam supplementary text filter is ready.");
                 }
                 else
                 {
                     _status = new OfficialTextFilterStatus(
                         OfficialTextFilterState.Passthrough,
-                        "Steam text filter is unavailable for the game language; native passthrough is active.");
+                        "Steam supplementary text filter is unavailable for the game language; passthrough is active.");
                 }
             }
             catch
             {
                 _exports = null;
                 _status = OfficialTextFilterStatus.Unavailable(
-                    "Steam text filter initialization failed.");
+                    "Steam supplementary text filter initialization failed.");
             }
 
             return _status;
@@ -228,9 +228,6 @@ internal static class SteamOfficialTextFilterBindings
     private static readonly string[] LibraryNames = ["steam_api64.dll", "steam_api.dll"];
     private static readonly object NativeSync = new();
     private static SteamOfficialTextFilterExports? _cachedExports;
-    // Keep exactly one successful Steam API library load alive for the process;
-    // the cached delegates point into it.
-    private static nint _retainedLibraryHandle;
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate nint GetSteamUtilsDelegate();
@@ -258,19 +255,33 @@ internal static class SteamOfficialTextFilterBindings
             if (_cachedExports is not null)
                 return _cachedExports;
 
-            _cachedExports = TryResolve();
+            _cachedExports = TryResolve(GetModuleHandleW, GetProcAddress);
             return _cachedExports;
         }
     }
 
-    private static SteamOfficialTextFilterExports? TryResolve()
+    internal static SteamOfficialTextFilterExports? TryResolve(
+        Func<string, nint> moduleHandleLookup,
+        Func<nint, string, nint> exportLookup)
     {
+        return TryResolve(moduleHandleLookup, exportLookup, ResolveExports);
+    }
+
+    internal static SteamOfficialTextFilterExports? TryResolve(
+        Func<string, nint> moduleHandleLookup,
+        Func<nint, string, nint> exportLookup,
+        Func<nint, nint, nint, SteamOfficialTextFilterExports?> exportsFactory)
+    {
+        ArgumentNullException.ThrowIfNull(moduleHandleLookup);
+        ArgumentNullException.ThrowIfNull(exportLookup);
+        ArgumentNullException.ThrowIfNull(exportsFactory);
+
         foreach (var libraryName in LibraryNames)
         {
             nint libraryHandle;
             try
             {
-                libraryHandle = NativeLibrary.Load(libraryName);
+                libraryHandle = moduleHandleLookup(libraryName);
             }
             catch
             {
@@ -284,56 +295,79 @@ internal static class SteamOfficialTextFilterBindings
 
             try
             {
-                var getUtilsAddress = NativeLibrary.GetExport(
+                var getUtilsAddress = exportLookup(
                     libraryHandle,
                     SteamUtilsV010Export);
                 if (getUtilsAddress == IntPtr.Zero)
                 {
-                    NativeLibrary.Free(libraryHandle);
                     continue;
                 }
 
-                var getUtils =
-                    Marshal.GetDelegateForFunctionPointer<GetSteamUtilsDelegate>(
-                        getUtilsAddress);
-                var utils = getUtils();
-                if (utils == IntPtr.Zero)
-                {
-                    NativeLibrary.Free(libraryHandle);
-                    continue;
-                }
-
-                var initAddress = NativeLibrary.GetExport(
+                var initAddress = exportLookup(
                     libraryHandle,
                     InitFilterTextExport);
-                var filterAddress = NativeLibrary.GetExport(
+                var filterAddress = exportLookup(
                     libraryHandle,
                     FilterTextExport);
                 if (initAddress == IntPtr.Zero || filterAddress == IntPtr.Zero)
                 {
-                    NativeLibrary.Free(libraryHandle);
                     continue;
                 }
 
-                var init =
-                    Marshal.GetDelegateForFunctionPointer<InitFilterTextDelegate>(
-                        initAddress);
-                var filter =
-                    Marshal.GetDelegateForFunctionPointer<FilterTextDelegate>(
-                        filterAddress);
+                var exports = exportsFactory(getUtilsAddress, initAddress, filterAddress);
+                if (exports is null)
+                {
+                    continue;
+                }
 
-                _retainedLibraryHandle = libraryHandle;
-                return new SteamOfficialTextFilterExports(
-                    options => init(utils, options),
-                    (context, source, input, output, capacity) =>
-                        filter(utils, context, source, input, output, capacity));
+                return exports;
             }
             catch
             {
-                NativeLibrary.Free(libraryHandle);
+                // The module handle is borrowed; it must not be freed here.
             }
         }
 
         return null;
     }
+
+    private static SteamOfficialTextFilterExports? ResolveExports(
+        nint getUtilsAddress,
+        nint initAddress,
+        nint filterAddress)
+    {
+        var getUtils =
+            Marshal.GetDelegateForFunctionPointer<GetSteamUtilsDelegate>(
+                getUtilsAddress);
+        var utils = getUtils();
+        if (utils == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        var init =
+            Marshal.GetDelegateForFunctionPointer<InitFilterTextDelegate>(
+                initAddress);
+        var filter =
+            Marshal.GetDelegateForFunctionPointer<FilterTextDelegate>(
+                filterAddress);
+
+        return new SteamOfficialTextFilterExports(
+            options => init(utils, options),
+            (context, source, input, output, capacity) =>
+                filter(utils, context, source, input, output, capacity));
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern nint GetModuleHandleW(string moduleName);
+
+    [DllImport(
+        "kernel32.dll",
+        CharSet = CharSet.Ansi,
+        ExactSpelling = true,
+        BestFitMapping = false,
+        ThrowOnUnmappableChar = true)]
+    private static extern nint GetProcAddress(
+        nint module,
+        [MarshalAs(UnmanagedType.LPStr)] string procedureName);
 }

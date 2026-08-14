@@ -1,5 +1,6 @@
 using System.IO;
 using System.ComponentModel;
+using System.Text.Json;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Runtime.Configuration;
 
@@ -187,7 +188,7 @@ public sealed class ConfigDefaultsTests
         var filter = new Config().ChatFilter;
 
         Assert.False(filter.Enabled);
-        Assert.True(filter.UseSteamTextFilter);
+        Assert.False(filter.UseSteamTextFilter);
         Assert.Equal(ChatFilterAction.MaskMatchedWords, filter.Action);
         Assert.False(filter.AutoBlockEnabled);
         Assert.Equal(3, filter.AutoBlockThreshold);
@@ -196,6 +197,39 @@ public sealed class ConfigDefaultsTests
         Assert.Equal(ChatFilterConfiguration.DefaultNotificationTemplate, filter.NotificationTemplate);
         Assert.Empty(filter.Rules);
         Assert.Empty(filter.BlockedPlayers);
+    }
+
+    [Fact]
+    public void ChatFilter_LegacyJsonWithoutSteamSetting_UsesOptInDefault()
+    {
+        var configuration = JsonSerializer.Deserialize<Config>(
+            """
+            {
+              "ChatFilter": {
+                "Enabled": true
+              }
+            }
+            """);
+
+        Assert.NotNull(configuration);
+        Assert.True(configuration.ChatFilter.Enabled);
+        Assert.False(configuration.ChatFilter.UseSteamTextFilter);
+    }
+
+    [Fact]
+    public void ChatFilter_LegacyJsonWithSteamSetting_PreservesExplicitOptIn()
+    {
+        var configuration = JsonSerializer.Deserialize<Config>(
+            """
+            {
+              "ChatFilter": {
+                "UseSteamTextFilter": true
+              }
+            }
+            """);
+
+        Assert.NotNull(configuration);
+        Assert.True(configuration.ChatFilter.UseSteamTextFilter);
     }
 
     [Fact]

@@ -390,6 +390,128 @@ public sealed class SteamOfficialTextFilterTests
             Assert.True(filter.Filter("hello").Succeeded));
     }
 
+    [Fact]
+    public void TryResolve_UsesBorrowedLoadedModuleHandleAndResolvesExports()
+    {
+        var moduleHandle = new nint(0x1234_5678);
+        var requestedModules = new List<string>();
+        var requestedExports = new List<(nint Handle, string Name)>();
+
+        var exports = SteamOfficialTextFilterBindings.TryResolve(
+            moduleName =>
+            {
+                requestedModules.Add(moduleName);
+                return moduleHandle;
+            },
+            (handle, exportName) =>
+            {
+                requestedExports.Add((handle, exportName));
+                return exportName switch
+                {
+                    "SteamAPI_SteamUtils_v010" => new nint(0x1010_0000),
+                    "SteamAPI_ISteamUtils_InitFilterText" => new nint(0x1234_0001),
+                    "SteamAPI_ISteamUtils_FilterText" => new nint(0x1234_0002),
+                    _ => throw new InvalidOperationException(
+                        $"Unexpected export: {exportName}"),
+                };
+            },
+            (_, _, _) => new SteamOfficialTextFilterExports(_ => true, PassthroughFilter));
+
+        Assert.NotNull(exports);
+        Assert.Equal("steam_api64.dll", Assert.Single(requestedModules));
+        Assert.Equal(3, requestedExports.Count);
+        Assert.All(requestedExports, export => Assert.Equal(moduleHandle, export.Handle));
+        Assert.Equal(
+            new[]
+            {
+                "SteamAPI_SteamUtils_v010",
+                "SteamAPI_ISteamUtils_InitFilterText",
+                "SteamAPI_ISteamUtils_FilterText",
+            },
+            requestedExports.Select(export => export.Name));
+    }
+
+    [Fact]
+    public void TryResolve_MissingModule_ReturnsNull()
+    {
+        var exports = SteamOfficialTextFilterBindings.TryResolve(
+            _ => nint.Zero,
+            (_, _) => throw new InvalidOperationException(
+                "Export lookup should not be called without a module."),
+            (_, _, _) => null);
+
+        Assert.Null(exports);
+    }
+
+    [Fact]
+    public void TryResolve_MissingExport_FallsBackToNextLoadedModuleAndReturnsNull()
+    {
+        var moduleHandle = new nint(0x1234_5678);
+        var requestedModules = new List<string>();
+
+        var exports = SteamOfficialTextFilterBindings.TryResolve(
+            moduleName =>
+            {
+                requestedModules.Add(moduleName);
+                return moduleHandle;
+            },
+            (_, exportName) =>
+                (exportName == "SteamAPI_SteamUtils_v010"
+                    ? new nint(0x1010_0000)
+                    : nint.Zero),
+            (_, _, _) => null);
+
+        Assert.Null(exports);
+        Assert.Equal(
+            new[] { "steam_api64.dll", "steam_api.dll" },
+            requestedModules);
+    }
+
+    [Fact]
+    public void TryResolve_ExportsFactoryReturnsNull_FallsBackAndReturnsNull()
+    {
+        var requestedModules = new List<string>();
+        var factoryCalls = 0;
+
+        var exports = SteamOfficialTextFilterBindings.TryResolve(
+            moduleName =>
+            {
+                requestedModules.Add(moduleName);
+                return new nint(0x1234_5678);
+            },
+            (_, exportName) => exportName switch
+            {
+                "SteamAPI_SteamUtils_v010" => new nint(0x1010_0000),
+                "SteamAPI_ISteamUtils_InitFilterText" => new nint(0x1234_0001),
+                "SteamAPI_ISteamUtils_FilterText" => new nint(0x1234_0002),
+                _ => throw new InvalidOperationException(
+                    $"Unexpected export: {exportName}"),
+            },
+            (_, _, _) =>
+            {
+                factoryCalls++;
+                return null;
+            });
+
+        Assert.Null(exports);
+        Assert.Equal(2, factoryCalls);
+        Assert.Equal(
+            new[] { "steam_api64.dll", "steam_api.dll" },
+            requestedModules);
+    }
+
+    [Fact]
+    public void TryResolve_ModuleLookupThrows_ReturnsNull()
+    {
+        var exports = SteamOfficialTextFilterBindings.TryResolve(
+            _ => throw new InvalidOperationException("module not loaded"),
+            (_, _) => throw new InvalidOperationException(
+                "Export lookup should not be called after module lookup fails."),
+            (_, _, _) => null);
+
+        Assert.Null(exports);
+    }
+
     private static SteamOfficialTextFilter CreateFilter(
         SteamOfficialTextFilterExports exports) =>
         new(() => exports);

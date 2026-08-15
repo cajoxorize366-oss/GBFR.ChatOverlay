@@ -17,6 +17,7 @@ internal sealed class DebugFileLog : IDisposable
     private readonly Func<string, bool, StreamWriter> _writerFactory;
     private readonly int _queueCapacity;
     private readonly long _maxSessionBytes;
+    private readonly AsyncLocal<bool> _consumerContext = new();
 
     private volatile Channel<DebugLogCommand>? _queue;
     private volatile bool _acceptingWrites;
@@ -29,7 +30,6 @@ internal sealed class DebugFileLog : IDisposable
     private StreamWriter? _writer;
     private long _sessionBytes;
     private long _droppedCount;
-    private int _consumerThreadId;
     private int _failureReported;
     private int _pathFailureReported;
 
@@ -66,7 +66,11 @@ internal sealed class DebugFileLog : IDisposable
         if (!_acceptingWrites || queue is null)
             return;
 
-        if (!queue.Writer.TryWrite(new WriteCommand(message)))
+        var command = new WriteCommand(
+            DateTimeOffset.Now,
+            Environment.CurrentManagedThreadId,
+            message);
+        if (!queue.Writer.TryWrite(command))
             Interlocked.Increment(ref _droppedCount);
     }
 
@@ -86,7 +90,7 @@ internal sealed class DebugFileLog : IDisposable
                 return;
             }
 
-            if (IsOnConsumerThread())
+            if (IsInConsumerContext())
             {
                 _acceptingWrites = false;
                 _disposeRequested = true;
@@ -127,27 +131,28 @@ internal sealed class DebugFileLog : IDisposable
 
         lock (_controlSync)
         {
-            if (_disposed || _queue is not null || IsOnConsumerThread())
+            if (_disposed || _queue is not null || IsInConsumerContext())
                 return;
 
             if (string.IsNullOrWhiteSpace(_logFilePath))
             {
                 if (Interlocked.Exchange(ref _pathFailureReported, 1) == 0)
                     pendingPathFailure = "Debug file log path is unavailable.";
-                return;
             }
+            else
+            {
+                _acceptingWrites = true;
+                _disableRequested = false;
+                _disposeRequested = false;
+                _writerFailed = false;
+                Volatile.Write(ref _failureReported, 0);
 
-            _acceptingWrites = true;
-            _disableRequested = false;
-            _disposeRequested = false;
-            _writerFailed = false;
-            Volatile.Write(ref _failureReported, 0);
-
-            var queue = CreateQueue(_queueCapacity);
-            _queue = queue;
-            completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var enableCommand = new EnableCommand(_sessionStarted, completion);
-            _consumerTask = Task.Run(() => ConsumerLoop(queue, enableCommand));
+                var queue = CreateQueue(_queueCapacity);
+                _queue = queue;
+                completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var enableCommand = new EnableCommand(_sessionStarted, completion);
+                _consumerTask = Task.Run(() => ConsumerLoop(queue, enableCommand));
+            }
         }
 
         if (pendingPathFailure is not null)
@@ -179,7 +184,7 @@ internal sealed class DebugFileLog : IDisposable
             if (_disposed || _queue is null)
                 return;
 
-            if (IsOnConsumerThread())
+            if (IsInConsumerContext())
             {
                 _acceptingWrites = false;
                 _disableRequested = true;
@@ -215,7 +220,7 @@ internal sealed class DebugFileLog : IDisposable
         Channel<DebugLogCommand> queue,
         EnableCommand enableCommand)
     {
-        _consumerThreadId = Environment.CurrentManagedThreadId;
+        _consumerContext.Value = true;
         try
         {
             var opened = OpenWriter(enableCommand.Append);
@@ -232,7 +237,7 @@ internal sealed class DebugFileLog : IDisposable
                 {
                     if (command is WriteCommand write)
                     {
-                        TryWriteLine(write.Message);
+                        TryWriteLine(write.Timestamp, write.ManagedThreadId, write.Message);
                     }
                     else if (command is DisableCommand)
                     {
@@ -267,7 +272,7 @@ internal sealed class DebugFileLog : IDisposable
         }
         finally
         {
-            _consumerThreadId = 0;
+            _consumerContext.Value = false;
             queue.Writer.TryComplete();
         }
     }
@@ -290,12 +295,15 @@ internal sealed class DebugFileLog : IDisposable
         }
     }
 
-    private bool TryWriteLine(string message)
+    private bool TryWriteLine(string message) =>
+        TryWriteLine(DateTimeOffset.Now, Environment.CurrentManagedThreadId, message);
+
+    private bool TryWriteLine(DateTimeOffset timestamp, int managedThreadId, string message)
     {
         if (_writer is null || _writerFailed)
             return false;
 
-        var line = FormatLine(message);
+        var line = FormatLine(timestamp, managedThreadId, message);
         var lineBytes = Encoding.UTF8.GetByteCount(line + Environment.NewLine);
         if (_maxSessionBytes > 0 && _sessionBytes + lineBytes > _maxSessionBytes)
         {
@@ -354,8 +362,7 @@ internal sealed class DebugFileLog : IDisposable
         _disableRequested ||
         _disposeRequested;
 
-    private bool IsOnConsumerThread() =>
-        Environment.CurrentManagedThreadId == Volatile.Read(ref _consumerThreadId);
+    private bool IsInConsumerContext() => _consumerContext.Value;
 
     private void CleanupAfterControl()
     {
@@ -365,6 +372,7 @@ internal sealed class DebugFileLog : IDisposable
         _disableRequested = false;
         _disposeRequested = false;
         _writerFailed = false;
+        Interlocked.Exchange(ref _droppedCount, 0);
         Volatile.Write(ref _failureReported, 0);
     }
 
@@ -395,9 +403,9 @@ internal sealed class DebugFileLog : IDisposable
         }
     }
 
-    private string FormatLine(string message) =>
-        $"{DateTimeOffset.Now.ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz", CultureInfo.InvariantCulture)} " +
-        $"[{Environment.CurrentManagedThreadId}] [{_modId}] {message}";
+    private string FormatLine(DateTimeOffset timestamp, int managedThreadId, string message) =>
+        $"{timestamp.ToString("yyyy-MM-dd'T'HH:mm:ss.fffzzz", CultureInfo.InvariantCulture)} " +
+        $"[{managedThreadId}] [{_modId}] {message}";
 
     private static Channel<DebugLogCommand> CreateQueue(int capacity) =>
         Channel.CreateBounded<DebugLogCommand>(new BoundedChannelOptions(capacity)
@@ -426,7 +434,10 @@ internal sealed class DebugFileLog : IDisposable
 
     private abstract record DebugLogCommand;
 
-    private sealed record WriteCommand(string Message) : DebugLogCommand;
+    private sealed record WriteCommand(
+        DateTimeOffset Timestamp,
+        int ManagedThreadId,
+        string Message) : DebugLogCommand;
 
     private sealed record EnableCommand(bool Append, TaskCompletionSource<bool> Completion) : DebugLogCommand;
 

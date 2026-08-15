@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Threading;
 using System.IO;
 using System.Text;
@@ -31,6 +32,19 @@ public sealed class DebugFileLogTests
     }
 
     [Fact]
+    public void UnavailablePath_DoesNotThrowAndReportsOnce()
+    {
+        var failures = new ConcurrentQueue<string>();
+
+        using var log = new DebugFileLog(null, ModId, failures.Enqueue);
+        log.ApplyEnabled(true);
+        log.ApplyEnabled(true);
+
+        var failure = Assert.Single(failures);
+        Assert.Contains("path is unavailable", failure, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void FirstEnable_TruncatesStaleFileAndWritesFormattedHeaderAndMessage()
     {
         using var directory = new TemporaryDirectory();
@@ -41,7 +55,12 @@ public sealed class DebugFileLogTests
         using (var log = new DebugFileLog(path, ModId, failures.Enqueue))
         {
             log.ApplyEnabled(true);
+            var producerThreadId = Environment.CurrentManagedThreadId;
             log.Write("native chat bridge connected");
+
+            Assert.Equal(
+                producerThreadId,
+                ExtractManagedThreadId(WaitForLine(path, "native chat bridge connected")));
         }
 
         var content = File.ReadAllText(path);
@@ -191,6 +210,37 @@ public sealed class DebugFileLogTests
     }
 
     [Fact]
+    public void PostAwaitFailureCallback_CanRequestDisposeWithoutDeadlock()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Root, DebugFileLog.FileName);
+        var failures = new ConcurrentQueue<string>();
+        using var callbackCompleted = new ManualResetEventSlim(false);
+        DebugFileLog? reentrantLog = null;
+        var log = new DebugFileLog(
+            path,
+            ModId,
+            _ =>
+            {
+                failures.Enqueue("fault");
+                reentrantLog?.Dispose();
+                callbackCompleted.Set();
+            },
+            (_, _) => new StreamWriter(new FaultAfterFirstWriteStream(), new UTF8Encoding(false))
+            {
+                AutoFlush = true
+            });
+        reentrantLog = log;
+
+        log.ApplyEnabled(true);
+        log.Write("post-await-fault");
+
+        Assert.True(callbackCompleted.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Single(failures);
+        log.Dispose();
+    }
+
+    [Fact]
     public void UnwritablePath_DoesNotThrowAndReportsOnce()
     {
         using var directory = new TemporaryDirectory();
@@ -204,6 +254,49 @@ public sealed class DebugFileLogTests
 
         Assert.Single(failures);
         Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public void DisableThenReenable_RetriesAfterOpenFailure()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Root, DebugFileLog.FileName);
+        var failures = new ConcurrentQueue<string>();
+        var attempts = 0;
+
+        using var log = new DebugFileLog(
+            path,
+            ModId,
+            failures.Enqueue,
+            (filePath, append) =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1)
+                    throw new IOException("first open failed");
+
+                return new StreamWriter(
+                    new FileStream(
+                        filePath,
+                        append ? FileMode.Append : FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.ReadWrite | FileShare.Delete),
+                    new UTF8Encoding(false))
+                {
+                    AutoFlush = true
+                };
+            });
+
+        log.ApplyEnabled(true);
+        log.ApplyEnabled(false);
+        log.ApplyEnabled(true);
+        log.Write("recovered-after-open-failure");
+        log.Dispose();
+
+        Assert.Equal(2, attempts);
+        Assert.Single(failures);
+        Assert.Contains(
+            "recovered-after-open-failure",
+            File.ReadAllText(path),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -279,6 +372,41 @@ public sealed class DebugFileLogTests
         }
 
         Assert.Contains("visible-while-open", content, StringComparison.Ordinal);
+    }
+
+    private static string WaitForLine(string path, string expectedText)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            string? line;
+            do
+            {
+                line = reader.ReadLine();
+            }
+            while (line is not null && !line.Contains(expectedText, StringComparison.Ordinal));
+            if (line is not null)
+                return line;
+
+            Thread.Sleep(10);
+        }
+
+        throw new TimeoutException($"Timed out waiting for debug log line containing '{expectedText}'.");
+    }
+
+    private static int ExtractManagedThreadId(string line)
+    {
+        var match = LogLinePattern.Match(line);
+        Assert.True(match.Success, $"Unexpected debug log format: {line}");
+        var threadStart = line.IndexOf('[', StringComparison.Ordinal) + 1;
+        var threadEnd = line.IndexOf(']', threadStart);
+        return int.Parse(line[threadStart..threadEnd], CultureInfo.InvariantCulture);
     }
 
     private sealed class TemporaryDirectory : IDisposable
@@ -407,5 +535,39 @@ public sealed class DebugFileLogTests
 
         public override void Write(byte[] buffer, int offset, int count) =>
             throw new IOException("write failed");
+    }
+
+    private sealed class FaultAfterFirstWriteStream : Stream
+    {
+        private readonly MemoryStream _inner = new();
+        private int _writeCount;
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _inner.Length;
+        public override long Position
+        {
+            get => _inner.Position;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (Interlocked.Increment(ref _writeCount) > 1)
+                throw new IOException("write failed after consumer await");
+
+            _inner.Write(buffer, offset, count);
+        }
     }
 }

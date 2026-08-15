@@ -15,6 +15,7 @@ Version 0.7.0 adds cross-platform room-chat moderation and keeps the mod history
 - Chinese IME input, ANSI/DBCS compatibility, Backspace editing, keyboard history, compact mode, blacklist, and per-player mute controls.
 - Keyboard, XInput controller, and Flydigi Vader 5 Pro extended-button input.
 - A shared OverlayHub/ImGuiHub with Extra Sigil Slots so only one Present/WndProc graphics writer exists in the process.
+- Opt-in debug logging to `GBFR.ChatOverlay.debug.log` in the Mod folder for support and maintenance.
 
 ## Compatibility
 
@@ -58,6 +59,7 @@ The settings window contains microphone/speaker selection and a local microphone
 - [Runtime and hook lifecycle](docs/architecture/runtime-lifecycle.md)
 - [Relink 2.0.4 addresses and layouts](docs/reference/relink-2.0.4-addresses.md)
 - [Configuration reference](docs/reference/configuration.md)
+- [Debug logging](docs/modules/runtime/debug-logging.md)
 - [Build, validation, and release](docs/reference/build-release.md)
 - [Changelog](CHANGELOG.md)
 

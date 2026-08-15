@@ -20,6 +20,7 @@ The documentation follows the same hierarchy as the codebase: architecture first
 | HUD | Native party anchors and voice icons | `Native/Hud/`, `Overlay/VoiceIndicatorOverlay.cs` | [Voice indicators](modules/hud/voice-indicators.md) |
 | Audio | Endpoint selection and local test | `Audio/`, `ConfiguratorUI/` | [Audio devices and self-test](modules/audio/audio-devices-and-self-test.md) |
 | Runtime | Reloaded composition and configuration | `Runtime/`, `Mod.cs`, `Configuration/` | [Runtime lifecycle](architecture/runtime-lifecycle.md) |
+| Runtime | Opt-in diagnostic file logging | `Runtime/Diagnostics/`, `Runtime/Startup.cs`, `Mod.cs` | [Debug logging](modules/runtime/debug-logging.md) |
 
 ## Reference
 

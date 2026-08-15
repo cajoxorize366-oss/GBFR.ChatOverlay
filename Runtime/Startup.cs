@@ -71,62 +71,70 @@ public sealed class Startup : IMod, IExports, IDisposable
         _configuration = configurator.GetConfiguration<Config>(0);
         _configuration.ConfigurationUpdated += OnConfigurationUpdated;
 
-        ApplyDebugLogging(_configuration);
-        _moduleLog = CreateModuleLog();
-        Action<string> moduleLog = _moduleLog;
-        var election = OverlayBrokerElectionService.Elect(
-            _modLoader,
-            this,
-            _modConfig.ModId,
-            moduleLog);
-        _overlayHub = election.Hub;
-        if (election.IsHost)
+        try
         {
-            _overlayHubControllerRegistered = true;
-            if (_hooks is null)
+            ApplyDebugLogging(_configuration);
+            _moduleLog = CreateModuleLog();
+            Action<string> moduleLog = _moduleLog;
+            var election = OverlayBrokerElectionService.Elect(
+                _modLoader,
+                this,
+                _modConfig.ModId,
+                moduleLog);
+            _overlayHub = election.Hub;
+            if (election.IsHost)
             {
-                election.HostControl!.MarkHostUnavailable("Reloaded.Hooks is unavailable");
-            }
-            else
-            {
-                try
+                _overlayHubControllerRegistered = true;
+                if (_hooks is null)
                 {
-                    DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId));
-                    _ = DxgiPresentBridge.SetCursorReleaseActive(false);
-                    _overlayBrokerHost = new OverlayBrokerHost(
-                        election.HostControl!,
-                        moduleLog,
-                        getNativeInputCapture:
-                            DirectInputBrokerBridge.Instance.GetEffectiveInputDevices,
-                        setNativeCursorRelease: capture =>
-                        {
-                            var installed = DxgiPresentBridge.SetCursorReleaseActive(capture);
-                            if (capture && installed != DxgiPresentBridge.CursorReleaseHook.All)
-                                moduleLog($"Overlay Broker cursor release installed only {installed}.");
-                        });
-                    _ = InitializeBrokerAsync(_overlayBrokerHost, _hooks, moduleLog);
+                    election.HostControl!.MarkHostUnavailable("Reloaded.Hooks is unavailable");
                 }
-                catch (Exception exception)
+                else
                 {
-                    election.HostControl!.MarkHostUnavailable(
-                        $"native graphics bridge initialization failed: {exception.GetType().Name}");
-                    moduleLog($"Overlay Broker bootstrap failed closed: {exception}");
+                    try
+                    {
+                        DxgiPresentBridge.Configure(_modLoader.GetDirectoryForModId(_modConfig.ModId));
+                        _ = DxgiPresentBridge.SetCursorReleaseActive(false);
+                        _overlayBrokerHost = new OverlayBrokerHost(
+                            election.HostControl!,
+                            moduleLog,
+                            getNativeInputCapture:
+                                DirectInputBrokerBridge.Instance.GetEffectiveInputDevices,
+                            setNativeCursorRelease: capture =>
+                            {
+                                var installed = DxgiPresentBridge.SetCursorReleaseActive(capture);
+                                if (capture && installed != DxgiPresentBridge.CursorReleaseHook.All)
+                                    moduleLog($"Overlay Broker cursor release installed only {installed}.");
+                            });
+                        _ = InitializeBrokerAsync(_overlayBrokerHost, _hooks, moduleLog);
+                    }
+                    catch (Exception exception)
+                    {
+                        election.HostControl!.MarkHostUnavailable(
+                            $"native graphics bridge initialization failed: {exception.GetType().Name}");
+                        moduleLog($"Overlay Broker bootstrap failed closed: {exception}");
+                    }
                 }
             }
-        }
 
-        _mod = new Mod(new ModContext()
+            _mod = new Mod(new ModContext()
+            {
+                Hooks = _hooks,
+                Configuration = _configuration,
+                UpdateConfiguration = UpdateConfiguration,
+                OverlayHub = election.Hub,
+                OwnsOverlayBroker = election.IsHost,
+                RequestOverlayBrokerRecovery = RequestOverlayBrokerRecovery,
+                Log = moduleLog,
+            });
+            if (election.IsHost)
+                _overlayBrokerHost?.SetCarrierUpkeep(_mod.BrokerCarrierUpkeep);
+        }
+        catch
         {
-            Hooks = _hooks,
-            Configuration = _configuration,
-            UpdateConfiguration = UpdateConfiguration,
-            OverlayHub = election.Hub,
-            OwnsOverlayBroker = election.IsHost,
-            RequestOverlayBrokerRecovery = RequestOverlayBrokerRecovery,
-            Log = moduleLog,
-        });
-        if (election.IsHost)
-            _overlayBrokerHost?.SetCarrierUpkeep(_mod.BrokerCarrierUpkeep);
+            Dispose();
+            throw;
+        }
     }
 
     private static async Task InitializeBrokerAsync(
@@ -309,7 +317,6 @@ public sealed class Startup : IMod, IExports, IDisposable
         });
         RunDisposeStep("mod runtime", () => mod?.Dispose());
         RunDisposeStep("OverlayHub host", () => overlayBrokerHost?.Dispose());
-        RunDisposeStep("debug file log", () => _debugFileLog?.Dispose());
 
         lock (_brokerRecoverySync)
         {
@@ -323,6 +330,8 @@ public sealed class Startup : IMod, IExports, IDisposable
                 _overlayHubControllerRegistered = false;
             }
         }
+
+        RunDisposeStep("debug file log", () => _debugFileLog?.Dispose());
     }
 
     public Action Disposing => Dispose;

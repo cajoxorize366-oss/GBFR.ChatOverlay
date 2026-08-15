@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Diagnostics
+
+- Added an opt-in Debug Log setting to Reloaded-II and the in-game General page. While enabled, existing Mod diagnostics are copied to `GBFR.ChatOverlay.debug.log` in the Mod folder with timestamps and managed thread IDs.
+- Applied Debug Log changes immediately on in-game saves and external configuration reloads. Diagnostics use a bounded asynchronous writer, preserve producer timestamps/thread IDs, report dropped lines, cap each process session at 16 MiB, and contain file-I/O failures without interrupting the game.
+
 ## 0.7.0 - 2026-08-14
 
 Stable chat-moderation and native WordFilter synchronization release for Granblue Fantasy: Relink 2.0.4.

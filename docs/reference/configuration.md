@@ -23,6 +23,7 @@ In-game edits pass through one runtime configuration lock and save the same file
 | Setting | Default | Notes |
 | --- | --- | --- |
 | interface language | Simplified Chinese | English is selectable in game |
+| debug log | disabled | writes `GBFR.ChatOverlay.debug.log` in the Mod folder while enabled |
 | chat overlay | enabled | visible only in an authenticated online room |
 | compact mode | disabled | hides history until chat is opened |
 | IME candidate fallback | enabled | IMM32 candidate list beside active field |
@@ -36,6 +37,8 @@ In-game edits pass through one runtime configuration lock and save the same file
 | overlay position ratios | `-1, -1` | negative means automatic initial placement |
 
 Default player colors are `#5ED9FF`, `#FFAD5E`, `#71DF8A`, and `#C69CFF`.
+
+`EnableDebugLogging` is visible in Reloaded-II and the in-game General page. It applies immediately to the running process. The file may contain player names, platform identifiers, local paths, audio-device names, or native addresses already present in diagnostic messages; review it before sharing. See [Debug logging](../modules/runtime/debug-logging.md) for ownership and failure rules.
 
 ## Hotkey defaults and syntax
 

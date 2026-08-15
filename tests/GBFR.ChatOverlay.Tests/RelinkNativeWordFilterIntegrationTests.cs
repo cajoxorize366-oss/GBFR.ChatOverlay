@@ -88,7 +88,10 @@ public sealed class RelinkNativeWordFilterIntegrationTests
 
         Assert.True(policyIndex >= 0, "SendMessage detour must use RelinkOutgoingChatPolicy.");
         Assert.True(originalCallIndex > policyIndex, "OriginalFunction must be called after the outgoing category policy.");
-        Assert.Contains("forwardedCategory", sendDetour[originalCallIndex..], StringComparison.Ordinal);
+        Assert.Contains(
+            "_sendHook!.OriginalFunction(manager, messageView, messageHash, senderView, forwardedCategory);",
+            sendDetour,
+            StringComparison.Ordinal);
     }
 
     [Fact]

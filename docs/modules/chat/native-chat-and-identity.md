@@ -12,6 +12,7 @@ Primary sources:
 - `Native/Chat/RelinkFilteredChatCallbackDecoder.cs`
 - `Native/Chat/RelinkChatMessageAttribution.cs`
 - `Native/Chat/RelinkIncomingChatModerationPolicy.cs`
+- `Native/Chat/RelinkOutgoingChatPolicy.cs`
 - `Core/PendingFilteredChatQueue.cs`
 - `Native/Identity/RelinkPartyMemberSlotResolver.cs`
 - `Native/Identity/RelinkPlayerNameResolver.cs`
@@ -51,6 +52,8 @@ Only decoded raw-text packets enter the word-filter pipeline. A player block is 
 ## Outgoing message flow
 
 Custom text is normalized and limited to Relink's `0x15D` UTF-8 byte payload. Before `RelinkChatBridge.Send` calls the original native send function, it records a bounded pending association because the native WordFilter may complete synchronously or on a worker thread. The filtered-send callback reads Relink's final sanitized string, registers deduplication against that final text, forwards the callback so Relink performs the actual send, and only then publishes the local history entry. The later filtered RPC copy is reconciled against the same final text so the sender sees one message rather than a local line plus a duplicate network echo.
+
+Relink's automatic communication dispatcher uses the same raw-text send function but marks those lines with a `vo_CMM_*` presentation label and a category from `0` through `19`. The game sends that packet to the active party members, then uses the category again when routing the received line through its communication and official-chat UI. A local speech bubble or mod-history entry therefore proves that the automatic cue ran, but it does not prove that every receiver's official chat history accepted the automatic category. For compatibility with receivers that omit those categories, the bridge forwards verified raw `vo_CMM_*` lines as normal category `-1` text while preserving the presentation label and WordFilter path. Manual text, non-raw official actions, unlabelled raw text, and categories outside the verified automatic range are unchanged. Normalized automatic lines use Relink's ordinary text rate limit.
 
 Official actions do not synthesize chat packets:
 

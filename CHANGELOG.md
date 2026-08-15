@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Native chat
+
+- Forward verified raw `vo_CMM_*` automatic communication as normal chat category `-1` so receivers can retain Link Attack, victory, and other automatic text in the official chat history. The presentation cue, native WordFilter path, attribution, and non-raw official actions remain unchanged.
+
 ## 0.7.1 - 2026-08-15
 
 Maintenance release that adds opt-in Debug Log support and hardens the diagnostics lifecycle.

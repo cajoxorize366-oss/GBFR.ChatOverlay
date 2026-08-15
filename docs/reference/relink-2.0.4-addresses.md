@@ -17,6 +17,7 @@ Every required RVA is validated against its instruction pattern. RIP-relative gl
 | Symbol | RVA | Role |
 | --- | ---: | --- |
 | `SendMessage` | `0x009049F0` | Native raw text send hook/original call |
+| automatic communication dispatcher | `0x003EA670` | Selects automatic text/cue data and calls `SendMessage` |
 | `RpcMessage` | `0x00B97950` | Incoming room message hook |
 | filtered-send callback | `0x00905160` | `sendMessage` WordFilter completion lambda and actual-send handoff |
 | filtered-receive callback | `0x009054B0` | `rpcMessage` WordFilter completion lambda and official-UI handoff |
@@ -84,6 +85,18 @@ Filtered-receive closure (`0x68` bytes):
 | metadata | `0x60` |
 
 Raw text calls `WordFilterImpl::sanitizeComment`; non-raw messages bypass these two callbacks and continue through the existing native message path. A cache hit may invoke the callback synchronously, while a miss may complete on a worker thread. Closure and string-view pointers are valid only for the active callback and are never retained by managed code.
+
+## Automatic communication send contract
+
+The dispatcher at RVA `0x003EA670` accepts automatic categories `0` through `19`. For an enabled row it selects the raw message and presentation data, then calls `SendMessage` at callsite RVA `0x003EA8D5` with:
+
+- message hash `0x887AE0B0`;
+- a `vo_CMM_*` presentation/cue label;
+- the original automatic category.
+
+`SendMessage` copies both the category and cue label into the `0x1A0` party packet and submits the packet for each active member slot. The receive path retains the category through the WordFilter closure and the official communication/chat event. Consequently, packet submission and local presentation are not delivery acknowledgements for the receiver's official chat history.
+
+The managed detour normalizes only verified raw `vo_CMM_*` categories `0..19` to normal text category `-1` before calling the original function. It does not clear or rewrite the cue label, so local attribution and the mod's Victory, Link Attack, Thanks, or generic Official presentation remain intact. All other hashes, labels, and categories pass through unchanged.
 
 ## Player name and EntityId layouts
 

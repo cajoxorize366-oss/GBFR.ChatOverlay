@@ -105,6 +105,7 @@ Automated tests cannot prove live two-client behavior inside Relink. A release c
 - member join/leave reasons and normal post-quest room exit;
 - custom filtering, optional Steam supplementary filtering, and final native WordFilter text matching between Relink's official chat and mod history;
 - official `vo_CMM_*` automatic lines bypassing hit counts and automatic blocks;
+- automatic `vo_CMM_*` text appearing in an unmodded receiver's official chat history as well as its normal in-world presentation;
 - threshold auto-block, local/Party notification, room exit persistence, and same-slot member replacement;
 - OverlayHub coexistence with Extra Sigil Slots and RTSS.
 

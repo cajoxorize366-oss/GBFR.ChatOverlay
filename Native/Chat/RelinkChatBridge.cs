@@ -482,6 +482,7 @@ public sealed unsafe class RelinkChatBridge :
     private void SendMessage(nint manager, nint messageView, uint messageHash, nint senderView, int category)
     {
         long pendingToken = 0;
+        var forwardedCategory = category;
         if (!Volatile.Read(ref _suspended) &&
             messageHash == RelinkChatPacketDecoder.RawTextHash &&
             TryReadOutgoingText(messageView, out var decodedText))
@@ -498,11 +499,15 @@ public sealed unsafe class RelinkChatBridge :
                 GetLocalIdentity(),
                 outgoingCue,
                 DateTimeOffset.UtcNow);
+            forwardedCategory = RelinkOutgoingChatPolicy.NormalizeForwardedCategory(
+                messageHash,
+                category,
+                outgoingCue);
         }
 
         try
         {
-            _sendHook!.OriginalFunction(manager, messageView, messageHash, senderView, category);
+            _sendHook!.OriginalFunction(manager, messageView, messageHash, senderView, forwardedCategory);
         }
         catch (Exception exception)
         {

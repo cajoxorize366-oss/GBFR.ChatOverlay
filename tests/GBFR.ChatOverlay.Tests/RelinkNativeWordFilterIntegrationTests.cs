@@ -71,6 +71,27 @@ public sealed class RelinkNativeWordFilterIntegrationTests
     }
 
     [Fact]
+    public void SendDetour_UsesPolicyNormalizedCategoryBeforeOriginalFunction()
+    {
+        var source = NormalizeLineEndings(File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "Native",
+            "Chat",
+            "RelinkChatBridge.cs")));
+        var sendDetour = Slice(
+            source,
+            "private void SendMessage(",
+            "private static bool TryReadOutgoingText");
+
+        var policyIndex = sendDetour.IndexOf("RelinkOutgoingChatPolicy.", StringComparison.Ordinal);
+        var originalCallIndex = sendDetour.IndexOf("_sendHook!.OriginalFunction(", StringComparison.Ordinal);
+
+        Assert.True(policyIndex >= 0, "SendMessage detour must use RelinkOutgoingChatPolicy.");
+        Assert.True(originalCallIndex > policyIndex, "OriginalFunction must be called after the outgoing category policy.");
+        Assert.Contains("forwardedCategory", sendDetour[originalCallIndex..], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Mod_ExposesNativeWordFilterSynchronizationToPageFour()
     {
         var source = NormalizeLineEndings(

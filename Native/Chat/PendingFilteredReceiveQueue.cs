@@ -1,3 +1,5 @@
+using GBFR.ChatOverlay.Core;
+
 namespace GBFR.ChatOverlay.Native;
 
 internal sealed class PendingFilteredReceiveQueue
@@ -23,6 +25,7 @@ internal sealed class PendingFilteredReceiveQueue
         uint senderKey,
         uint category,
         uint metadata,
+        ChatCommunicationCue communicationCue,
         DateTimeOffset now)
     {
         lock (_sync)
@@ -34,6 +37,7 @@ internal sealed class PendingFilteredReceiveQueue
                 senderKey,
                 category,
                 metadata,
+                communicationCue,
                 now + _lifetime));
             while (_entries.Count > _capacity)
                 _entries.RemoveFirst();
@@ -65,8 +69,10 @@ internal sealed class PendingFilteredReceiveQueue
         uint senderKey,
         uint category,
         uint metadata,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        out ChatCommunicationCue communicationCue)
     {
+        communicationCue = ChatCommunicationCue.None;
         lock (_sync)
         {
             RemoveExpired(now);
@@ -80,6 +86,7 @@ internal sealed class PendingFilteredReceiveQueue
                     continue;
                 }
 
+                communicationCue = entry.CommunicationCue;
                 _entries.Remove(node);
                 return true;
             }
@@ -112,5 +119,6 @@ internal sealed class PendingFilteredReceiveQueue
         uint SenderKey,
         uint Category,
         uint Metadata,
+        ChatCommunicationCue CommunicationCue,
         DateTimeOffset ExpiresAt);
 }

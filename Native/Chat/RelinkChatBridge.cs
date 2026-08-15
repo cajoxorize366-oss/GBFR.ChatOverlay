@@ -588,12 +588,14 @@ public sealed unsafe class RelinkChatBridge :
                 }
 
                 var communicationCue = pending.ChatCommunicationCue;
-                if (callbackState != nint.Zero &&
+                if (communicationCue == ChatCommunicationCue.None &&
+                    callbackState != nint.Zero &&
                     RelinkFilteredChatCallbackDecoder.TryDecodeSendCue(
                         new ReadOnlySpan<byte>(
                             (void*)callbackState,
                             RelinkFilteredChatCallbackDecoder.SendCallbackStateBytes),
-                        out var callbackCue))
+                        out var callbackCue) &&
+                    callbackCue != ChatCommunicationCue.None)
                 {
                     communicationCue = callbackCue;
                 }
@@ -653,10 +655,14 @@ public sealed unsafe class RelinkChatBridge :
                         pending.SenderId,
                         pending.Category,
                         pending.Metadata,
-                        pending.ReceivedAt))
+                        pending.ReceivedAt,
+                        out var pendingCommunicationCue))
                 {
                     return;
                 }
+
+                if (pendingCommunicationCue != ChatCommunicationCue.None)
+                    pending = pending with { CommunicationCue = pendingCommunicationCue };
 
                 PublishFilteredIncoming(pending);
             }
@@ -705,6 +711,7 @@ public sealed unsafe class RelinkChatBridge :
         var filteredReceiveSenderKey = 0u;
         var filteredReceiveCategory = 0u;
         var filteredReceiveMetadata = 0u;
+        var filteredReceiveCommunicationCue = ChatCommunicationCue.None;
         var rawSenderKey = 0u;
         var hasRawSenderKey = false;
         var remoteMemberSlot = -1;
@@ -768,6 +775,7 @@ public sealed unsafe class RelinkChatBridge :
                     filteredReceiveSenderKey = pending.SenderId;
                     filteredReceiveCategory = pending.Category;
                     filteredReceiveMetadata = pending.Metadata;
+                    filteredReceiveCommunicationCue = pending.CommunicationCue;
                     if (attributionProven)
                     {
                         pending = isLocal
@@ -826,6 +834,7 @@ public sealed unsafe class RelinkChatBridge :
                 filteredReceiveSenderKey,
                 filteredReceiveCategory,
                 filteredReceiveMetadata,
+                filteredReceiveCommunicationCue,
                 DateTimeOffset.UtcNow)
             : 0;
         try
@@ -1079,13 +1088,19 @@ public sealed unsafe class RelinkChatBridge :
         uint senderKey,
         uint category,
         uint metadata,
+        ChatCommunicationCue communicationCue,
         DateTimeOffset now)
     {
         lock (_filterPipelineSync)
         {
             if (!IsInitialized || Volatile.Read(ref _suspended))
                 return 0;
-            return _pendingFilteredReceives.Enqueue(senderKey, category, metadata, now);
+            return _pendingFilteredReceives.Enqueue(
+                senderKey,
+                category,
+                metadata,
+                communicationCue,
+                now);
         }
     }
 

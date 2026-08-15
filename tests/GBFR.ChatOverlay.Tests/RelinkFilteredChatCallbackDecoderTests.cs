@@ -10,6 +10,8 @@ public sealed class RelinkFilteredChatCallbackDecoderTests
     [Theory]
     [InlineData("vo_CMM_chance", ChatCommunicationCue.LinkAttack)]
     [InlineData("vo_CMM_thanks", ChatCommunicationCue.Thanks)]
+    [InlineData("PL1800_VO_CMM_THANKS", ChatCommunicationCue.Thanks)]
+    [InlineData("PL1800_VO_CMM_WIN_3", ChatCommunicationCue.Victory)]
     [InlineData("", ChatCommunicationCue.None)]
     public void TryDecodeSendCue_UsesTheCurrentCallbackClosure(
         string senderLabel,
@@ -49,6 +51,23 @@ public sealed class RelinkFilteredChatCallbackDecoderTests
         Assert.Equal(9u, message.Metadata);
         Assert.Equal(receivedAt, message.ReceivedAt);
         Assert.NotEqual(ChatCommunicationCue.None, message.CommunicationCue);
+    }
+
+    [Fact]
+    public void TryDecodeReceive_ReadsRelinkCharacterVoiceResourceLabel()
+    {
+        var state = CreateState(
+            senderKey: 0x1234ABCD,
+            category: 7,
+            metadata: 9,
+            senderLabel: "PL1800_VO_CMM_WIN_3");
+
+        Assert.True(RelinkFilteredChatCallbackDecoder.TryDecodeReceive(
+            state,
+            "native filtered text"u8,
+            DateTimeOffset.UtcNow,
+            out var message));
+        Assert.Equal(ChatCommunicationCue.Victory, message.CommunicationCue);
     }
 
     [Fact]

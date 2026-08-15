@@ -80,6 +80,26 @@ public sealed class RelinkOutgoingChatPolicyTests
             RelinkOutgoingChatPolicy.NormalizeForwardedCategory(0x12345678u, category, cue));
     }
 
+    [Theory]
+    [InlineData("PL1800_VO_CMM_CHANCE", ChatCommunicationCue.LinkAttack)]
+    [InlineData("PL1800_VO_CMM_THANKS", ChatCommunicationCue.Thanks)]
+    [InlineData("PL1800_VO_CMM_WIN", ChatCommunicationCue.Victory)]
+    [InlineData("PL1800_VO_CMM_WIN_3", ChatCommunicationCue.Victory)]
+    public void RealRelinkCharacterVoiceLabel_ClassifiesAndNormalizes(
+        string senderLabel,
+        ChatCommunicationCue expectedCue)
+    {
+        var cue = RelinkChatPacketDecoder.ClassifyCommunicationCue(senderLabel, out _);
+
+        Assert.Equal(expectedCue, cue);
+        Assert.Equal(
+            -1,
+            RelinkOutgoingChatPolicy.NormalizeForwardedCategory(
+                RelinkChatPacketDecoder.RawTextHash,
+                7,
+                cue));
+    }
+
     [Fact]
     public void UnknownMachineCueMapsToOfficialAndNormalizes()
     {

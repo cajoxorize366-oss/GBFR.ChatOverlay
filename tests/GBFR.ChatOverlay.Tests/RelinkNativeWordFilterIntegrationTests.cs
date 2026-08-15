@@ -95,6 +95,65 @@ public sealed class RelinkNativeWordFilterIntegrationTests
     }
 
     [Fact]
+    public void WordFilterPipeline_PreservesRpcPacketCueWithoutOverwritingExistingSendCue()
+    {
+        var source = NormalizeLineEndings(File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "Native",
+            "Chat",
+            "RelinkChatBridge.cs")));
+
+        var receiveDetour = Slice(
+            source,
+            "private void RpcMessage(",
+            "private void PublishFilteredIncoming(");
+        Assert.Contains(
+            "filteredReceiveCommunicationCue = pending.CommunicationCue;",
+            receiveDetour,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "filteredReceiveCommunicationCue,",
+            receiveDetour,
+            StringComparison.Ordinal);
+
+        var filteredReceive = Slice(
+            source,
+            "private void FilteredReceiveMessage(",
+            "private static bool TryDecodeFilteredReceive(");
+        Assert.Contains(
+            "out var pendingCommunicationCue",
+            filteredReceive,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "pending with { CommunicationCue = pendingCommunicationCue }",
+            filteredReceive,
+            StringComparison.Ordinal);
+        Assert.True(
+            filteredReceive.IndexOf(
+                "pending with { CommunicationCue = pendingCommunicationCue }",
+                StringComparison.Ordinal) <
+            filteredReceive.IndexOf("PublishFilteredIncoming", StringComparison.Ordinal),
+            "Packet cue restoration must happen before the final incoming message is published.");
+
+        var filteredSend = Slice(
+            source,
+            "private void FilteredSendMessage(",
+            "private void FilteredReceiveMessage(");
+        Assert.Contains(
+            "var communicationCue = pending.ChatCommunicationCue;",
+            filteredSend,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "communicationCue == ChatCommunicationCue.None &&",
+            filteredSend,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "callbackCue != ChatCommunicationCue.None",
+            filteredSend,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Mod_ExposesNativeWordFilterSynchronizationToPageFour()
     {
         var source = NormalizeLineEndings(

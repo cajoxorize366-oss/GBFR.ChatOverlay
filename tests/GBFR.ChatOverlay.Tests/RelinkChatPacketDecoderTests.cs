@@ -46,9 +46,19 @@ public sealed class RelinkChatPacketDecoderTests
     [Theory]
     [InlineData("vo_CMM_chance", ChatCommunicationCue.LinkAttack)]
     [InlineData("vo_CMM_thanks", ChatCommunicationCue.Thanks)]
+    [InlineData("vo_CMM_win", ChatCommunicationCue.Victory)]
     [InlineData("vo_CMM_win_3", ChatCommunicationCue.Victory)]
+    [InlineData("vo_CMM_chance_start", ChatCommunicationCue.LinkAttack)]
+    [InlineData("vo_CMM_thanks_short", ChatCommunicationCue.Thanks)]
     [InlineData("VO_CMM_ChAnCe", ChatCommunicationCue.LinkAttack)]
     [InlineData("vo_CMM_win_quest_clear", ChatCommunicationCue.Victory)]
+    [InlineData("PL1800_VO_CMM_CHANCE", ChatCommunicationCue.LinkAttack)]
+    [InlineData("pl1800_vo_cmm_thanks", ChatCommunicationCue.Thanks)]
+    [InlineData("PL1800_VO_CMM_WIN", ChatCommunicationCue.Victory)]
+    [InlineData("PL1800_VO_CMM_WIN_3", ChatCommunicationCue.Victory)]
+    [InlineData("PL0_VO_CMM_WIN", ChatCommunicationCue.Victory)]
+    [InlineData("\uFEFFPL1800_VO_CMM_WIN_3", ChatCommunicationCue.Victory)]
+    [InlineData("PL1800_VO_CMM_SPEC", ChatCommunicationCue.Official)]
     [InlineData("\uFEFFvo_CMM_win_3", ChatCommunicationCue.Victory)]
     [InlineData("\u200Bvo_CMM_chance", ChatCommunicationCue.LinkAttack)]
     [InlineData("\u0001vo_CMM_thanks", ChatCommunicationCue.Thanks)]
@@ -84,6 +94,25 @@ public sealed class RelinkChatPacketDecoderTests
     public void TryDecode_PlayerNameLikeMachineCueTokenNeverBecomesSender()
     {
         var packet = CreatePacket("hello", "Kuro_vo_CMM_win_3", 0x1234, 7, 9);
+
+        Assert.True(RelinkChatPacketDecoder.TryDecode(
+            packet,
+            DateTimeOffset.UtcNow,
+            out var message));
+        Assert.Equal("Player 00001234", message.Sender);
+        Assert.Equal(ChatCommunicationCue.None, message.CommunicationCue);
+    }
+
+    [Theory]
+    [InlineData("Kuro_vo_CMM_win_3")]
+    [InlineData("_vo_CMM_emo_win")]
+    [InlineData("PLX_VO_CMM_WIN")]
+    [InlineData("PL1800X_VO_CMM_WIN")]
+    [InlineData("PL1800_VO_CMM")]
+    [InlineData("vo_CMM_")]
+    public void TryDecode_RejectsEmbeddedAndMalformedMachineCueMarkers(string senderLabel)
+    {
+        var packet = CreatePacket("hello", senderLabel, 0x1234, 7, 9);
 
         Assert.True(RelinkChatPacketDecoder.TryDecode(
             packet,

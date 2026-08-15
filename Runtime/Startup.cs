@@ -2,6 +2,7 @@
 using Reloaded.Mod.Interfaces;
 using Reloaded.Mod.Interfaces.Internal;
 using GBFR.ChatOverlay.Runtime.Configuration;
+using GBFR.ChatOverlay.Runtime.Diagnostics;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.OverlayHub.Contracts;
 using GBFR.OverlayHub.Runtime;
@@ -27,6 +28,8 @@ public sealed class Startup : IMod, IExports, IDisposable
     /// </summary>
     private Config _configuration = null!;
     private readonly object _configurationSync = new();
+    private DebugFileLog? _debugFileLog;
+    private Action<string> _moduleLog = _ => { };
 
     /// <summary>
     /// An interface to Reloaded's the function hooks/detours library.
@@ -60,6 +63,7 @@ public sealed class Startup : IMod, IExports, IDisposable
         _modConfig = (IModConfig)config;
         _logger = (ILogger)_modLoader.GetLogger();
         _modLoader.GetController<IReloadedHooks>()?.TryGetTarget(out _hooks!);
+        _debugFileLog = CreateDebugFileLog();
 
         var configurator = new Configurator(_modLoader.GetModConfigDirectory(_modConfig.ModId));
         configurator.SetContext(new() { Application = _modLoader.GetAppConfig() });
@@ -67,7 +71,9 @@ public sealed class Startup : IMod, IExports, IDisposable
         _configuration = configurator.GetConfiguration<Config>(0);
         _configuration.ConfigurationUpdated += OnConfigurationUpdated;
 
-        Action<string> moduleLog = message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+        ApplyDebugLogging(_configuration);
+        _moduleLog = CreateModuleLog();
+        Action<string> moduleLog = _moduleLog;
         var election = OverlayBrokerElectionService.Elect(
             _modLoader,
             this,
@@ -111,14 +117,13 @@ public sealed class Startup : IMod, IExports, IDisposable
 
         _mod = new Mod(new ModContext()
         {
-            Logger = _logger,
             Hooks = _hooks,
-            ModConfig = _modConfig,
             Configuration = _configuration,
             UpdateConfiguration = UpdateConfiguration,
             OverlayHub = election.Hub,
             OwnsOverlayBroker = election.IsHost,
             RequestOverlayBrokerRecovery = RequestOverlayBrokerRecovery,
+            Log = moduleLog,
         });
         if (election.IsHost)
             _overlayBrokerHost?.SetCarrierUpkeep(_mod.BrokerCarrierUpkeep);
@@ -156,7 +161,7 @@ public sealed class Startup : IMod, IExports, IDisposable
             if (Interlocked.CompareExchange(ref _brokerRecoveryInProgress, 1, 0) != 0)
                 return;
 
-            Action<string> moduleLog = message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+            Action<string> moduleLog = _moduleLog;
             IOverlayBrokerHostControl? claimedHost = null;
             try
             {
@@ -253,6 +258,7 @@ public sealed class Startup : IMod, IExports, IDisposable
         lock (_configurationSync)
         {
             update(_configuration);
+            ApplyDebugLogging(_configuration);
             _configuration.Save?.Invoke();
         }
     }
@@ -269,6 +275,7 @@ public sealed class Startup : IMod, IExports, IDisposable
             }
 
             _configuration = configuration;
+            ApplyDebugLogging(configuration);
             _mod?.ConfigurationUpdated(_configuration);
         }
     }
@@ -302,6 +309,7 @@ public sealed class Startup : IMod, IExports, IDisposable
         });
         RunDisposeStep("mod runtime", () => mod?.Dispose());
         RunDisposeStep("OverlayHub host", () => overlayBrokerHost?.Dispose());
+        RunDisposeStep("debug file log", () => _debugFileLog?.Dispose());
 
         lock (_brokerRecoverySync)
         {
@@ -329,14 +337,78 @@ public sealed class Startup : IMod, IExports, IDisposable
         {
             try
             {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Disposal of {component} failed; continuing teardown: " +
+                _moduleLog(
+                    $"Disposal of {component} failed; continuing teardown: " +
                     $"{exception.GetType().Name}: {exception.Message}");
             }
             catch
             {
                 // Reloaded teardown must continue even if its logger is no longer available.
             }
+        }
+    }
+
+    private DebugFileLog CreateDebugFileLog()
+    {
+        string? logFilePath = null;
+        try
+        {
+            logFilePath = Path.Combine(
+                _modLoader.GetDirectoryForModId(_modConfig.ModId),
+                DebugFileLog.FileName);
+        }
+        catch
+        {
+            // The sink reports once when it is enabled and the path is unavailable.
+        }
+
+        return new DebugFileLog(logFilePath, _modConfig.ModId, ReportDebugFileLogFailure);
+    }
+
+    private Action<string> CreateModuleLog() =>
+        CreateLogFanout(
+            message => _logger.WriteLine(message),
+            _debugFileLog,
+            _modConfig.ModId);
+
+    internal static Action<string> CreateLogFanout(
+        Action<string> reloadedSink,
+        DebugFileLog? debugLog,
+        string modId) =>
+        message =>
+        {
+            var prefixedMessage = $"[{modId}] {message}";
+            try
+            {
+                reloadedSink(prefixedMessage);
+            }
+            catch
+            {
+                // Reloaded logger failures must not prevent the debug file sink.
+            }
+
+            try
+            {
+                debugLog?.Write(message);
+            }
+            catch
+            {
+                // Debug file sink failures must not propagate to the game thread.
+            }
+        };
+
+    private void ApplyDebugLogging(Config configuration) =>
+        _debugFileLog?.ApplyEnabled(configuration.EnableDebugLogging);
+
+    private void ReportDebugFileLogFailure(string failure)
+    {
+        try
+        {
+            _logger.WriteLine($"[{_modConfig.ModId}] {failure}");
+        }
+        catch
+        {
+            // Debug logging must not interrupt the game thread.
         }
     }
 

@@ -1,5 +1,4 @@
 ﻿using Reloaded.Hooks.ReloadedII.Interfaces;
-using Reloaded.Mod.Interfaces;
 using GBFR.ChatOverlay.Runtime;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.ChatOverlay.Core;
@@ -23,9 +22,9 @@ public sealed class Mod : IDisposable
     private readonly IReloadedHooks? _hooks;
 
     /// <summary>
-    /// Provides access to the Reloaded logger.
+    /// Receives unified runtime diagnostic lines from Startup.
     /// </summary>
-    private readonly ILogger _logger;
+    private readonly Action<string> _log;
 
     /// <summary>
     /// Provides access to this mod's configuration.
@@ -33,10 +32,6 @@ public sealed class Mod : IDisposable
     private Config _configuration;
     private long _configurationRevision;
 
-    /// <summary>
-    /// The configuration of the currently executing mod.
-    /// </summary>
-    private readonly IModConfig _modConfig;
     private readonly Action<Action<Config>> _persistConfigurationUpdate;
     private readonly Action<string> _requestOverlayBrokerRecovery;
 
@@ -57,16 +52,14 @@ public sealed class Mod : IDisposable
     internal Mod(ModContext context)
     {
         _hooks = context.Hooks;
-        _logger = context.Logger;
+        _log = context.Log;
         _configuration = context.Configuration;
-        _modConfig = context.ModConfig;
         _persistConfigurationUpdate = context.UpdateConfiguration;
         _requestOverlayBrokerRecovery = context.RequestOverlayBrokerRecovery;
         _overlayHub = context.OverlayHub;
         _ownsOverlayBroker = context.OwnsOverlayBroker;
 
-        Action<string> moduleLog =
-            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}");
+        Action<string> moduleLog = _log;
 
         _chatModeration = new ChatModerationService(new SteamOfficialTextFilter());
         _chatModeration.ApplyConfiguration(_configuration.ChatFilter);
@@ -79,8 +72,8 @@ public sealed class Mod : IDisposable
             }
             catch (Exception exception)
             {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Relink native chat-manager probe unavailable; " +
+                _log(
+                    $"Relink native chat-manager probe unavailable; " +
                     $"native sends will fail closed: {exception.Message}");
             }
         }
@@ -125,8 +118,8 @@ public sealed class Mod : IDisposable
             catch (Exception exception)
             {
                 partyLifecycleProbe?.Dispose();
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Online Party-room gate unavailable; the Overlay will remain " +
+                _log(
+                    $"Online Party-room gate unavailable; the Overlay will remain " +
                     $"hidden (fail-closed): {exception}");
             }
         }
@@ -142,8 +135,8 @@ public sealed class Mod : IDisposable
             }
             catch (Exception exception)
             {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Native party-HUD anchor tracking unavailable; " +
+                _log(
+                    $"Native party-HUD anchor tracking unavailable; " +
                     $"voice indicators will remain hidden (fail-closed): {exception}");
             }
         }
@@ -159,8 +152,8 @@ public sealed class Mod : IDisposable
             }
             catch (Exception exception)
             {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Local microphone monitor unavailable: {exception}");
+                _log(
+                    $"Local microphone monitor unavailable: {exception}");
             }
         }
 
@@ -189,7 +182,7 @@ public sealed class Mod : IDisposable
             {
                 nativeChatBridge = new RelinkChatBridge(
                     _hooks,
-                    message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                    message => _log(message),
                     _gameContextProbe,
                     _chatBlacklist,
                     GetLocalNetworkRole,
@@ -210,7 +203,7 @@ public sealed class Mod : IDisposable
             }
             catch (Exception exception)
             {
-                _logger.WriteLine($"[{_modConfig.ModId}] Native chat bridge unavailable: {exception}");
+                _log($"Native chat bridge unavailable: {exception}");
                 history.Add(
                     "System",
                     "Native chat bridge validation failed; chat sending is unavailable.",
@@ -254,7 +247,7 @@ public sealed class Mod : IDisposable
             pressed => _partyLifecycleProbe?.SetPushToTalkPressed(pressed),
             ForceReleaseVoiceInputs,
             HandleOverlayBrokerUnavailable,
-            message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+            message => _log(message),
             chatBlacklist: _chatBlacklist,
             getHostPlayerNumber: GetHostPlayerNumber,
             getRemotePlayerName: GetRemotePlayerName,
@@ -305,7 +298,7 @@ public sealed class Mod : IDisposable
             _audioSettings?.ApplyConfiguration(configuration);
             if (!configuration.EnableVoiceInput)
                 SetLocalMicrophoneSelfTestRequested(false);
-            _logger.WriteLine($"[{_modConfig.ModId}] Config Updated: Applying");
+            _log("Config Updated: Applying");
         }
         finally
         {
@@ -376,7 +369,7 @@ public sealed class Mod : IDisposable
                 () => _overlay.IsInitialized && !_overlay.IsSuspended,
                 _overlay.ObserveSettingsMenuKey,
                 pressed => _audioSettings?.SetSelfTestPressed(pressed),
-                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                message => _log(message),
                 () => Volatile.Read(ref _configuration),
                 () => Volatile.Read(ref _configurationRevision),
                 _overlay.ObserveNativeInputSnapshot,
@@ -385,15 +378,15 @@ public sealed class Mod : IDisposable
                 _overlay.ObserveRemotePlayerChatMuteKey);
             StartupPhaseDiagnostic.Run(
                 "directinput-broker-hooks",
-                message => _logger.WriteLine($"[{_modConfig.ModId}] {message}"),
+                message => _log(message),
                 directInputKeyboard.Initialize);
             _directInputKeyboard = directInputKeyboard;
         }
         catch (Exception exception)
         {
             directInputKeyboard?.Dispose();
-            _logger.WriteLine(
-                $"[{_modConfig.ModId}] DirectInput interception unavailable: {exception}");
+            _log(
+                $"DirectInput interception unavailable: {exception}");
         }
     }
 
@@ -587,8 +580,8 @@ public sealed class Mod : IDisposable
         {
             try
             {
-                _logger.WriteLine(
-                    $"[{_modConfig.ModId}] Disposal of {component} failed; continuing teardown: " +
+                _log(
+                    $"Disposal of {component} failed; continuing teardown: " +
                     $"{exception.GetType().Name}: {exception.Message}");
             }
             catch

@@ -1,5 +1,4 @@
-﻿using Reloaded.Mod.Interfaces;
-using IReloadedHooks = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
+﻿using IReloadedHooks = Reloaded.Hooks.ReloadedII.Interfaces.IReloadedHooks;
 using GBFR.ChatOverlay.Configuration;
 using GBFR.OverlayHub.Contracts;
 
@@ -16,11 +15,6 @@ internal sealed class ModContext
     public IReloadedHooks? Hooks { get; set; } = null!;
 
     /// <summary>
-    /// Provides access to the Reloaded logger.
-    /// </summary>
-    public ILogger Logger { get; set; } = null!;
-
-    /// <summary>
     /// Provides access to this mod's configuration.
     /// </summary>
     public Config Configuration { get; set; } = null!;
@@ -30,14 +24,14 @@ internal sealed class ModContext
     /// </summary>
     public Action<Action<Config>> UpdateConfiguration { get; set; } = null!;
 
-    /// <summary>
-    /// Configuration of this mod.
-    /// </summary>
-    public IModConfig ModConfig { get; set; } = null!;
-
     public IGbfrOverlayHub OverlayHub { get; set; } = null!;
 
     public bool OwnsOverlayBroker { get; set; }
 
     public Action<string> RequestOverlayBrokerRecovery { get; set; } = _ => { };
+
+    /// <summary>
+    /// Receives diagnostic lines after Startup applies the mod id and debug file fan-out.
+    /// </summary>
+    public Action<string> Log { get; set; } = _ => { };
 }

@@ -23,6 +23,14 @@ public class Config : Configurable<Config>
     public UiLanguage InterfaceLanguage { get; set; } = UiLanguage.SimplifiedChinese;
 
     [Category("00 通用设置 / General")]
+    [DisplayName("调试日志 / Debug Log")]
+    [Description(
+        "在 Mod 文件夹写入 GBFR.ChatOverlay.debug.log；日志可能包含玩家名称或平台标识，分享前请先检查。 / " +
+        "Write GBFR.ChatOverlay.debug.log in the Mod folder; logs may contain player names or platform identifiers, so review them before sharing.")]
+    [DefaultValue(false)]
+    public bool EnableDebugLogging { get; set; }
+
+    [Category("00 通用设置 / General")]
     [DisplayName("语音键（手柄） / PTT (Controller)")]
     [Description("按住说话的手柄按键。 / Controller button used for push-to-talk.")]
     [DefaultValue("")]

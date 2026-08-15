@@ -16,6 +16,7 @@ public sealed class ConfigDefaultsTests
 
     [Theory]
     [InlineData(nameof(Config.InterfaceLanguage), "语言 / Language")]
+    [InlineData(nameof(Config.EnableDebugLogging), "调试日志 / Debug Log")]
     [InlineData(nameof(Config.PushToTalkControllerBinding), "语音键（手柄） / PTT (Controller)")]
     [InlineData(nameof(Config.PushToTalkKeyboardBinding), "语音键（键盘） / PTT (Keyboard)")]
     [InlineData(nameof(Config.OpenChatControllerBinding), "聊天键（手柄） / Chat (Controller)")]
@@ -64,6 +65,7 @@ public sealed class ConfigDefaultsTests
         foreach (var propertyName in new[]
                  {
                      nameof(Config.InterfaceLanguage),
+                     nameof(Config.EnableDebugLogging),
                      nameof(Config.EnableOverlay),
                      nameof(Config.CompactMode),
                      nameof(Config.EnableImeCandidateFallback),
@@ -98,6 +100,17 @@ public sealed class ConfigDefaultsTests
     public void ImeCandidateFallback_IsEnabledForThirdPartyInputMethods()
     {
         Assert.True(new Config().EnableImeCandidateFallback);
+    }
+
+    [Fact]
+    public void DebugLogging_IsVisibleAndDisabledByDefault()
+    {
+        var property = TypeDescriptor.GetProperties(typeof(Config))[nameof(Config.EnableDebugLogging)]!;
+
+        Assert.True(property.IsBrowsable);
+        Assert.False(new Config().EnableDebugLogging);
+        Assert.Contains("GBFR.ChatOverlay.debug.log", property.Description, StringComparison.Ordinal);
+        Assert.Contains("分享前请先检查", property.Description, StringComparison.Ordinal);
     }
 
     [Fact]

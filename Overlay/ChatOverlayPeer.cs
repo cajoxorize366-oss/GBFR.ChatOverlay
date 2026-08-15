@@ -1846,11 +1846,27 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     {
         DrawLanguageSetting();
         ImGui.Separator();
+        ImGui.Text(T("诊断", "Diagnostics"));
+        DrawDiagnosticsSettingsSection();
+        ImGui.Separator();
         ImGui.Text(T("聊天框", "Chat Overlay"));
         DrawChatLayoutSettingsSection();
         ImGui.Separator();
         ImGui.Text(T("按键", "Hotkeys"));
         DrawHotkeySettingsSection();
+    }
+
+    private void DrawDiagnosticsSettingsSection()
+    {
+        var configuration = _getConfiguration();
+        DrawConfigurationCheckbox(
+            T("调试日志", "Debug Log"),
+            configuration.EnableDebugLogging,
+            (value, enabled) => value.EnableDebugLogging = enabled);
+        ImGui.TextWrapped(
+            T(
+                "启用后会在 Mod 文件夹写入 GBFR.ChatOverlay.debug.log；分享前请检查玩家名称/平台标识。",
+                "When enabled, GBFR.ChatOverlay.debug.log is written to the Mod folder; check player names/platform identifiers before sharing."));
     }
 
     private void DrawLanguageSetting()

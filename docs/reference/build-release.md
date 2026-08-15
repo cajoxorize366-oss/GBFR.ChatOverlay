@@ -39,7 +39,7 @@ dotnet test tests\GBFR.ChatOverlay.Tests\GBFR.ChatOverlay.Tests.csproj `
   --no-build `
   --no-restore
 
-.\ci\package-chat.ps1 -Version 0.7.0
+.\ci\package-chat.ps1 -Version 0.7.1
 ```
 
 Before publishing, clone or update Extra Sigil Slots main and run:
@@ -55,8 +55,8 @@ The sync gate normalizes line endings and requires exact source parity for Overl
 `ci/package-chat.ps1` creates:
 
 ```text
-artifacts/GBFR.ChatOverlay-0.7.0-Relink-2.0.4.zip
-artifacts/GBFR.ChatOverlay-0.7.0-Relink-2.0.4.zip.sha256
+artifacts/GBFR.ChatOverlay-0.7.1-Relink-2.0.4.zip
+artifacts/GBFR.ChatOverlay-0.7.1-Relink-2.0.4.zip.sha256
 ```
 
 The ZIP has one top-level `GBFR.ChatOverlay/` directory. The script:

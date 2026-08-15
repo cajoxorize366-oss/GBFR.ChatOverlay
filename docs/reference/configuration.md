@@ -102,4 +102,4 @@ Changing microphone or playback rebuilds the local test immediately. Party voice
 
 ## Reset and migration
 
-There is no alternate legacy configuration directory in 0.7.0. To reset all settings, close the game and delete `Config.json`; Reloaded creates a new file from the defaults on the next load. Deleting or replacing the mod package does not automatically delete the user configuration.
+There is no alternate legacy configuration directory in 0.7.1. To reset all settings, close the game and delete `Config.json`; Reloaded creates a new file from the defaults on the next load. Deleting or replacing the mod package does not automatically delete the user configuration.

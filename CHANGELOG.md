@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.1 - 2026-08-15
+
+Maintenance release that adds opt-in Debug Log support and hardens the diagnostics lifecycle.
 
 ### Diagnostics
 

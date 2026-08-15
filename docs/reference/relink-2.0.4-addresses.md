@@ -2,7 +2,7 @@
 
 ## Scope and notation
 
-This document records the fixed-build contract used by 0.7.0. Values labelled **RVA** are relative to the loaded base of `granblue_fantasy_relink.exe`; they are not absolute process addresses. Object offsets are relative to a verified live object. Party functions are resolved by export name from the verified `PartyWin.dll`.
+This document records the fixed-build contract used by 0.7.1. Values labelled **RVA** are relative to the loaded base of `granblue_fantasy_relink.exe`; they are not absolute process addresses. Object offsets are relative to a verified live object. Party functions are resolved by export name from the verified `PartyWin.dll`.
 
 Supported executable SHA-256:
 

@@ -48,7 +48,7 @@ The RPC hook copies `0x1A0` bytes before decoding.
 | message buffer | `0x1C`, `0x160` bytes |
 | maximum text payload | `0x15D` UTF-8 bytes |
 | message hash | `0x17C`, 4 bytes |
-| sender/cue label | `0x180`, `0x18` bytes |
+| sender/cue label | `0x180`, `0x18` bytes; generic `vo_CMM_*` or character resource `PL<digits>_VO_CMM_*` |
 | category | `0x198`, 4 bytes |
 | metadata | `0x19C`, 4 bytes |
 | raw text hash | `0x887AE0B0` |
@@ -96,7 +96,7 @@ The dispatcher at RVA `0x003EA670` accepts automatic categories `0` through `19`
 
 `SendMessage` copies both the category and cue label into the `0x1A0` party packet and submits the packet for each active member slot. The receive path retains the category through the WordFilter closure and the official communication/chat event. Consequently, packet submission and local presentation are not delivery acknowledgements for the receiver's official chat history.
 
-The managed detour normalizes only verified raw `vo_CMM_*` categories `0..19` to normal text category `-1` before calling the original function. It does not clear or rewrite the cue label, so local attribution and the mod's Victory, Link Attack, Thanks, or generic Official presentation remain intact. All other hashes, labels, and categories pass through unchanged.
+The managed detour normalizes only verified raw communication categories `0..19` to normal text category `-1` before calling the original function. Verified labels include generic `vo_CMM_*` keys and character resources shaped as `PL<digits>_VO_CMM_*`; embedded name text and emote resources are rejected. The detour does not clear or rewrite the cue label. On receive, the cue decoded from the original RPC packet is retained in the pending WordFilter association and is authoritative over an empty or weaker callback cue, while the callback remains authoritative for the final filtered text. All other hashes, labels, and categories pass through unchanged.
 
 ## Player name and EntityId layouts
 

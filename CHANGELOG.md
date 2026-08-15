@@ -5,6 +5,7 @@
 ### Native chat
 
 - Forward verified raw `vo_CMM_*` automatic communication as normal chat category `-1` so receivers can retain Link Attack, victory, and other automatic text in the official chat history. The presentation cue, native WordFilter path, attribution, and non-raw official actions remain unchanged.
+- Preserve the automatic communication cue decoded from the original RPC packet across native WordFilter completion, and recognize character voice resource labels such as `PL1800_VO_CMM_CHANCE`, `PL1800_VO_CMM_THANKS`, and `PL1800_VO_CMM_WIN` without treating arbitrary player names as protocol labels.
 
 ## 0.7.1 - 2026-08-15
 

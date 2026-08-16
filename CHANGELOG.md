@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.2 - 2026-08-16
+
+Maintenance release that improves automatic communication delivery in official chat history and stabilizes IME and chat-history focus behavior.
 
 ### Native chat
 
@@ -13,6 +15,10 @@
 - Keep the chat activation key out of the input buffer until its physical release, while retaining the one-frame focus handoff that prevents the opening keystroke from becoming message text.
 - Follow chat history to the newest line when the composer opens or a local message is sent. Remote messages continue to preserve an intentional scrolled-up reading position.
 - Show only the keyboard and controller Settings Menu bindings in Reloaded-II's external configurator. All other hotkeys remain persisted and are edited from the in-game menu.
+
+### Release
+
+- Release ZIP naming is `GBFR.ChatOverlay-0.7.2-Relink-2.0.4.zip`.
 
 ## 0.7.1 - 2026-08-15
 

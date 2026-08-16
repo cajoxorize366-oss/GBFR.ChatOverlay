@@ -12,6 +12,7 @@
 - Forward real Win32 focus transitions to both Dear ImGui and Relink, reset stale composition state on deactivation, and accept IME lifecycle messages as soon as chat opening is requested without accepting committed text before the composer exists.
 - Keep the chat activation key out of the input buffer until its physical release, while retaining the one-frame focus handoff that prevents the opening keystroke from becoming message text.
 - Follow chat history to the newest line when the composer opens or a local message is sent. Remote messages continue to preserve an intentional scrolled-up reading position.
+- Show only the keyboard and controller Settings Menu bindings in Reloaded-II's external configurator. All other hotkeys remain persisted and are edited from the in-game menu.
 
 ## 0.7.1 - 2026-08-15
 

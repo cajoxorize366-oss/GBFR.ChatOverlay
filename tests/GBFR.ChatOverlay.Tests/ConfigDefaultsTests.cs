@@ -97,6 +97,55 @@ public sealed class ConfigDefaultsTests
     }
 
     [Fact]
+    public void ReloadedConfigurator_ShowsOnlySettingsMenuHotkeys()
+    {
+        var properties = TypeDescriptor.GetProperties(typeof(Config));
+
+        Assert.True(properties[nameof(Config.SettingsMenuKeyboardBinding)]!.IsBrowsable);
+        Assert.True(properties[nameof(Config.SettingsMenuControllerBinding)]!.IsBrowsable);
+
+        foreach (var propertyName in new[]
+                 {
+                     nameof(Config.PushToTalkKeyboardBinding),
+                     nameof(Config.PushToTalkControllerBinding),
+                     nameof(Config.OpenChatKeyboardBinding),
+                     nameof(Config.OpenChatControllerBinding),
+                     nameof(Config.GlobalMuteKeyboardBinding),
+                     nameof(Config.GlobalMuteControllerBinding),
+                     nameof(Config.RemotePlayer1ChatMuteKeyboardBinding),
+                     nameof(Config.RemotePlayer1ChatMuteControllerBinding),
+                     nameof(Config.RemotePlayer2ChatMuteKeyboardBinding),
+                     nameof(Config.RemotePlayer2ChatMuteControllerBinding),
+                     nameof(Config.RemotePlayer3ChatMuteKeyboardBinding),
+                     nameof(Config.RemotePlayer3ChatMuteControllerBinding),
+                 })
+        {
+            Assert.False(properties[propertyName]!.IsBrowsable);
+        }
+    }
+
+    [Fact]
+    public void ConfiguratorHiddenHotkeys_RemainPersistedInJson()
+    {
+        var configuration = new Config
+        {
+            PushToTalkKeyboardBinding = "P",
+            OpenChatControllerBinding = "RS",
+            GlobalMuteKeyboardBinding = "M",
+            RemotePlayer2ChatMuteControllerBinding = "LB+RB",
+        };
+
+        var json = JsonSerializer.Serialize(configuration);
+        var restored = JsonSerializer.Deserialize<Config>(json);
+
+        Assert.NotNull(restored);
+        Assert.Equal("P", restored.PushToTalkKeyboardBinding);
+        Assert.Equal("RS", restored.OpenChatControllerBinding);
+        Assert.Equal("M", restored.GlobalMuteKeyboardBinding);
+        Assert.Equal("LB+RB", restored.RemotePlayer2ChatMuteControllerBinding);
+    }
+
+    [Fact]
     public void ImeCandidateFallback_IsEnabledForThirdPartyInputMethods()
     {
         Assert.True(new Config().EnableImeCandidateFallback);

@@ -50,6 +50,8 @@ Default player colors are `#5ED9FF`, `#FFAD5E`, `#71DF8A`, and `#C69CFF`.
 | global chat mute | unbound | unbound |
 | remote players 1-3 chat mute | unbound | unbound |
 
+Reloaded-II's external property grid exposes only the keyboard and controller bindings for the settings menu, so the recovery path remains editable before the game starts. Chat, push-to-talk, mute, player-mute, and quick-action bindings are edited in the in-game settings menu. Hidden bindings remain normal serialized `Config.json` values and are not reset by an external save.
+
 Keyboard bindings may use Ctrl, Shift, or Alt plus one primary key. Controller bindings use one or two standard/extended buttons. `DPadDown` is invalid because it belongs to Relink's official communication shortcut.
 
 There is no separate quick-action panel hotkey. Individual quick actions run directly from their own keyboard-only `KeyboardBinding`. Their kinds are:

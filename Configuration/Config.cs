@@ -30,24 +30,28 @@ public class Config : Configurable<Config>
     [DefaultValue(false)]
     public bool EnableDebugLogging { get; set; }
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("语音键（手柄） / PTT (Controller)")]
     [Description("按住说话的手柄按键。 / Controller button used for push-to-talk.")]
     [DefaultValue("")]
     public string PushToTalkControllerBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("语音键（键盘） / PTT (Keyboard)")]
     [Description("按住说话的键盘按键。 / Keyboard key used for push-to-talk.")]
     [DefaultValue("U")]
     public string PushToTalkKeyboardBinding { get; set; } = "U";
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("聊天键（手柄） / Chat (Controller)")]
     [Description("打开聊天的手柄按键。 / Controller button used to open chat.")]
     [DefaultValue("")]
     public string OpenChatControllerBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("聊天键（键盘） / Chat (Keyboard)")]
     [Description("打开聊天的键盘按键。 / Keyboard key used to open chat.")]
@@ -149,48 +153,56 @@ public class Config : Configurable<Config>
     [DefaultValue(false)]
     public bool CompactMode { get; set; }
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("全局聊天禁言（手柄） / Block All Chat (Controller)")]
     [Description("切换所有玩家的聊天黑名单。 / Toggle the chat blacklist for all players.")]
     [DefaultValue("")]
     public string GlobalMuteControllerBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("全局聊天禁言（键盘） / Block All Chat (Keyboard)")]
     [Description("切换所有玩家的聊天黑名单。 / Toggle the chat blacklist for all players.")]
     [DefaultValue("")]
     public string GlobalMuteKeyboardBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("玩家 1 聊天禁言（手柄） / Player 1 Chat Mute (Controller)")]
     [Description("切换远端玩家 1 的聊天黑名单。 / Toggle remote Player 1 in the chat blacklist.")]
     [DefaultValue("")]
     public string RemotePlayer1ChatMuteControllerBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("玩家 1 聊天禁言（键盘） / Player 1 Chat Mute (Keyboard)")]
     [Description("切换远端玩家 1 的聊天黑名单。 / Toggle remote Player 1 in the chat blacklist.")]
     [DefaultValue("")]
     public string RemotePlayer1ChatMuteKeyboardBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("玩家 2 聊天禁言（手柄） / Player 2 Chat Mute (Controller)")]
     [Description("切换远端玩家 2 的聊天黑名单。 / Toggle remote Player 2 in the chat blacklist.")]
     [DefaultValue("")]
     public string RemotePlayer2ChatMuteControllerBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("玩家 2 聊天禁言（键盘） / Player 2 Chat Mute (Keyboard)")]
     [Description("切换远端玩家 2 的聊天黑名单。 / Toggle remote Player 2 in the chat blacklist.")]
     [DefaultValue("")]
     public string RemotePlayer2ChatMuteKeyboardBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("玩家 3 聊天禁言（手柄） / Player 3 Chat Mute (Controller)")]
     [Description("切换远端玩家 3 的聊天黑名单。 / Toggle remote Player 3 in the chat blacklist.")]
     [DefaultValue("")]
     public string RemotePlayer3ChatMuteControllerBinding { get; set; } = string.Empty;
 
+    [Browsable(false)]
     [Category("00 通用设置 / General")]
     [DisplayName("玩家 3 聊天禁言（键盘） / Player 3 Chat Mute (Keyboard)")]
     [Description("切换远端玩家 3 的聊天黑名单。 / Toggle remote Player 3 in the chat blacklist.")]

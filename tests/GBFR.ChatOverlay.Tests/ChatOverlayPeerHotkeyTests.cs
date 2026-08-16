@@ -12,6 +12,10 @@ public sealed class ChatOverlayPeerHotkeyTests
 {
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
+    private const uint WmSetFocus = 0x0007;
+    private const uint WmKillFocus = 0x0008;
+    private const uint WmActivate = 0x0006;
+    private const uint WmActivateApp = 0x001C;
     private const int VirtualKeyBackspace = 0x08;
 
     [Fact]
@@ -671,6 +675,48 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
+    public void ImeTextCapture_ActivatesBeforeComposerHasRenderedItsFirstFrame()
+    {
+        Assert.True(ChatOverlayPeer.ShouldCaptureImeTextInput(
+            settingsMenuOpen: false,
+            overlayEnabled: true,
+            onlineRoomActive: true,
+            captureKeyboard: true,
+            composerOpen: false,
+            openRequested: true));
+        Assert.True(ChatOverlayPeer.ShouldRouteImeUiMessageToDefault(
+            imeTextContextActive: true,
+            Win32ImeCompatibility.WmImeSetContext));
+        Assert.False(ChatOverlayPeer.ShouldRouteImeUiMessageToDefault(
+            imeTextContextActive: false,
+            Win32ImeCompatibility.WmImeSetContext));
+    }
+
+    [Theory]
+    [InlineData(WmSetFocus, 0)]
+    [InlineData(WmKillFocus, 0)]
+    [InlineData(WmActivate, 0)]
+    [InlineData(WmActivateApp, 0)]
+    [InlineData(WmActivate, 1)]
+    [InlineData(WmActivateApp, 1)]
+    public void WindowFocusTransitionsAreForwardedToBackendInsteadOfConsumed(
+        uint message,
+        int wParam)
+    {
+        Assert.True(ChatOverlayPeer.ShouldForwardWindowFocusMessageToBackend(
+            message,
+            new nint(wParam)));
+    }
+
+    [Fact]
+    public void OrdinaryKeyMessagesAreNotClassifiedAsFocusTransitions()
+    {
+        Assert.False(ChatOverlayPeer.ShouldForwardWindowFocusMessageToBackend(
+            WmKeyDown,
+            new nint('A')));
+    }
+
+    [Fact]
     public void RemovedQuickActionsPanelBinding_IsNotAnEnumCaptureTarget()
     {
         Assert.DoesNotContain("QuickActionsPanel", Enum.GetNames<BindingTarget>());
@@ -1058,6 +1104,49 @@ public sealed class ChatOverlayPeerHotkeyTests
         bool expected)
     {
         Assert.Equal(expected, ChatOverlayPeer.IsHistoryNearBottom(scrollY, scrollMaxY));
+    }
+
+    [Theory]
+    [InlineData(0L, 1L, 0.0f, 0.0f, 0.0f, false, true)]
+    [InlineData(1L, 4L, 96.0f, 100.0f, 160.0f, false, true)]
+    [InlineData(1L, 2L, 40.0f, 100.0f, 160.0f, false, false)]
+    [InlineData(1L, 1L, 100.0f, 100.0f, 140.0f, false, true)]
+    [InlineData(3L, 3L, 100.0f, 100.0f, 120.0f, true, true)]
+    [InlineData(3L, 3L, 40.0f, 100.0f, 120.0f, true, false)]
+    public void HistoryFollow_TracksFirstMessageGrowthReopenAndReaderPosition(
+        long lastRenderedSequence,
+        long latestSequence,
+        float previousScrollY,
+        float previousScrollMaxY,
+        float currentScrollMaxY,
+        bool composerOpenedThisFrame,
+        bool expected)
+    {
+        Assert.Equal(expected, ChatOverlayPeer.ShouldFollowHistory(
+            lastRenderedSequence,
+            latestSequence,
+            previousScrollY,
+            previousScrollMaxY,
+            currentScrollMaxY,
+            composerOpenedThisFrame));
+    }
+
+    [Theory]
+    [InlineData(float.NaN, 100.0f, 120.0f)]
+    [InlineData(100.0f, float.NaN, 120.0f)]
+    [InlineData(100.0f, 100.0f, float.NaN)]
+    public void HistoryFollow_RejectsNonFiniteScrollMeasurements(
+        float previousScrollY,
+        float previousScrollMaxY,
+        float currentScrollMaxY)
+    {
+        Assert.False(ChatOverlayPeer.ShouldFollowHistory(
+            3,
+            3,
+            previousScrollY,
+            previousScrollMaxY,
+            currentScrollMaxY,
+            composerOpenedThisFrame: false));
     }
 
     [Theory]

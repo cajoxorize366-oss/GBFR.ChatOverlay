@@ -35,6 +35,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     private const uint WmSetFocus = 0x0007;
     private const uint WmSysKeyDown = 0x0104;
     private const uint WmSysKeyUp = 0x0105;
+    private const uint WmSysChar = 0x0106;
+    private const uint WmUniChar = 0x0109;
     private const uint WmKillFocus = 0x0008;
     private const uint WmActivate = 0x0006;
     private const uint WmActivateApp = 0x001C;
@@ -1722,7 +1724,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                         imeCandidateText,
                         showTopSeparator: true,
                         compactStatusOnly: false,
-                        readOnly: false);
+                        readOnly: false,
+                        openedThisFrame: openedThisFrame);
                 else if (!string.IsNullOrEmpty(_statusText))
                     ImGui.TextWrapped(_statusText);
             }
@@ -1734,7 +1737,8 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                     imeCandidateText,
                     showTopSeparator: false,
                     compactStatusOnly: true,
-                    readOnly: editMode);
+                    readOnly: editMode,
+                    openedThisFrame: openedThisFrame);
             }
             if (editMode)
             {
@@ -3924,9 +3928,11 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
                 DrawHistoryMessage(configuration, message, hostPlayerNumber);
 
             var latestSequence = snapshot.Count > 0 ? snapshot[^1].Sequence : 0;
+            var latestKind = snapshot.Count > 0 ? snapshot[^1].Kind : ChatMessageKind.System;
             var shouldScroll = ShouldFollowHistory(
                 _lastRenderedSequence,
                 latestSequence,
+                latestKind,
                 previousScrollY,
                 previousScrollMaxY,
                 ImGui.GetScrollMaxY(),
@@ -4107,6 +4113,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
     internal static bool ShouldFollowHistory(
         long lastRenderedSequence,
         long latestSequence,
+        ChatMessageKind latestKind,
         float previousScrollY,
         float previousScrollMaxY,
         float currentScrollMaxY,
@@ -4116,14 +4123,16 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
             return false;
         if (lastRenderedSequence == 0)
             return true;
+        var hasNewMessages = latestSequence != lastRenderedSequence;
+        if (composerOpenedThisFrame || (hasNewMessages && latestKind == ChatMessageKind.Self))
+            return true;
         if (!IsHistoryNearBottom(previousScrollY, previousScrollMaxY))
             return false;
 
-        var hasNewMessages = latestSequence != lastRenderedSequence;
         var contentHeightGrew = float.IsFinite(previousScrollMaxY) &&
                                 float.IsFinite(currentScrollMaxY) &&
                                 currentScrollMaxY > previousScrollMaxY + HistoryScrollGrowthTolerance;
-        return composerOpenedThisFrame || hasNewMessages || contentHeightGrew;
+        return hasNewMessages || contentHeightGrew;
     }
 
     internal static float CalculateHistoryChildHeight(bool composerOpen, float candidateHeight)
@@ -4184,13 +4193,14 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         string? imeCandidateText,
         bool showTopSeparator,
         bool compactStatusOnly,
-        bool readOnly)
+        bool readOnly,
+        bool openedThisFrame)
     {
         if (showTopSeparator)
             ImGui.Separator();
         if (!compactStatusOnly)
             DrawImeCandidateFallback(imeCandidateText);
-        if (!readOnly && _focusInputNextFrame)
+        if (!readOnly && _focusInputNextFrame && !openedThisFrame)
         {
             ImGui.SetKeyboardFocusHere(0);
             _focusInputNextFrame = false;
@@ -4280,6 +4290,12 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         ObserveKeyboardFocusTransition(message, wParam);
         if (ShouldForwardWindowFocusMessageToBackend(message, wParam))
             return OverlayWindowMessageResult.Continue;
+        if (ShouldDiscardPendingActivationText(
+                Volatile.Read(ref _swallowActivationKeyUntilRelease) != 0,
+                message))
+        {
+            return OverlayWindowMessageResult.HandledWith(nint.Zero);
+        }
         if (TryHandleImeCharacter(windowHandle, message, wParam))
             return OverlayWindowMessageResult.HandledWith(nint.Zero);
         if (ShouldRouteImeUiToDefault(message))
@@ -4446,6 +4462,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         }
 
         Interlocked.Exchange(ref _windowVoicePushToTalkPhysicalDown, 0);
+        Interlocked.Exchange(ref _swallowActivationKeyUntilRelease, 0);
         _windowVoicePushToTalkGate.ForceMute();
         ClearImeInteractionState();
         if (_session.Composer.IsOpen)
@@ -4577,7 +4594,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         VirtualKeyShift or VirtualKeyControl or VirtualKeyAlt or
         0xA0 or 0xA1 or 0xA2 or 0xA3 or 0xA4 or 0xA5;
 
-    internal static bool ShouldCaptureImeTextInput(
+    internal static bool ShouldActivateImeLifecycle(
         bool settingsMenuOpen,
         bool overlayEnabled,
         bool onlineRoomActive,
@@ -4587,7 +4604,16 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         settingsMenuOpen ||
         (overlayEnabled && onlineRoomActive && captureKeyboard && (composerOpen || openRequested));
 
-    private bool IsImeTextContextActive() => ShouldCaptureImeTextInput(
+    internal static bool ShouldCaptureImeCharacterInput(
+        bool settingsMenuOpen,
+        bool overlayEnabled,
+        bool onlineRoomActive,
+        bool captureKeyboard,
+        bool composerOpen) =>
+        settingsMenuOpen ||
+        (overlayEnabled && onlineRoomActive && captureKeyboard && composerOpen);
+
+    private bool IsImeLifecycleContextActive() => ShouldActivateImeLifecycle(
         Volatile.Read(ref _settingsMenuOpen) != 0,
         _getConfiguration().EnableOverlay,
         IsOnlineRoomActive(),
@@ -4595,13 +4621,27 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
         _session.Composer.IsOpen,
         Volatile.Read(ref _openRequested) != 0);
 
+    private bool IsImeCharacterContextActive() => ShouldCaptureImeCharacterInput(
+        Volatile.Read(ref _settingsMenuOpen) != 0,
+        _getConfiguration().EnableOverlay,
+        IsOnlineRoomActive(),
+        Volatile.Read(ref _captureKeyboard) != 0,
+        _session.Composer.IsOpen);
+
     internal static bool ShouldRouteImeUiMessageToDefault(
-        bool imeTextContextActive,
+        bool imeLifecycleContextActive,
         uint message) =>
-        imeTextContextActive && Win32ImeCompatibility.IsImeUiMessage(message);
+        imeLifecycleContextActive && Win32ImeCompatibility.IsImeUiMessage(message);
 
     internal static bool ShouldForwardWindowFocusMessageToBackend(uint message, nint wParam) =>
         message is WmSetFocus or WmKillFocus or WmActivate or WmActivateApp;
+
+    internal static bool ShouldDiscardPendingActivationText(
+        bool activationKeyPendingRelease,
+        uint message) =>
+        activationKeyPendingRelease &&
+        (message is WmChar or WmSysChar or WmUniChar ||
+         message == Win32ImeCompatibility.WmImeChar);
 
     private static bool IsWindowDeactivationMessage(uint message, nint wParam) =>
         message == WmKillFocus ||
@@ -4615,9 +4655,10 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     private bool TryHandleImeCharacter(nint windowHandle, uint message, nint wParam)
     {
-        if (!IsImeTextContextActive())
+        if (!IsImeCharacterContextActive())
         {
-            ClearImeInteractionState();
+            if (!IsImeLifecycleContextActive())
+                ClearImeInteractionState();
             return false;
         }
 
@@ -4686,7 +4727,7 @@ public sealed class ChatOverlayPeer : IGbfrOverlayGraphicsClient, IDisposable
 
     private bool ShouldRouteImeUiToDefault(uint message)
     {
-        if (!ShouldRouteImeUiMessageToDefault(IsImeTextContextActive(), message))
+        if (!ShouldRouteImeUiMessageToDefault(IsImeLifecycleContextActive(), message))
             return false;
 
         if (message == Win32ImeCompatibility.WmImeEndComposition)

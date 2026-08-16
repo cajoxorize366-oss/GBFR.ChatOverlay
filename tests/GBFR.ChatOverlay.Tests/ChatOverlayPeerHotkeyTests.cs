@@ -12,7 +12,10 @@ public sealed class ChatOverlayPeerHotkeyTests
 {
     private const uint WmKeyDown = 0x0100;
     private const uint WmKeyUp = 0x0101;
+    private const uint WmChar = 0x0102;
     private const uint WmSetFocus = 0x0007;
+    private const uint WmSysChar = 0x0106;
+    private const uint WmUniChar = 0x0109;
     private const uint WmKillFocus = 0x0008;
     private const uint WmActivate = 0x0006;
     private const uint WmActivateApp = 0x001C;
@@ -658,7 +661,7 @@ public sealed class ChatOverlayPeerHotkeyTests
     [InlineData(true, false, false, false, false, true)]
     [InlineData(false, true, true, true, true, true)]
     [InlineData(false, true, false, true, true, false)]
-    public void ImeTextCapture_IncludesSettingsAndActiveChatComposer(
+    public void ImeLifecycle_IncludesSettingsAndActiveChatComposer(
         bool settingsMenuOpen,
         bool overlayEnabled,
         bool onlineRoomActive,
@@ -666,7 +669,7 @@ public sealed class ChatOverlayPeerHotkeyTests
         bool composerOpen,
         bool expected)
     {
-        Assert.Equal(expected, ChatOverlayPeer.ShouldCaptureImeTextInput(
+        Assert.Equal(expected, ChatOverlayPeer.ShouldActivateImeLifecycle(
             settingsMenuOpen,
             overlayEnabled,
             onlineRoomActive,
@@ -675,9 +678,9 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Fact]
-    public void ImeTextCapture_ActivatesBeforeComposerHasRenderedItsFirstFrame()
+    public void ImeLifecycle_ActivatesBeforeComposerHasRenderedItsFirstFrame()
     {
-        Assert.True(ChatOverlayPeer.ShouldCaptureImeTextInput(
+        Assert.True(ChatOverlayPeer.ShouldActivateImeLifecycle(
             settingsMenuOpen: false,
             overlayEnabled: true,
             onlineRoomActive: true,
@@ -685,11 +688,106 @@ public sealed class ChatOverlayPeerHotkeyTests
             composerOpen: false,
             openRequested: true));
         Assert.True(ChatOverlayPeer.ShouldRouteImeUiMessageToDefault(
-            imeTextContextActive: true,
+            imeLifecycleContextActive: true,
             Win32ImeCompatibility.WmImeSetContext));
         Assert.False(ChatOverlayPeer.ShouldRouteImeUiMessageToDefault(
-            imeTextContextActive: false,
+            imeLifecycleContextActive: false,
             Win32ImeCompatibility.WmImeSetContext));
+    }
+
+    [Fact]
+    public void ImeCommittedTextCapture_WaitsForTheActualComposer()
+    {
+        Assert.False(ChatOverlayPeer.ShouldCaptureImeCharacterInput(
+            settingsMenuOpen: false,
+            overlayEnabled: true,
+            onlineRoomActive: true,
+            captureKeyboard: true,
+            composerOpen: false));
+        Assert.True(ChatOverlayPeer.ShouldCaptureImeCharacterInput(
+            settingsMenuOpen: false,
+            overlayEnabled: true,
+            onlineRoomActive: true,
+            captureKeyboard: true,
+            composerOpen: true));
+    }
+
+    [Theory]
+    [InlineData(WmChar)]
+    [InlineData(WmSysChar)]
+    [InlineData(WmUniChar)]
+    [InlineData(Win32ImeCompatibility.WmImeChar)]
+    public void PendingChatActivation_DiscardsGeneratedTextUntilKeyRelease(uint message)
+    {
+        Assert.True(ChatOverlayPeer.ShouldDiscardPendingActivationText(
+            activationKeyPendingRelease: true,
+            message));
+        Assert.False(ChatOverlayPeer.ShouldDiscardPendingActivationText(
+            activationKeyPendingRelease: false,
+            message));
+    }
+
+    [Fact]
+    public void OpenChatHotkey_DiscardsItsGeneratedCharacterUntilRelease()
+    {
+        var configuration = new Config
+        {
+            EnableOverlay = true,
+            OpenChatKeyboardBinding = "Y",
+        };
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true);
+        SetInitialized(peer);
+
+        var keyDown = peer.ObserveWindowMessage(nint.Zero, WmKeyDown, new nint('Y'), nint.Zero);
+        var activationCharacter = peer.ObserveWindowMessage(
+            nint.Zero,
+            WmChar,
+            new nint('y'),
+            nint.Zero);
+        var keyUp = peer.ObserveWindowMessage(nint.Zero, WmKeyUp, new nint('Y'), nint.Zero);
+        var laterCharacter = peer.ObserveWindowMessage(
+            nint.Zero,
+            WmChar,
+            new nint('a'),
+            nint.Zero);
+
+        Assert.True(keyDown.Handled);
+        Assert.True(activationCharacter.Handled);
+        Assert.True(keyUp.Handled);
+        Assert.False(laterCharacter.Handled);
+    }
+
+    [Fact]
+    public void FocusLoss_ClearsPendingActivationTextSuppression()
+    {
+        var configuration = new Config
+        {
+            EnableOverlay = true,
+            OpenChatKeyboardBinding = "Y",
+        };
+        using var peer = CreatePeer(
+            configuration,
+            new RecordingTransport(),
+            isOnlineRoomActive: () => true);
+        SetInitialized(peer);
+
+        peer.ObserveWindowMessage(nint.Zero, WmKeyDown, new nint('Y'), nint.Zero);
+        var focusLoss = peer.ObserveWindowMessage(
+            nint.Zero,
+            WmKillFocus,
+            nint.Zero,
+            nint.Zero);
+        var characterAfterFocusLoss = peer.ObserveWindowMessage(
+            nint.Zero,
+            WmChar,
+            new nint('a'),
+            nint.Zero);
+
+        Assert.False(focusLoss.Handled);
+        Assert.False(characterAfterFocusLoss.Handled);
     }
 
     [Theory]
@@ -1107,15 +1205,17 @@ public sealed class ChatOverlayPeerHotkeyTests
     }
 
     [Theory]
-    [InlineData(0L, 1L, 0.0f, 0.0f, 0.0f, false, true)]
-    [InlineData(1L, 4L, 96.0f, 100.0f, 160.0f, false, true)]
-    [InlineData(1L, 2L, 40.0f, 100.0f, 160.0f, false, false)]
-    [InlineData(1L, 1L, 100.0f, 100.0f, 140.0f, false, true)]
-    [InlineData(3L, 3L, 100.0f, 100.0f, 120.0f, true, true)]
-    [InlineData(3L, 3L, 40.0f, 100.0f, 120.0f, true, false)]
+    [InlineData(0L, 1L, ChatMessageKind.Party, 0.0f, 0.0f, 0.0f, false, true)]
+    [InlineData(1L, 4L, ChatMessageKind.Party, 96.0f, 100.0f, 160.0f, false, true)]
+    [InlineData(1L, 2L, ChatMessageKind.Party, 40.0f, 100.0f, 160.0f, false, false)]
+    [InlineData(1L, 2L, ChatMessageKind.Self, 40.0f, 100.0f, 160.0f, false, true)]
+    [InlineData(1L, 1L, ChatMessageKind.Party, 100.0f, 100.0f, 140.0f, false, true)]
+    [InlineData(3L, 3L, ChatMessageKind.Party, 100.0f, 100.0f, 120.0f, true, true)]
+    [InlineData(3L, 3L, ChatMessageKind.Party, 40.0f, 100.0f, 120.0f, true, true)]
     public void HistoryFollow_TracksFirstMessageGrowthReopenAndReaderPosition(
         long lastRenderedSequence,
         long latestSequence,
+        ChatMessageKind latestKind,
         float previousScrollY,
         float previousScrollMaxY,
         float currentScrollMaxY,
@@ -1125,6 +1225,7 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.Equal(expected, ChatOverlayPeer.ShouldFollowHistory(
             lastRenderedSequence,
             latestSequence,
+            latestKind,
             previousScrollY,
             previousScrollMaxY,
             currentScrollMaxY,
@@ -1143,6 +1244,7 @@ public sealed class ChatOverlayPeerHotkeyTests
         Assert.False(ChatOverlayPeer.ShouldFollowHistory(
             3,
             3,
+            ChatMessageKind.Party,
             previousScrollY,
             previousScrollMaxY,
             currentScrollMaxY,
